@@ -34,6 +34,12 @@ export interface LocalModel {
   contextLength: number;
   /** Chat template family (llama.cpp `--chat-template` value) if known. */
   chatTemplate?: string;
+  /**
+   * Speculative-decoding draft pairing: a local model name to use as the
+   * draft, or false to disable auto-pairing. Unset = auto-pair a same-family
+   * small model when one is installed (maya.json).
+   */
+  draftModel?: string | false;
 }
 
 export type RuntimeBackend = 'llama.cpp' | 'mlx';

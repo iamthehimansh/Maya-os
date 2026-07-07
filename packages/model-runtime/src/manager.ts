@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import fs2 from "node:fs";
 import net from "node:net";
 import type {
   GuardrailPolicy,
@@ -12,7 +13,7 @@ import type {
 import { detectLlamaCpp, llamaServerArgs } from "./backends/llamacpp.js";
 import { planFit } from "./estimate.js";
 import { availableRam, processRss } from "./ram.js";
-import { findModel, quantLadderFrom } from "./registry.js";
+import { findModel, quantLadderFrom, scanModels } from "./registry.js";
 import { InstanceSupervisor, type SupervisorEvent } from "./supervisor.js";
 
 export interface LoadOpts {
@@ -106,10 +107,31 @@ export class RuntimeManager extends EventEmitter {
 
     const port = await freePort(BASE_PORT + this.managed.size);
     const file = local.files.find((f) => f.quant === plan.quant)!;
+    // Speculative decoding: explicit draftModel in maya.json wins (false =
+    // off); else auto-pair the smallest same-family model <=25% of the main
+    // file. Draft startup failure (vocab mismatch) falls back to no-draft.
+    const draft = this.resolveDraft(local);
+    // mlock pins weights against swap — only when RAM is comfortable (>=20%
+    // headroom over the estimate), so tight fits never fight the kernel.
+    const ram = await availableRam();
+    const comfortable = ram.availableBytes - this.guardrails.minFreeRamBytes >= plan.estimateBytes * 1.2;
+    const extra = comfortable ? ["--mlock"] : [];
+    const argsFor = (opts2: { noMmap?: boolean; draft?: string }): string[] =>
+      llamaServerArgs({
+        modelPath: file.path,
+        port,
+        contextLength: plan.contextLength,
+        alias: model,
+        ...(opts2.draft ? { draftPath: opts2.draft } : {}),
+        extra: opts2.noMmap ? [...extra, "--no-mmap"] : extra,
+      });
+    // Fallback chain: with a draft, retry without it (vocab-mismatch is the
+    // likely startup failure); without one, retry --no-mmap (mmap hang bug).
     const supervisor = new InstanceSupervisor({
       id: `${local.name}-${port}`,
       binPath: llama.binPath,
-      args: llamaServerArgs({ modelPath: file.path, port, contextLength: plan.contextLength, alias: model }),
+      args: argsFor(draft ? { draft } : {}),
+      fallbackArgs: draft ? argsFor({}) : argsFor({ noMmap: true }),
       port,
       healthUrl: `http://127.0.0.1:${port}/health`,
       healthCheckIntervalMs: this.guardrails.healthCheckIntervalMs,
@@ -165,9 +187,32 @@ export class RuntimeManager extends EventEmitter {
 
   private async planWithinBudget(local: LocalModel, quant: Quant | undefined, contextLength: number) {
     const ram = await availableRam();
-    const budget = ram.availableBytes - this.guardrails.minFreeRamBytes;
+    // Reserve room for the speculation draft (if one will be paired) so the
+    // main-model plan never overcommits.
+    const draft = this.resolveDraft(local);
+    const draftBytes = draft ? Math.round(fs2.statSync(draft).size * 1.15) : 0;
+    const budget = ram.availableBytes - this.guardrails.minFreeRamBytes - draftBytes;
     if (budget <= 0) return null;
     return planFit(local.files, quant, contextLength, budget, quantLadderFrom);
+  }
+
+  /** Draft GGUF path for speculative decoding, or undefined. */
+  private resolveDraft(local: LocalModel): string | undefined {
+    if (local.draftModel === false) return undefined;
+    const all = scanModels(this.modelsDir);
+    if (typeof local.draftModel === "string") {
+      const named = all.find((m) => m.name === local.draftModel);
+      return named?.files[named.files.length - 1]?.path;
+    }
+    const family = local.name.split(/[-.]/)[0];
+    if (!family) return undefined;
+    const mainBytes = local.files[0]?.bytes ?? 0;
+    const candidates = all
+      .filter((m) => m.name !== local.name && m.name.split(/[-.]/)[0] === family)
+      .map((m) => m.files[m.files.length - 1]!)
+      .filter((f) => f.bytes <= mainBytes * 0.25)
+      .sort((a, b) => a.bytes - b.bytes);
+    return candidates[0]?.path;
   }
 
   async unload(model: ModelId): Promise<void> {

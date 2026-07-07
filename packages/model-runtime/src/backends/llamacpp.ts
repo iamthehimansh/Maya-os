@@ -50,6 +50,8 @@ export interface LlamaServerArgs {
   contextLength: number;
   /** Model name reported in /v1 responses (the ModelId) — without it llama-server echoes the absolute GGUF path, leaking local paths into agent logs. */
   alias?: string;
+  /** Draft model GGUF for speculative decoding (same tokenizer family required — llama-server validates at startup). */
+  draftPath?: string;
   /** Extra raw args appended last (model profiles / power users). */
   extra?: string[];
 }
@@ -74,6 +76,9 @@ export function llamaServerArgs(a: LlamaServerArgs): string[] {
     "--flash-attn", "on",
     "--cache-type-k", "q8_0",
     "--cache-type-v", "q8_0",
+    ...(a.draftPath
+      ? ["--model-draft", a.draftPath, "--gpu-layers-draft", "999", "--cache-type-k-draft", "q8_0", "--cache-type-v-draft", "q8_0"]
+      : []),
     "--no-webui",
     "--metrics",
     ...(a.extra ?? []),
