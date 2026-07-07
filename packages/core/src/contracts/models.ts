@@ -112,7 +112,8 @@ export type RuntimeEvent =
   | { type: 'model_degraded'; model: ModelId; from: Quant; to: Quant; reason: 'ram_pressure' | 'load_failure' }
   | { type: 'instance_restarted'; instanceId: string; model: ModelId; attempt: number }
   | { type: 'ram_pressure'; freeBytes: number; action: 'none' | 'degrade' | 'unload_lru' }
-  | { type: 'pull_progress'; model: ModelId; pct: number };
+  | { type: 'pull_progress'; model: ModelId; pct: number }
+  | { type: 'pull_failed'; model: ModelId; error: string };
 
 /**
  * Gateway control API (admin bearer; consumed by CLI/dashboard/orchestrator):

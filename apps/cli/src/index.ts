@@ -52,6 +52,13 @@ export async function main(argv: string[]): Promise<void> {
       process.exitCode = 1;
       return;
     }
+    const holder = await portHolder(cfg.gateway.port);
+    if (holder) {
+      console.error(`maya serve is already running — gateway :${cfg.gateway.port} is held by pid ${holder}.`);
+      console.error("Use the running instance, or stop it first (announce on the team channel before killing a shared serve).");
+      process.exitCode = 1;
+      return;
+    }
     const manager = new RuntimeManager(cfg.modelsDir, cfg.guardrails, cfg.guardrails.autoDowngradeQuant ? 1800 : 1800);
     manager.on("event", (ev) => console.log(`[runtime] ${JSON.stringify(ev)}`));
     let sidecar: SidecarHandle | null = null;
@@ -174,4 +181,16 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   console.log(HELP);
+}
+
+/** Pid holding a local TCP port, or null when it's free (best-effort, macOS/Linux). */
+async function portHolder(port: number): Promise<string | null> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  try {
+    const { stdout } = await promisify(execFile)("lsof", ["-ti", `:${port}`], { timeout: 3_000 });
+    return stdout.trim().split("\n")[0] || null;
+  } catch {
+    return null; // lsof absent or port free
+  }
 }

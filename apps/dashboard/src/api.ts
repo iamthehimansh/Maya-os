@@ -31,7 +31,8 @@ export type RuntimeEvent =
   | { type: "model_degraded"; model: string; from: string; to: string; reason: string }
   | { type: "instance_restarted"; instanceId: string; model: string; attempt: number }
   | { type: "ram_pressure"; freeBytes: number; action: string }
-  | { type: "pull_progress"; model: string; pct: number };
+  | { type: "pull_progress"; model: string; pct: number }
+  | { type: "pull_failed"; model: string; error: string };
 
 export const getModels = (): Promise<CatalogEntry[]> => fetch("/api/models").then((r) => r.json());
 export const getHealth = (): Promise<Health> => fetch("/api/runtime/health").then((r) => r.json());

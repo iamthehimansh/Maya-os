@@ -55,6 +55,11 @@ export function ModelsView(): React.JSX.Element {
     void refresh();
     const poll = setInterval(() => void refresh(), 10_000); // fallback when SSE drops
     const off = onRuntimeEvents((ev: RuntimeEvent) => {
+      if (ev.type === "pull_failed") {
+        setPullPct(null);
+        setEvents((prev) => [`${new Date().toLocaleTimeString()}  ✗ pull failed: ${ev.model} — ${ev.error}`, ...prev].slice(0, 50));
+        return;
+      }
       if (ev.type === "pull_progress") {
         setPullPct(ev.pct >= 100 || ev.pct < 0 ? null : { model: ev.model, pct: ev.pct });
         if (ev.pct >= 100) scheduleRefresh();
@@ -227,6 +232,8 @@ function describe(ev: RuntimeEvent): string {
       return `↻ ${ev.model} auto-restarted (attempt ${ev.attempt})`;
     case "ram_pressure":
       return `⚠ RAM pressure — ${(ev.freeBytes / GIB).toFixed(1)} GB free, action: ${ev.action}`;
+    case "pull_failed":
+      return `✗ pull failed: ${ev.model} — ${ev.error}`;
     default:
       return JSON.stringify(ev);
   }
