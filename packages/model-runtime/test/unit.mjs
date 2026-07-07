@@ -47,7 +47,7 @@ assert.equal(planFit(files, "Q8_0", 8192, 1 * GIB, quantLadderFrom), null);
 const args = llamaServerArgs({ modelPath: "/m.gguf", port: 41100, contextLength: 4096 });
 assert.deepEqual(args, [
   "--model", "/m.gguf", "--port", "41100", "--host", "127.0.0.1",
-  "--ctx-size", "4096", "--n-gpu-layers", "999", "--no-webui", "--metrics",
+  "--ctx-size", "4096", "--n-gpu-layers", "999", "--jinja", "--no-webui", "--metrics",
 ]);
 
 console.log("UNIT PASS ✅ (12 assertions)");

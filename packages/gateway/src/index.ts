@@ -7,3 +7,4 @@
  * a zero-copy stream passthrough — JS never parses token deltas.
  */
 export { createGateway, startGateway, type GatewayDeps } from "./server.js";
+export { detectSwitchyard, provisionSwitchyard, generateSwitchyardConfig, startSwitchyard, SWITCHYARD_PORT, type SidecarHandle, type SwitchyardInfo } from "./switchyard.js";
