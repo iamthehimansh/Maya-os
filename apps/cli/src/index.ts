@@ -2,6 +2,10 @@ import { defaultGuardrails, ensureDirs, loadConfig, mayaHome } from "@maya-ai/co
 import type { ModelId } from "@maya-ai/core";
 import { RuntimeManager, pullModel, scanModels, detectLlamaCpp } from "@maya-ai/model-runtime";
 import { detectSwitchyard, provisionSwitchyard, startGateway, startSwitchyard, type SidecarHandle } from "@maya-ai/gateway";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import fs from "node:fs";
+import { serveDashboard } from "./dashboard.js";
 
 const HELP = `maya — local-first AI OS for developers (Apple Silicon first)
 
@@ -71,10 +75,20 @@ export async function main(argv: string[]): Promise<void> {
     } else {
       console.log("anthropic api → off (install: maya doctor --install-switchyard; needs ≥1 pulled model)");
     }
+    // Dashboard SPA (same-origin proxy to the gateway — no CORS surface).
+    const dashDist = path.resolve(fileURLToPath(import.meta.url), "../../../dashboard/dist");
+    let dashServer: ReturnType<typeof serveDashboard> | null = null;
+    if (fs.existsSync(path.join(dashDist, "index.html"))) {
+      dashServer = serveDashboard(dashDist, cfg.dashboard.port, cfg.gateway.port);
+      console.log(`dashboard     → http://127.0.0.1:${cfg.dashboard.port}`);
+    } else {
+      console.log("dashboard     → not built (pnpm --filter @maya-ai/dashboard build)");
+    }
     console.log("Ctrl-C to stop (unloads every model instance).");
     const shutdown = (): void => {
       console.log("\nshutting down…");
       server.close();
+      dashServer?.close();
       void Promise.allSettled([manager.unloadAll(), sidecar?.stop() ?? Promise.resolve()]).then(() => process.exit(0));
       setTimeout(() => process.exit(0), 8_000).unref?.();
     };
