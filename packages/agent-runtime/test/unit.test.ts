@@ -42,6 +42,25 @@ describe('buildArgs', () => {
     const args = adapter.buildArgs({ ...baseSpec, prompt: 'x', permissionMode: 'ask' });
     expect(args).not.toContain('--dangerously-skip-permissions');
   });
+
+  it('worker scoping maps to --allowed-tools/--tools and --max-turns', () => {
+    const args = adapter.buildArgs({
+      ...baseSpec,
+      prompt: 'x',
+      options: { allowedTools: ['Write', 'Bash'], maxTurns: 4 },
+    });
+    expect(args.join(' ')).toContain('--allowed-tools Write,Bash');
+    expect(args.join(' ')).toContain('--tools Write,Bash');
+    expect(args.join(' ')).toContain('--max-turns 4');
+  });
+
+  it('no scoping flags when options are absent or empty', () => {
+    const bare = adapter.buildArgs({ ...baseSpec, prompt: 'x' });
+    expect(bare).not.toContain('--allowed-tools');
+    expect(bare).not.toContain('--max-turns');
+    const empty = adapter.buildArgs({ ...baseSpec, prompt: 'x', options: { allowedTools: [] } });
+    expect(empty).not.toContain('--allowed-tools');
+  });
 });
 
 describe('stream-json mapping', () => {
