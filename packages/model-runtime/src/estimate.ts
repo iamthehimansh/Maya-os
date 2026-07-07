@@ -18,7 +18,9 @@ export function estimateLoadBytes(fileBytes: number, contextLength: number): num
   // actually reduces the estimate for small models too (guardrail must have a
   // working second axis at every model size).
   const buffers = Math.max(128 * MIB, Math.min(512 * MIB, weights * 0.25));
-  const kv = weights * 0.15 * (contextLength / 8192);
+  // KV runs quantized to q8 (half of f16) — keep this in sync with the
+  // --cache-type-k/v defaults in backends/llamacpp.ts.
+  const kv = weights * 0.075 * (contextLength / 8192);
   return Math.round(weights + buffers + kv);
 }
 

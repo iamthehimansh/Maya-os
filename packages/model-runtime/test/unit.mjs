@@ -47,7 +47,9 @@ assert.equal(planFit(files, "Q8_0", 8192, 1 * GIB, quantLadderFrom), null);
 const args = llamaServerArgs({ modelPath: "/m.gguf", port: 41100, contextLength: 4096, alias: "local/m" });
 assert.deepEqual(args, [
   "--model", "/m.gguf", "--alias", "local/m", "--port", "41100", "--host", "127.0.0.1",
-  "--ctx-size", "4096", "--n-gpu-layers", "999", "--jinja", "--no-webui", "--metrics",
+  "--ctx-size", "4096", "--n-gpu-layers", "999", "--jinja",
+  "--flash-attn", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
+  "--no-webui", "--metrics",
 ]);
 assert(!llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 1 }).includes("--alias"), "alias optional");
 

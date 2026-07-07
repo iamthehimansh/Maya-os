@@ -68,6 +68,12 @@ export function llamaServerArgs(a: LlamaServerArgs): string[] {
     "--ctx-size", String(a.contextLength),
     "--n-gpu-layers", "999",
     "--jinja", // chat-template engine: required for native tool-calling (agents send tools)
+    // q8 KV cache: halves context RAM for negligible accuracy loss — the
+    // difference between 16k and 32k context on the same low-RAM Mac.
+    // V-quantization requires flash attention, so pin it on (Metal supports it).
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
     "--no-webui",
     "--metrics",
     ...(a.extra ?? []),
