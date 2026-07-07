@@ -80,27 +80,34 @@ describe('LoopLead', () => {
 
     // A "human" watching for the question and answering it.
     const runPromise = lead.run('build the API');
-    const human = await (async () => {
+    await (async () => {
       // Wait for the team channel to exist (first team in the db).
       for (;;) {
         const teams = db.teams();
         if (teams.length > 0) {
           const { token } = mintToken(running!.db, { label: 'himansh', role: 'owner', scopes: [teams[0]!.channelId] });
-          const c = new BusClient({ wsBase, channelId: teams[0]!.channelId, token }).connect();
-          clients.push(c);
-          await new Promise<void>((r) => c.on('joined', () => r()));
-          return c;
+          const human = new BusClient({ wsBase, channelId: teams[0]!.channelId, token });
+          clients.push(human);
+          const answerQuestion = (maya: LoopBody | undefined): void => {
+            if (maya?.kind === 'question') {
+              const answer: LoopBody = { kind: 'answer', qid: maya.qid, optionId: '1' }; // GraphQL
+              human.sendMessage({ body: { text: 'GraphQL', maya: answer } });
+            }
+          };
+          // Handlers attach BEFORE connect: 'joined' and 'history' can arrive
+          // in one TCP segment, firing synchronously back-to-back — a handler
+          // attached after `await joined` misses that batched history frame.
+          // (Question may predate the join; real dashboards read history too.)
+          human.on('message', (m) => answerQuestion(m.body.maya as LoopBody | undefined));
+          human.on('history', (h) => {
+            for (const m of h.messages) answerQuestion(m.body.maya as LoopBody | undefined);
+          });
+          human.connect();
+          return;
         }
         await new Promise((r) => setTimeout(r, 25));
       }
     })();
-    human.on('message', (m) => {
-      const maya = m.body.maya as LoopBody | undefined;
-      if (maya?.kind === 'question') {
-        const answer: LoopBody = { kind: 'answer', qid: maya.qid, optionId: '1' }; // GraphQL
-        human.sendMessage({ body: { text: 'GraphQL', maya: answer } });
-      }
-    });
 
     const report = await runPromise;
     expect(report.outcome).toBe('success');
