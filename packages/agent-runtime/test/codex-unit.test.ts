@@ -24,7 +24,7 @@ describe('buildArgs', () => {
     expect(args).toContain('--json');
     expect(joined).toContain('model_providers.maya.base_url=http://127.0.0.1:4100/v1');
     expect(joined).toContain('model_providers.maya.env_key=MAYA_API_KEY');
-    expect(joined).toContain('model_providers.maya.wire_api=chat');
+    expect(joined).toContain('model_providers.maya.wire_api=responses');
     expect(joined).toContain('model_provider=maya');
     expect(joined).toContain('-m local/qwen2.5-0.5b-instruct');
     expect(args).toContain('--dangerously-bypass-approvals-and-sandbox'); // auto default

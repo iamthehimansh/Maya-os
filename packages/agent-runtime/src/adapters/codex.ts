@@ -83,9 +83,9 @@ export class CodexAdapter implements AgentAdapter {
       '-c', `model_providers.maya.name=Maya`,
       '-c', `model_providers.maya.base_url=${base}/v1`,
       '-c', `model_providers.maya.env_key=MAYA_API_KEY`,
-      // Codex defaults to the OpenAI Responses API (/v1/responses); the Maya
-      // gateway speaks chat completions — pin the wire protocol.
-      '-c', `model_providers.maya.wire_api=chat`,
+      // Codex >=0.142 speaks ONLY the Responses API (wire_api=chat was
+      // removed); the gateway serves /v1/responses via Switchyard translation.
+      '-c', `model_providers.maya.wire_api=responses`,
       '-c', `model_provider=maya`,
       '-m', spec.model,
     ];
