@@ -223,19 +223,13 @@ export class RuntimeManager extends EventEmitter {
       const named = all.find((m) => m.name === local.draftModel);
       return named?.files[named.files.length - 1]?.path;
     }
-    const family = local.name.split(/[-.]/)[0];
-    if (!family) return undefined;
-    const mainBytes = local.files[0]?.bytes ?? 0;
-    // Measured (3B main + 0.5B draft on M2 Pro): 1.01x — a wash. Speculation
-    // pays when the MAIN is slow; only auto-pair for big models. Explicit
-    // maya.json draftModel still overrides for experimentation.
-    if (mainBytes < 4 * 1024 ** 3) return undefined;
-    const candidates = all
-      .filter((m) => m.name !== local.name && m.name.split(/[-.]/)[0] === family)
-      .map((m) => m.files[m.files.length - 1]!)
-      .filter((f) => f.bytes <= mainBytes * 0.25)
-      .sort((a, b) => a.bytes - b.bytes);
-    return candidates[0]?.path;
+    // MEASURED on M2 Pro (llama.cpp Metal, q8 KV): 3B+0.5B draft = 1.01x,
+    // 7B+0.5B draft = 1.00x — speculation buys nothing here while costing the
+    // draft's RAM. Auto-pairing is therefore OFF; explicit maya.json
+    // draftModel remains for experimentation and for backends where it pays
+    // (CUDA batch-verify, future MLX). Plumbing (flags, budget reserve,
+    // no-draft fallback) stays.
+    return undefined;
   }
 
   async unload(model: ModelId): Promise<void> {
