@@ -1,27 +1,35 @@
 /**
- * Maya contract: the Loop protocol (Layer 5–6).
+ * Maya contract: the Loop protocol (Layer 5–6). Owner: agent plane (01).
  *
  * The Loop Agent (interim team lead) coordinates worker agents over the bus.
- * These are the ONLY message kinds loop participants exchange; they travel
- * as walkie-talkie message bodies (body.maya.kind = one of these).
+ * These are the ONLY structured bodies loop participants exchange; they travel
+ * inside walkie-talkie message frames as `body.maya` (see bus.ts). Plain-text
+ * chatter without `body.maya` is allowed but carries no protocol meaning.
  *
- * Kinds are exactly the five agreed in the contract freeze:
- * task_assign / progress / done / question / answer.
+ * v1 kinds (final, reconciled 01+02 drafts):
+ *   task_assign / task_accept / task_progress / task_done / task_failed /
+ *   question / answer / artifact
  */
 
 export type LoopRole = 'lead' | 'worker' | 'human';
 
-export interface LoopEnvelope<K extends LoopMessage['kind'] = LoopMessage['kind']> {
-  /** Protocol marker + version. Non-maya bus traffic simply lacks this. */
-  maya: { v: 1; kind: K };
+export interface ArtifactRef {
+  id: string;
+  kind: 'file' | 'diff' | 'url' | 'report';
+  path?: string;
+  url?: string;
+  title: string;
 }
 
-export type LoopMessage =
+export type LoopBody =
   | TaskAssign
-  | Progress
-  | Done
+  | TaskAccept
+  | TaskProgress
+  | TaskDone
+  | TaskFailed
   | Question
-  | Answer;
+  | Answer
+  | ArtifactMsg;
 
 /** lead → worker. One unit of delegated work. */
 export interface TaskAssign {
@@ -29,32 +37,47 @@ export interface TaskAssign {
   taskId: string;
   /** What to do, self-contained (worker may have no other context). */
   spec: string;
+  /** Task ids that must be done first — the lead schedules around these. */
+  deps?: string[];
   /** Files/dirs this task may touch — leads use this to parallelize safely. */
   scope?: string[];
   /** Definition of done the lead will verify against. */
   acceptance?: string;
-  deadline?: string; // ISO 8601, advisory
+  deadlineTs?: number; // epoch ms, advisory
+}
+
+/**
+ * worker → lead. Explicit claim: until the lead sees this, the task is
+ * unowned and may be reassigned (crash-safe delegation).
+ */
+export interface TaskAccept {
+  kind: 'task_accept';
+  taskId: string;
 }
 
 /** worker → lead. Sent at meaningful checkpoints, not on a timer. */
-export interface Progress {
-  kind: 'progress';
+export interface TaskProgress {
+  kind: 'task_progress';
   taskId: string;
   note: string;
   /** 0–100 best-effort estimate; omit if meaningless. */
-  percent?: number;
+  pct?: number;
 }
 
-/** worker → lead. Terminal for the task — success OR failure (see ok). */
-export interface Done {
-  kind: 'done';
+/** worker → lead. Terminal: success. */
+export interface TaskDone {
+  kind: 'task_done';
   taskId: string;
-  ok: boolean;
   summary: string;
-  /** Paths of produced/modified artifacts, if any. */
-  artifacts?: string[];
-  /** Set when ok=false: what failed + whether retry is sensible. */
-  failure?: { reason: string; retryable: boolean };
+  artifacts?: ArtifactRef[];
+}
+
+/** worker → lead. Terminal: failure. Lead decides retry/reassign/escalate. */
+export interface TaskFailed {
+  kind: 'task_failed';
+  taskId: string;
+  error: string;
+  retryable: boolean;
 }
 
 /**
@@ -64,18 +87,24 @@ export interface Done {
  */
 export interface Question {
   kind: 'question';
-  taskId?: string;      // omitted when the lead asks the human a project-level q
-  questionId: string;
-  text: string;
+  qid: string;
+  taskId?: string;      // omitted when the lead asks a project-level question
+  prompt: string;
   /** Optional discrete options (dashboard renders as buttons). */
   options?: Array<{ id: string; label: string }>;
 }
 
-/** Answer to a Question, matched by questionId. */
+/** Answer to a Question, matched by qid. */
 export interface Answer {
   kind: 'answer';
-  questionId: string;
+  qid: string;
   /** Either a chosen option id or free text. */
   optionId?: string;
   text?: string;
+}
+
+/** Standalone artifact announcement outside a task lifecycle (rare). */
+export interface ArtifactMsg {
+  kind: 'artifact';
+  ref: ArtifactRef;
 }
