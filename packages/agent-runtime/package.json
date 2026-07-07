@@ -1,0 +1,30 @@
+{
+  "name": "@maya-ai/agent-runtime",
+  "version": "0.0.1",
+  "description": "Maya agent runtime — AgentAdapter framework + adapters (Claude Code first): spawn/pause/resume/kill/send, structured events, gateway model wiring.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:smoke": "node test/smoke.mjs"
+  },
+  "dependencies": {
+    "@maya-ai/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  }
+}

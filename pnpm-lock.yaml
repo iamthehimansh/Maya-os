@@ -34,6 +34,22 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
 
+  packages/agent-runtime:
+    dependencies:
+      '@maya-ai/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.20.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/node@22.20.0)
+
   packages/bus:
     dependencies:
       '@hono/node-server':
