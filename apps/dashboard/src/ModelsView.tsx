@@ -165,7 +165,7 @@ export function ModelsView(): React.JSX.Element {
               <tr>
                 <th>Model</th>
                 <th>State</th>
-                <th>Quant</th>
+                <th>Quant · quality</th>
                 <th>Context</th>
                 <th>Memory</th>
                 <th />
@@ -186,7 +186,7 @@ export function ModelsView(): React.JSX.Element {
                         {st.label}
                       </span>
                     </td>
-                    <td>{inst?.quant ?? "–"}</td>
+                    <td>{qualityCell(m, inst?.quant)}</td>
                     <td>{(inst?.contextLength ?? m.contextLength ?? 0).toLocaleString()}</td>
                     <td>{inst?.memoryBytes ? gb(inst.memoryBytes) : "–"}</td>
                     <td style={{ textAlign: "right" }}>
@@ -220,6 +220,12 @@ export function ModelsView(): React.JSX.Element {
       </section>
     </>
   );
+}
+
+function qualityCell(m: CatalogEntry, liveQuant?: string): string {
+  const q = m.quants?.find((x) => x.quant === (liveQuant ?? m.quants?.[0]?.quant));
+  if (!q) return liveQuant ?? "–";
+  return `${q.quant} · ${(q.quality * 100).toFixed(1).replace(/\.0$/, "")}%`;
 }
 
 function describe(ev: RuntimeEvent): string {

@@ -60,3 +60,28 @@ const dargs = llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 20
 assert(dargs.includes("--model-draft") && dargs.includes("/d.gguf") && dargs.includes("--gpu-layers-draft"), "draft flags present");
 assert(!llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 2048 }).includes("--model-draft"), "no draft by default");
 console.log("DRAFT ARGV PASS ✅");
+
+// 2-D planner win case: the old ladder shrank context ONLY on the SMALLEST
+// quant — with [Q6, Q3] asking 32k on a budget where neither fits full,
+// it picked Q3@16k; the 2-D planner finds Q6@16k (better quality, same ctx).
+const files2 = [
+  { quant: "Q6_K", path: "/x/q6.gguf", bytes: 6 * GIB },
+  { quant: "Q3_K_M", path: "/x/q3.gguf", bytes: 5.68 * GIB },
+];
+plan = planFit(files2, "Q6_K", 32768, 7.6 * GIB, quantLadderFrom);
+assert.equal(plan.quant, "Q6_K", "2-D keeps the better quant (old ladder chose Q3)");
+assert.equal(plan.contextLength, 16384, "at the shrunk context");
+
+// full-requested-context at sweet-spot quant beats higher quant at half ctx
+const files3 = [
+  { quant: "Q6_K", path: "/x/q6.gguf", bytes: 6 * GIB },
+  { quant: "Q4_K_M", path: "/x/q4.gguf", bytes: 4 * GIB },
+];
+plan = planFit(files3, "Q6_K", 32768, 7.6 * GIB, quantLadderFrom);
+assert.equal(plan.quant, "Q4_K_M", "context dominates: Q4@full beats Q6@half");
+assert.equal(plan.contextLength, 32768);
+
+// agent floor: when 8k+ fits at ANY quant, never pick a sub-8k plan
+plan = planFit(files3, "Q6_K", 16384, 6.8 * GIB, quantLadderFrom);
+assert(plan.contextLength >= 8192, "agent floor: never sub-8k when 8k+ fits");
+console.log("2D PLANNER PASS ✅");

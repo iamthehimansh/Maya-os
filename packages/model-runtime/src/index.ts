@@ -7,7 +7,7 @@
  */
 export { detectLlamaCpp, llamaServerArgs } from "./backends/llamacpp.js";
 export { pullModel, type PullRequest } from "./download.js";
-export { estimateLoadBytes, planFit, type FitPlan } from "./estimate.js";
+export { QUANT_QUALITY, estimateLoadBytes, planFit, type FitPlan } from "./estimate.js";
 export { RuntimeManager, type LoadOpts } from "./manager.js";
 export { availableRam, processRss, sampleRam, type RamSnapshot } from "./ram.js";
 export { findModel, quantFromFilename, quantLadderFrom, scanModels, writeModelMeta } from "./registry.js";
