@@ -49,6 +49,18 @@ export interface LoopLeadOptions {
   maxRework?: number;
   /** How long to wait for a human answer before proceeding with a default. */
   questionTimeoutMs?: number;
+  /**
+   * Goal-level acceptance: a final check that the GOAL is actually met, run
+   * after per-task verification. It exists because weak planners paraphrase
+   * the goal into task specs that drop hard requirements (02's capstone: goal
+   * demanded exact content `Maya M3 demo complete`, the plan lost it, per-task
+   * gates had nothing to match, the run "succeeded" with wrong content).
+   * Returns the unmet requirements; when non-empty the lead queues one
+   * explicit fix task naming them verbatim, re-checks, and downgrades the
+   * outcome to `partial` if still unmet. Injectable; the default checks a
+   * workspace dir for the goal's required filenames + exact content.
+   */
+  goalCheck?: (goal: string) => Promise<{ met: boolean; missing: string[] }>;
 }
 
 export interface LoopReport {
@@ -156,14 +168,39 @@ export class LoopLead {
         if (!anyRework) break;
       }
 
+      // 5b. Goal-level acceptance — the GOAL, not just the paraphrased tasks.
+      // A weak planner can drop hard requirements; this catches that. Queue ONE
+      // explicit fix task naming the unmet requirements verbatim (so the
+      // per-task gate CAN enforce them), settle, re-check.
+      let goalMissing: string[] = [];
+      if (this.opts.goalCheck) {
+        const first = await this.opts.goalCheck(goal);
+        if (!first.met) {
+          lead.sendMessage({ body: { text: `🎯 goal not yet met — missing: ${first.missing.join(', ')}. Queuing an explicit fix.`.slice(0, 300) } });
+          const fixSpec = `The overall goal is NOT yet satisfied. Do EXACTLY this and nothing else:\n${goal}\nThe following are still missing or wrong — fix them precisely: ${first.missing.join('; ')}`;
+          this.opts.teams.addTask(team.id, fixSpec);
+          await this.opts.teams.settle(team.id);
+          // Verify the fix task too (its spec carries the exact requirements).
+          for (const t of this.opts.db.tasks(team.id, 'done').filter((x) => !verified.has(x.id) && !superseded.has(x.id))) {
+            const v = await this.opts.verifier(t);
+            if (v.ok) verified.add(t.id);
+          }
+          const second = await this.opts.goalCheck(goal);
+          goalMissing = second.met ? [] : second.missing;
+        }
+      }
+
       // 6. Report.
       const all = this.opts.db.tasks(team.id);
       const failed = all.filter((t) => t.state === 'failed');
-      const outcome: LoopReport['outcome'] = failed.length === 0 ? 'success' : failed.length < all.length ? 'partial' : 'failed';
-      const summary =
-        outcome === 'success'
+      const tasksOk = failed.length === 0;
+      const goalOk = goalMissing.length === 0;
+      const outcome: LoopReport['outcome'] = tasksOk && goalOk ? 'success' : failed.length < all.length || goalMissing.length > 0 ? 'partial' : 'failed';
+      const summary = goalOk
+        ? tasksOk
           ? `${all.length} task(s) completed and verified (${questionsAsked} question(s) asked)`
-          : `${all.length - failed.length}/${all.length} tasks completed; failed: ${failed.map((t) => t.id).join(', ')}`;
+          : `${all.length - failed.length}/${all.length} tasks completed; failed: ${failed.map((t) => t.id).join(', ')}`
+        : `goal NOT fully met — still missing: ${goalMissing.join(', ')}`;
       return await finish(outcome, summary, verified);
     } catch (err) {
       return await finish('failed', `lead error: ${String(err).slice(0, 300)}`, new Set());

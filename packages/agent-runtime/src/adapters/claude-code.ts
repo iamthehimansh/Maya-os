@@ -207,14 +207,24 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       return;
     }
     if (type === 'result') {
+      // Token accounting must be robust to the result shape varying through
+      // the Anthropic-compat translation. Primary: top-level `usage`
+      // (input_tokens/output_tokens). Fallback: `modelUsage` (per-model,
+      // camelCase) — sum across models. Emit whichever yields a non-zero.
       const usage = msg['usage'] as { input_tokens?: number; output_tokens?: number } | undefined;
-      if (usage) {
-        this.pushEvent(live, {
-          kind: 'tokens',
-          input: usage.input_tokens ?? 0,
-          output: usage.output_tokens ?? 0,
-          at: now(),
-        });
+      let input = usage?.input_tokens ?? 0;
+      let output = usage?.output_tokens ?? 0;
+      if (input === 0 && output === 0) {
+        const modelUsage = msg['modelUsage'] as Record<string, { inputTokens?: number; outputTokens?: number }> | undefined;
+        if (modelUsage) {
+          for (const u of Object.values(modelUsage)) {
+            input += u.inputTokens ?? 0;
+            output += u.outputTokens ?? 0;
+          }
+        }
+      }
+      if (input > 0 || output > 0) {
+        this.pushEvent(live, { kind: 'tokens', input, output, at: now() });
       }
       const ok = msg['subtype'] === 'success';
       if (typeof msg['result'] === 'string') this.pushLog(live, 'stdout', msg['result']);

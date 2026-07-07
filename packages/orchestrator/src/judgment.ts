@@ -133,8 +133,19 @@ function fileExists(dir: string, name: string): boolean {
 export function requiredContent(spec: string): string[] {
   const base = spec.split('\nREWORK (round')[0] ?? spec;
   const out = new Set<string>();
-  const phrase = /(?:containing|contains?|content(?:s)?|says?|write[s]?|exactly)\s*(?:exactly)?\s*[:=]?\s*[`"“]([^`"”\n]{2,120})[`"”]/gi;
-  for (const m of base.matchAll(phrase)) out.add(m[1]!.trim());
+  // Quoted/backtick literal after a content cue.
+  const quoted = /(?:containing|contains?|content(?:s)?|says?|write[s]?|exactly)\s*(?:exactly)?\s*[:=]?\s*[`"“]([^`"”\n]{2,120})[`"”]/gi;
+  for (const m of base.matchAll(quoted)) out.add(m[1]!.trim());
+  // UNQUOTED after an EXPLICIT exactness cue → capture to end of line (the
+  // natural phrasing `containing exactly: Maya M3 demo complete`, which the
+  // quoted pattern misses — the v2 miss 02 caught live).
+  const unquoted = /(?:contain(?:ing|s)?|content(?:s)?)\s+exactly\s*[:=]?\s*([^\n`"“]{2,120})|(?:content(?:s)?)\s*[:=]\s*([^\n`"“]{2,120})/gi;
+  for (const m of base.matchAll(unquoted)) {
+    const raw = (m[1] ?? m[2] ?? '').trim();
+    // Trim trailing prose/punctuation that isn't part of the literal.
+    const cleaned = raw.replace(/\s*(?:and nothing else|nothing more|then stop|\.)\s*$/i, '').trim();
+    if (cleaned.length >= 2) out.add(cleaned);
+  }
   // Bare backtick literals used as required content (e.g. `MAYA-OK`).
   for (const m of base.matchAll(/`([^`\n]{2,120})`/g)) {
     const s = m[1]!.trim();
@@ -142,6 +153,34 @@ export function requiredContent(spec: string): string[] {
     if (!/\.[A-Za-z]{1,6}$/.test(s) && !/[()]/.test(s)) out.add(s);
   }
   return [...out];
+}
+
+/**
+ * Default goal-level acceptance for the LoopLead: the GOAL's required
+ * filenames must exist and its required exact content must appear in the
+ * workspace — checked against REALITY, independent of how the planner
+ * paraphrased tasks. Case-sensitive filename check (macOS's case-insensitive
+ * FS otherwise passes `status.md` for `STATUS.md`).
+ */
+export function makeGoalCheck(workspaceDir: string): (goal: string) => Promise<{ met: boolean; missing: string[] }> {
+  return async (goal: string) => {
+    const missing: string[] = [];
+    let names: string[] = [];
+    try {
+      names = readdirSync(workspaceDir);
+    } catch {
+      /* unreadable */
+    }
+    const nameSet = new Set(names);
+    for (const f of requiredFilenames(goal)) {
+      if (!nameSet.has(f)) missing.push(`file ${f} (exact name)`);
+    }
+    const haystack = concatWorkspace(workspaceDir);
+    for (const c of requiredContent(goal)) {
+      if (!haystack.includes(c)) missing.push(`content ${JSON.stringify(c)}`);
+    }
+    return { met: missing.length === 0, missing };
+  };
 }
 
 /** Concatenated head of every workspace file — the content-gate haystack. */

@@ -15,7 +15,7 @@ export {
   type Verifier,
 } from './loop-lead.js';
 export { LlmClient, extractJson, type LlmClientOptions } from './llm.js';
-export { makePlanner, makeVerifier, type VerifierOptions } from './judgment.js';
+export { makePlanner, makeVerifier, makeGoalCheck, requiredContent, requiredFilenames, type VerifierOptions } from './judgment.js';
 export {
   startOrchestratorService,
   type OrchestratorServiceOptions,
