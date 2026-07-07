@@ -56,6 +56,7 @@ export async function main(argv: string[]): Promise<void> {
       modelsDir: cfg.modelsDir,
       port: cfg.gateway.port,
       anthropicSidecarPort: () => sidecar?.port,
+      providers: cfg.providers,
       onCatalogChange: () => void sidecar?.refresh().catch((e) => console.error("[switchyard] refresh failed:", e)),
     });
     console.log(`maya gateway  → http://127.0.0.1:${cfg.gateway.port}/v1  (llama.cpp ${llama.version ?? "?"})`);

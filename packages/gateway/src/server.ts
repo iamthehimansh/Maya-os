@@ -1,8 +1,9 @@
-import type { ModelCatalogEntry, ModelId, RuntimeEvent } from "@maya-ai/core";
+import type { ModelCatalogEntry, ModelId, ProviderConfig, RuntimeEvent } from "@maya-ai/core";
 import { type RuntimeManager, availableRam, pullModel, scanModels } from "@maya-ai/model-runtime";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import { resolveProvider } from "./providers.js";
 
 export interface GatewayDeps {
   manager: RuntimeManager;
@@ -14,6 +15,8 @@ export interface GatewayDeps {
   anthropicSidecarPort?: () => number | undefined;
   /** Invoked after a successful model pull (e.g. to refresh the sidecar catalog). */
   onCatalogChange?: () => void;
+  /** User provider overrides from ~/.maya/config.json (env vars stay the on/off switch). */
+  providers?: ProviderConfig[];
 }
 
 interface EventSub {
@@ -50,7 +53,22 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
       return oaiError(`model must be a Maya ModelId like "local/qwen…" (got: ${body.model})`, 400);
     }
     if (!model.startsWith("local/")) {
-      return oaiError(`cloud providers land in M2 — only local/* models are servable right now`, 501);
+      if (model.startsWith("anthropic/")) {
+        return oaiError(`use the Anthropic-compatible endpoint (/v1/messages) for ${model}, or a local/openai-compat model here`, 400);
+      }
+      const resolved = resolveProvider(model, deps.providers ?? []);
+      if ("error" in resolved) return oaiError(resolved.error, resolved.status);
+      // Rewrite the model field to the provider-native name, then stream through.
+      const rewritten = JSON.stringify({ ...(body as Record<string, unknown>), model: resolved.upstreamModel });
+      const upstream = await fetch(`${resolved.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${resolved.apiKey}` },
+        body: rewritten,
+      });
+      return new Response(upstream.body, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
+      });
     }
 
     // On-demand start (Ollama-style): loading respects every guardrail.
@@ -95,6 +113,32 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
   // which translates to OpenAI format and calls back into our /v1. Streaming
   // is a zero-copy passthrough both ways.
   app.post("/v1/messages", async (c) => {
+    const raw = await c.req.arrayBuffer();
+    let model = "";
+    try {
+      model = String((JSON.parse(Buffer.from(raw).toString()) as { model?: string }).model ?? "");
+    } catch {
+      return oaiError("invalid JSON body", 400);
+    }
+    if (model.startsWith("anthropic/")) {
+      // Native passthrough to the real Anthropic API with the real key.
+      const resolved = resolveProvider(model as ModelId, deps.providers ?? []);
+      if ("error" in resolved) return oaiError(resolved.error, resolved.status);
+      const rewritten = JSON.stringify({ ...(JSON.parse(Buffer.from(raw).toString()) as Record<string, unknown>), model: resolved.upstreamModel });
+      const upstream = await fetch(`${resolved.baseUrl}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": resolved.apiKey,
+          "anthropic-version": c.req.header("anthropic-version") ?? "2023-06-01",
+        },
+        body: rewritten,
+      });
+      return new Response(upstream.body, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
+      });
+    }
     const port = deps.anthropicSidecarPort?.();
     if (!port) {
       return oaiError("Anthropic-compatible endpoint needs the Switchyard sidecar — run `maya doctor --install-switchyard`, then restart `maya serve`", 501);
@@ -106,7 +150,7 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
         ...(c.req.header("anthropic-version") ? { "anthropic-version": c.req.header("anthropic-version")! } : {}),
         "x-api-key": "maya",
       },
-      body: await c.req.arrayBuffer(),
+      body: raw,
     });
     return new Response(upstream.body, {
       status: upstream.status,

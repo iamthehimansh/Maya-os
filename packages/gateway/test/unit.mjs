@@ -31,3 +31,22 @@ assert(serverSrc.includes("GRAMMAR_SAFE_MAX_LENGTH = 1024"), "sanitizer cap pres
 assert(serverSrc.includes("/v1/messages"), "anthropic route present");
 
 console.log("GATEWAY UNIT PASS ✅");
+
+// ── provider resolution (pure) ───────────────────────────────────────────────
+const { resolveProvider, PROVIDERS } = await import("../dist/providers.js");
+assert.equal(PROVIDERS.length, 7, "7 cloud providers");
+delete process.env.OPENAI_API_KEY;
+let r = resolveProvider("openai/gpt-4o", []);
+assert(r.error?.includes("OPENAI_API_KEY") && r.status === 503, "no key → 503 naming the env var");
+process.env.OPENAI_API_KEY = "sk-test";
+r = resolveProvider("openai/gpt-4o", []);
+assert.equal(r.upstreamModel, "gpt-4o", "prefix stripped");
+assert.equal(r.baseUrl, "https://api.openai.com/v1");
+r = resolveProvider("openai/gpt-4o", [{ id: "openai", baseUrl: "http://proxy:9/v1/", enabled: true }]);
+assert.equal(r.baseUrl, "http://proxy:9/v1", "user baseUrl override + trailing slash trimmed");
+r = resolveProvider("openai/gpt-4o", [{ id: "openai", apiKeyEnv: "MY_KEY", enabled: true }]);
+assert(r.error?.includes("MY_KEY"), "custom keyEnv respected");
+r = resolveProvider("nope/x", []);
+assert(r.status === 400 && r.error.includes("known:"), "unknown provider lists known ids");
+delete process.env.OPENAI_API_KEY;
+console.log("PROVIDER UNIT PASS ✅");
