@@ -71,6 +71,20 @@ export class InstanceSupervisor extends EventEmitter {
     });
     this.child = child;
 
+    // Orphan guard: if THIS process exits for any reason that still runs exit
+    // handlers (clean exit, uncaught exception), take the child with us. A
+    // SIGKILL'd parent still leaks — the Phase 5 supervisor watchdog closes
+    // that hole; this closes the common one (a crashed test/CLI).
+    const killChild = (): void => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    };
+    process.once("exit", killChild);
+    child.once("exit", () => process.removeListener("exit", killChild));
+
     const onLine = (buf: Buffer): void => {
       const line = buf.toString();
       this.logStream?.write(line);
