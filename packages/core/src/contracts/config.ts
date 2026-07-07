@@ -19,6 +19,7 @@ export interface PlatformConfig {
   gateway: { port: number }; // default 4100
   dashboard: { port: number }; // default 4200
   bus: { port: number }; // Maya's own bus (packages/bus), default 4300
+  orchestrator: { port: number }; // agent-plane service (packages/orchestrator), default 4400
   modelsDir: string; // default ~/.maya/models
   providers: ProviderConfig[];
   guardrails: GuardrailPolicy;

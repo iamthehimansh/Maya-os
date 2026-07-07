@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
 import { serveDashboard } from "./dashboard.js";
+import { startBusServer } from "@maya-ai/bus";
+import { startOrchestratorService } from "@maya-ai/orchestrator";
+import { dbPath } from "@maya-ai/core";
 
 const HELP = `maya — local-first AI OS for developers (Apple Silicon first)
 
@@ -82,11 +85,38 @@ export async function main(argv: string[]): Promise<void> {
     } else {
       console.log("anthropic api → off (install: maya doctor --install-switchyard; needs ≥1 pulled model)");
     }
+    // Maya bus (agent communication) — admin token persisted on first boot
+    // (0600, localhost-only credential) so later boots and the dashboard
+    // proxy can authenticate without re-minting.
+    let busInfo: { port: number; adminToken: string } | undefined;
+    let busServer: Awaited<ReturnType<typeof startBusServer>> | null = null;
+    let orch: Awaited<ReturnType<typeof startOrchestratorService>> | null = null;
+    try {
+      const path3 = await import("node:path");
+      busServer = await startBusServer({ port: cfg.bus.port, dbPath: path3.join(mayaHome(), "bus.db") });
+      const tokenFile = path3.join(mayaHome(), "bus-admin.token");
+      let adminToken = busServer.bootstrapAdminToken?.token ?? "";
+      if (adminToken) fs.writeFileSync(tokenFile, adminToken, { mode: 0o600 });
+      else adminToken = fs.readFileSync(tokenFile, "utf8").trim();
+      busInfo = { port: busServer.port, adminToken };
+      console.log(`maya bus      → ws://127.0.0.1:${busServer.port}  (agent channels)`);
+      // Orchestrator service (teams / tasks / loop runs) — agent plane.
+      orch = await startOrchestratorService({
+        dbPath: dbPath(),
+        gatewayBaseUrl: `http://127.0.0.1:${cfg.gateway.port}`,
+        bus: { wsBase: `ws://127.0.0.1:${busServer.port}`, adminToken, httpBase: `http://127.0.0.1:${busServer.port}` },
+        port: cfg.orchestrator.port,
+      });
+      console.log(`orchestrator  → http://127.0.0.1:${orch.port}/api  (teams · tasks · loop)`);
+    } catch (e) {
+      console.error("[serve] bus/orchestrator failed to start:", e instanceof Error ? e.message : e);
+      console.error("        (gateway + dashboard continue; loop features off)");
+    }
     // Dashboard SPA (same-origin proxy to the gateway — no CORS surface).
     const dashDist = path.resolve(fileURLToPath(import.meta.url), "../../../dashboard/dist");
     let dashServer: ReturnType<typeof serveDashboard> | null = null;
     if (fs.existsSync(path.join(dashDist, "index.html"))) {
-      dashServer = serveDashboard(dashDist, cfg.dashboard.port, cfg.gateway.port);
+      dashServer = serveDashboard(dashDist, cfg.dashboard.port, cfg.gateway.port, orch?.port, busInfo);
       console.log(`dashboard     → http://127.0.0.1:${cfg.dashboard.port}`);
     } else {
       console.log("dashboard     → not built (pnpm --filter @maya-ai/dashboard build)");
@@ -96,7 +126,12 @@ export async function main(argv: string[]): Promise<void> {
       console.log("\nshutting down…");
       server.close();
       dashServer?.close();
-      void Promise.allSettled([manager.unloadAll(), sidecar?.stop() ?? Promise.resolve()]).then(() => process.exit(0));
+      void Promise.allSettled([
+        manager.unloadAll(),
+        sidecar?.stop() ?? Promise.resolve(),
+        orch?.close() ?? Promise.resolve(),
+        busServer?.close() ?? Promise.resolve(),
+      ]).then(() => process.exit(0));
       setTimeout(() => process.exit(0), 8_000).unref?.();
     };
     process.on("SIGINT", shutdown);

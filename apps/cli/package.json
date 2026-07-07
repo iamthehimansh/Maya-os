@@ -25,7 +25,9 @@
   "dependencies": {
     "@maya-ai/core": "workspace:*",
     "@maya-ai/model-runtime": "workspace:*",
-    "@maya-ai/gateway": "workspace:*"
+    "@maya-ai/gateway": "workspace:*",
+    "@maya-ai/bus": "workspace:*",
+    "@maya-ai/orchestrator": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
