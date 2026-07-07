@@ -207,6 +207,10 @@ export class RuntimeManager extends EventEmitter {
     const family = local.name.split(/[-.]/)[0];
     if (!family) return undefined;
     const mainBytes = local.files[0]?.bytes ?? 0;
+    // Measured (3B main + 0.5B draft on M2 Pro): 1.01x — a wash. Speculation
+    // pays when the MAIN is slow; only auto-pair for big models. Explicit
+    // maya.json draftModel still overrides for experimentation.
+    if (mainBytes < 4 * 1024 ** 3) return undefined;
     const candidates = all
       .filter((m) => m.name !== local.name && m.name.split(/[-.]/)[0] === family)
       .map((m) => m.files[m.files.length - 1]!)
