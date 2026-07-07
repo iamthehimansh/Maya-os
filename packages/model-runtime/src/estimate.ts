@@ -1,6 +1,21 @@
 import type { LocalModel, Quant } from "@maya-ai/core";
 
 /**
+ * Quality score per quant (1 = lossless). Derived from published llama.cpp
+ * perplexity-delta measurements (order-of-magnitude, model-family averaged):
+ * Q8 is indistinguishable, Q6 near-lossless, Q4_K_M the sweet spot, Q3 shows
+ * visible degradation. Used to trade quant level against context size.
+ */
+export const QUANT_QUALITY: Record<Quant, number> = {
+  F16: 1.0,
+  Q8_0: 0.998,
+  Q6_K: 0.99,
+  Q5_K_M: 0.98,
+  Q4_K_M: 0.955,
+  Q3_K_M: 0.90,
+};
+
+/**
  * "Will it fit?" — conservative planning numbers, not precision. Weights load
  * ≈ file size (mmap'd, but Metal wires most of it); KV cache and compute
  * buffers come on top and scale with context.
@@ -33,9 +48,14 @@ export interface FitPlan {
 }
 
 /**
- * Walk the degrade ladder: preferred quant at full context → smaller quants →
- * then shrink context (halving, floor 2048) on the smallest quant. First plan
- * that fits the RAM budget wins; null = nothing fits (caller refuses cleanly).
+ * 2-D fit planner: evaluate every (quant × context) pair that fits the budget
+ * and pick the best by a quality-aware score, instead of the old sequential
+ * ladder (which would take Q8@2k over Q6@8k — usually the wrong trade for
+ * agent workloads that need room to think).
+ *
+ * Score = quantQuality × contextValue, where contextValue has diminishing
+ * returns past the requested context and a hard preference floor at 8k for
+ * requests ≥8k (agents send 20k+ prompts — a 2k-context "fit" is a lie).
  */
 export function planFit(
   files: LocalModel["files"],
@@ -50,33 +70,33 @@ export function planFit(
   const candidates = ladder(startQuant).filter((q) => byQuant.has(q));
   if (!candidates.length) return null;
 
+  const ctxSteps: number[] = [];
+  for (let ctx = contextLength; ctx >= 2048; ctx = Math.floor(ctx / 2)) ctxSteps.push(ctx);
+
+  let best: (FitPlan & { score: number }) | null = null;
   for (const quant of candidates) {
     const f = byQuant.get(quant)!;
-    const est = estimateLoadBytes(f.bytes, contextLength);
-    if (est <= budgetBytes) {
-      return {
-        quant,
-        fileBytes: f.bytes,
-        contextLength,
-        estimateBytes: est,
-        degraded: { quant: quant !== startQuant, context: false },
-      };
+    for (const ctx of ctxSteps) {
+      const est = estimateLoadBytes(f.bytes, ctx);
+      if (est > budgetBytes) continue;
+      // Context value: linear up to the request, sqrt-diminishing past a 8k
+      // floor; heavily penalize sub-8k when ≥8k was asked for.
+      const ratio = ctx / contextLength;
+      const ctxValue = (contextLength >= 8192 && ctx < 8192 ? 0.5 : 1) * Math.sqrt(ratio);
+      const score = (QUANT_QUALITY[quant] ?? 0.9) * ctxValue;
+      if (!best || score > best.score) {
+        best = {
+          quant,
+          fileBytes: f.bytes,
+          contextLength: ctx,
+          estimateBytes: est,
+          degraded: { quant: quant !== startQuant, context: ctx !== contextLength },
+          score,
+        };
+      }
     }
   }
-  // Smallest quant still too big → shrink context
-  const smallest = candidates[candidates.length - 1]!;
-  const f = byQuant.get(smallest)!;
-  for (let ctx = contextLength; ctx >= 2048; ctx = Math.floor(ctx / 2)) {
-    const est = estimateLoadBytes(f.bytes, ctx);
-    if (est <= budgetBytes) {
-      return {
-        quant: smallest,
-        fileBytes: f.bytes,
-        contextLength: ctx,
-        estimateBytes: est,
-        degraded: { quant: smallest !== startQuant, context: ctx !== contextLength },
-      };
-    }
-  }
-  return null;
+  if (!best) return null;
+  const { score: _score, ...plan } = best;
+  return plan;
 }

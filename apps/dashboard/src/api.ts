@@ -17,6 +17,7 @@ export interface CatalogEntry {
   displayName: string;
   kind: "local-gguf" | "cloud";
   contextLength?: number;
+  quants?: Array<{ quant: string; quality: number; bytes: number }>;
   instance?: Instance;
 }
 

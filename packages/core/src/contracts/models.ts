@@ -104,6 +104,8 @@ export interface ModelCatalogEntry {
   displayName: string;
   kind: 'local-gguf' | 'cloud';
   contextLength?: number;
+  /** Local only: installed quants with quality scores (1 = lossless) and sizes. */
+  quants?: Array<{ quant: Quant; quality: number; bytes: number }>;
   /** Local only: live instance if one is serving this model right now. */
   instance?: ModelInstance;
 }
