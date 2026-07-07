@@ -52,6 +52,8 @@ export interface LlamaServerArgs {
   alias?: string;
   /** Draft model GGUF for speculative decoding (same tokenizer family required — llama-server validates at startup). */
   draftPath?: string;
+  /** Override the GGUF's embedded chat template (--chat-template-file) — see TEMPLATE_QUIRKS. */
+  chatTemplateFile?: string;
   /** Extra raw args appended last (model profiles / power users). */
   extra?: string[];
 }
@@ -76,6 +78,7 @@ export function llamaServerArgs(a: LlamaServerArgs): string[] {
     "--flash-attn", "on",
     "--cache-type-k", "q8_0",
     "--cache-type-v", "q8_0",
+    ...(a.chatTemplateFile ? ["--chat-template-file", a.chatTemplateFile] : []),
     ...(a.draftPath
       ? ["--model-draft", a.draftPath, "--gpu-layers-draft", "999", "--cache-type-k-draft", "q8_0", "--cache-type-v-draft", "q8_0"]
       : []),

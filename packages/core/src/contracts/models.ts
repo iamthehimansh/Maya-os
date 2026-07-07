@@ -40,6 +40,12 @@ export interface LocalModel {
    * small model when one is installed (maya.json).
    */
   draftModel?: string | false;
+  /**
+   * MEASURED native tool-calling support (one-tool probe on first load).
+   * Undefined = not probed yet. Orchestrators must require true for agentic
+   * worker roles — e.g. the Qwen2.5-Coder series answers tools in markdown.
+   */
+  toolCalling?: boolean;
 }
 
 export type RuntimeBackend = 'llama.cpp' | 'mlx';

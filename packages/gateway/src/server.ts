@@ -322,6 +322,7 @@ function catalog(deps: GatewayDeps): ModelCatalogEntry[] {
       kind: "local-gguf" as const,
       contextLength: m.contextLength,
       quants: m.files.map((f) => ({ quant: f.quant, quality: QUANT_QUALITY[f.quant] ?? 0.9, bytes: f.bytes })),
+      ...(m.toolCalling !== undefined ? { toolCalling: m.toolCalling } : {}),
       ...(instance ? { instance } : {}),
     };
   });

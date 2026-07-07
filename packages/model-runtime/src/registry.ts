@@ -21,6 +21,7 @@ interface ModelMeta {
   contextLength?: number;
   chatTemplate?: string;
   draftModel?: string | false;
+  toolCalling?: boolean;
 }
 
 /**
@@ -56,6 +57,7 @@ export function scanModels(modelsDir: string): LocalModel[] {
       contextLength: meta.contextLength ?? 8192,
       ...(meta.chatTemplate ? { chatTemplate: meta.chatTemplate } : {}),
       ...(meta.draftModel !== undefined ? { draftModel: meta.draftModel } : {}),
+      ...(meta.toolCalling !== undefined ? { toolCalling: meta.toolCalling } : {}),
     });
   }
   return out;
@@ -69,5 +71,13 @@ export function findModel(modelsDir: string, id: ModelId): LocalModel | undefine
 export function writeModelMeta(modelsDir: string, name: string, meta: ModelMeta): void {
   const dir = path.join(modelsDir, name);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "maya.json"), JSON.stringify(meta, null, 2) + "\n");
+  // Merge over any existing meta so independent writers (pull, probes,
+  // profile edits) never clobber each other's fields.
+  let existing: ModelMeta = {};
+  try {
+    existing = JSON.parse(fs.readFileSync(path.join(dir, "maya.json"), "utf8")) as ModelMeta;
+  } catch {
+    // first write
+  }
+  fs.writeFileSync(path.join(dir, "maya.json"), JSON.stringify({ ...existing, ...meta }, null, 2) + "\n");
 }
