@@ -30,7 +30,11 @@ afterEach(async () => {
 async function setup(
   planner: Planner,
   verifier: Verifier,
-  extra?: { questionTimeoutMs?: number; goalCheck?: (goal: string) => Promise<{ met: boolean; missing: string[] }> },
+  extra?: {
+    questionTimeoutMs?: number;
+    maxGoalFix?: number;
+    goalCheck?: (goal: string) => Promise<{ met: boolean; missing: string[]; fixInstruction?: string }>;
+  },
 ) {
   running = await startBusServer({ dbPath: ':memory:', port: 0 });
   const admin = running.bootstrapAdminToken!;
@@ -48,6 +52,7 @@ async function setup(
     verifier,
     bus: { wsBase, adminToken: admin.token },
     ...(extra?.questionTimeoutMs !== undefined ? { questionTimeoutMs: extra.questionTimeoutMs } : {}),
+    ...(extra?.maxGoalFix !== undefined ? { maxGoalFix: extra.maxGoalFix } : {}),
     ...(extra?.goalCheck !== undefined ? { goalCheck: extra.goalCheck } : {}),
   });
   return { db, lead, wsBase };
@@ -158,15 +163,15 @@ describe('LoopLead', () => {
     let round = 0;
     const goalCheck = async () => {
       round += 1;
-      // Even after the explicit fix task, still unmet (scripted worker writes nothing real).
+      // Even after the explicit fix tasks, still unmet (scripted worker writes nothing real).
       return { met: false, missing: ['content "Maya M3 demo complete"'] };
     };
-    const { lead } = await setup(planner, okVerifier, { goalCheck });
+    const { lead } = await setup(planner, okVerifier, { goalCheck, maxGoalFix: 2 });
     const report = await lead.run('Create STATUS.md containing exactly: Maya M3 demo complete');
 
     expect(report.outcome).toBe('partial');
     expect(report.summary).toContain('Maya M3 demo complete');
-    expect(round).toBe(2); // initial check + re-check after the explicit fix task
+    expect(round).toBe(3); // initial check + 2 fix-round re-checks
   }, 30_000);
 
   it('goal-acceptance passes cleanly when the fix task satisfies the goal', async () => {

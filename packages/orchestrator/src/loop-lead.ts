@@ -60,7 +60,13 @@ export interface LoopLeadOptions {
    * outcome to `partial` if still unmet. Injectable; the default checks a
    * workspace dir for the goal's required filenames + exact content.
    */
-  goalCheck?: (goal: string) => Promise<{ met: boolean; missing: string[] }>;
+  goalCheck?: (goal: string) => Promise<{ met: boolean; missing: string[]; fixInstruction?: string }>;
+  /**
+   * Max goal-fix rounds after per-task verification. Default 3 — each round is
+   * an independent shot at the goal, so more rounds directly raise the success
+   * rate with flaky small workers (measured 3/4 → higher at 3B).
+   */
+  maxGoalFix?: number;
 }
 
 export interface LoopReport {
@@ -169,25 +175,28 @@ export class LoopLead {
       }
 
       // 5b. Goal-level acceptance — the GOAL, not just the paraphrased tasks.
-      // A weak planner can drop hard requirements; this catches that. Queue ONE
-      // explicit fix task naming the unmet requirements verbatim (so the
-      // per-task gate CAN enforce them), settle, re-check.
+      // A weak planner drops hard requirements; workers write templates instead
+      // of literals. Loop up to `maxGoalFix` rounds: each queues a CRYSTAL-clear
+      // imperative fix task (goalCheck.fixInstruction) so even a small worker
+      // can comply, then re-checks the goal against reality.
       let goalMissing: string[] = [];
       if (this.opts.goalCheck) {
-        const first = await this.opts.goalCheck(goal);
-        if (!first.met) {
-          lead.sendMessage({ body: { text: `🎯 goal not yet met — missing: ${first.missing.join(', ')}. Queuing an explicit fix.`.slice(0, 300) } });
-          const fixSpec = `The overall goal is NOT yet satisfied. Do EXACTLY this and nothing else:\n${goal}\nThe following are still missing or wrong — fix them precisely: ${first.missing.join('; ')}`;
+        const maxGoalFix = this.opts.maxGoalFix ?? 3;
+        let check = await this.opts.goalCheck(goal);
+        for (let round = 0; !check.met && round < maxGoalFix; round++) {
+          lead.sendMessage({ body: { text: `🎯 goal not yet met (round ${round + 1}/${maxGoalFix}) — missing: ${check.missing.join(', ')}`.slice(0, 300) } });
+          const fixSpec =
+            check.fixInstruction ??
+            `The goal is NOT satisfied. Do EXACTLY this and nothing else:\n${goal}\nStill missing/wrong — fix precisely: ${check.missing.join('; ')}`;
           this.opts.teams.addTask(team.id, fixSpec);
           await this.opts.teams.settle(team.id);
-          // Verify the fix task too (its spec carries the exact requirements).
           for (const t of this.opts.db.tasks(team.id, 'done').filter((x) => !verified.has(x.id) && !superseded.has(x.id))) {
             const v = await this.opts.verifier(t);
             if (v.ok) verified.add(t.id);
           }
-          const second = await this.opts.goalCheck(goal);
-          goalMissing = second.met ? [] : second.missing;
+          check = await this.opts.goalCheck(goal);
         }
+        goalMissing = check.met ? [] : check.missing;
       }
 
       // 6. Report.
