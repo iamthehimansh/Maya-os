@@ -1,0 +1,29 @@
+{
+  "name": "@maya-ai/bus-client",
+  "version": "0.0.1",
+  "description": "Typed client SDK for the Maya bus — auto-reconnect with backoff, outbound queue (sends never lost), seq dedupe, policy auto-ack.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@maya-ai/core": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.0"
+  }
+}

@@ -68,15 +68,64 @@ export interface BusSendFrame {
   body: BusMessageFrame['body'];
 }
 
+/**
+ * Server → client on (re)connect and on change: authoritative channel rules.
+ * Only the server can send policy — a client-sent policy frame is rejected —
+ * so policy can never be forged by a peer (anti-injection by construction).
+ */
+export interface BusPolicyFrame {
+  v: 1;
+  type: 'policy';
+  policyVersion: string;
+  rules: string[];
+}
+
+/**
+ * Presence: what an agent is working on. Set/update/clear by the agent that
+ * owns the task; the server stamps `handle`, enforces a TTL (a crashed agent's
+ * status expires), and rebroadcasts to the channel.
+ */
+export interface BusWorkStatusFrame {
+  v: 1;
+  type: 'workstatus';
+  action: 'set' | 'update' | 'clear';
+  taskId: string;
+  handle?: string; // server-stamped on rebroadcast
+  state?: 'working' | 'paused' | 'done' | 'failed' | 'stale';
+  task?: string;      // short human description (server caps length)
+  forWhom?: string;   // requester handle
+  since?: number;     // epoch ms
+}
+
+/**
+ * Retract message #seq: any agent working on it should stop. Ephemeral —
+ * rebroadcast to the channel, never persisted to history. Only the original
+ * sender (or an admin) may cancel a message.
+ */
+export interface BusCancelFrame {
+  v: 1;
+  type: 'cancel';
+  seq: number;
+  by?: string; // server-stamped on rebroadcast
+}
+
 export type BusServerFrame =
   | BusMessageFrame
   | BusJoinedFrame
   | BusHistoryFrame
+  | BusPolicyFrame
+  | BusWorkStatusFrame
+  | BusCancelFrame
   | { v: 1; type: 'system'; event: string }
   | { type: 'error'; code: string; message: string }
   | { type: 'pong' };
 
-export type BusClientFrame = BusSendFrame | { v: 1; type: 'ping' };
+export type BusClientFrame =
+  | BusSendFrame
+  | BusWorkStatusFrame
+  | BusCancelFrame
+  | { v: 1; type: 'policy_ack'; policyVersion: string }
+  | { v: 1; type: 'ping' };
 
 /**
  * Token conventions:
