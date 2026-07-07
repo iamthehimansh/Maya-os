@@ -10,7 +10,7 @@
  * survive JSON/HTTP/SQLite round-trips, so it cannot carry methods.
  */
 
-import type { ModelRef } from './models.js';
+import type { ModelId } from './models.js';
 
 /** Open set: built-ins are literals, plugins register their own ids. */
 export type AdapterId = 'claude-code' | 'codex' | 'opencode' | (string & {});
@@ -27,11 +27,11 @@ export type AgentState =
 export interface AgentSpawnSpec {
   adapter: AdapterId;
   /**
-   * Which model serves this agent — ALWAYS a gateway ModelRef, never a raw
+   * Which model serves this agent — ALWAYS a gateway ModelId, never a raw
    * URL/port. The adapter maps it to the tool's native config (e.g. Claude
    * Code: ANTHROPIC_BASE_URL → gateway's Anthropic-compat endpoint).
    */
-  model: ModelRef;
+  model: ModelId;
   /** Working directory the agent operates in (its repo/workspace). */
   cwd: string;
   /** The task prompt the agent starts with. */
@@ -51,7 +51,7 @@ export interface AgentHandle {
   id: string;          // "ag_<nanoid>", stable for the agent's lifetime
   adapter: AdapterId;
   state: AgentState;
-  model: ModelRef;
+  model: ModelId;
   cwd: string;
   pid?: number;
   busHandle?: string;  // the agent's handle on the bus channel, once joined

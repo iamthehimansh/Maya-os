@@ -1,0 +1,27 @@
+{
+  "name": "@maya-ai/model-runtime",
+  "version": "0.0.1",
+  "description": "Maya runtime manager \u2014 llama-server (Metal) supervision, GGUF pulls, RAM guardrails: degrade, never crash",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@maya-ai/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22"
+  }
+}

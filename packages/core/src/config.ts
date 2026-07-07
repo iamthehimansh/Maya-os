@@ -1,25 +1,28 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { GuardrailPolicy, PlatformConfig, ProviderConfig } from "./contracts.js";
+import type { CloudProvider, GuardrailPolicy, PlatformConfig } from "./contracts/index.js";
 import { configPath, mayaHome, modelsDir } from "./paths.js";
 
 const GIB = 1024 ** 3;
 
+/** Conservative defaults — must be safe on an 8GB M1 (all M-series is the target). */
 export const defaultGuardrails = (): GuardrailPolicy => ({
   minFreeRamBytes: 2 * GIB,
-  autoDegradeQuant: true,
-  autoUnloadLruAfterSec: 1800,
-  maxRestartAttempts: 3,
-  hungTimeoutSec: 120,
+  autoDowngradeQuant: true,
+  autoShrinkContext: true,
+  healthCheckIntervalMs: 5_000,
+  hungProcessTimeoutMs: 120_000,
+  maxRestarts: 3,
+  restartWindowMs: 600_000,
 });
 
-const KNOWN_PROVIDERS: ProviderConfig["id"][] = [
+const CLOUD_PROVIDERS: CloudProvider[] = [
   "openai",
   "anthropic",
   "gemini",
-  "deepseek",
   "groq",
   "together",
+  "deepseek",
   "nvidia",
 ];
 
@@ -28,9 +31,9 @@ export const defaultConfig = (): PlatformConfig => ({
   dashboard: { port: 4200 },
   bus: { port: 4300 },
   modelsDir: modelsDir(),
-  providers: KNOWN_PROVIDERS.map((id) => ({
+  providers: CLOUD_PROVIDERS.map((id) => ({
     id,
-    apiKeyEnv: `${String(id).toUpperCase()}_API_KEY`,
+    apiKeyEnv: `${id.toUpperCase()}_API_KEY`,
     enabled: false,
   })),
   guardrails: defaultGuardrails(),

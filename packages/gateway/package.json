@@ -1,0 +1,27 @@
+{
+  "name": "@maya-ai/gateway",
+  "version": "0.0.1",
+  "description": "Maya gateway \u2014 one OpenAI- and Anthropic-compatible endpoint over local GGUF instances and cloud providers",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@maya-ai/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22"
+  }
+}

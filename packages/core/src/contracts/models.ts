@@ -88,3 +88,38 @@ export interface GatewaySurface {
   /** Anthropic-compatible: POST /v1/messages — lets Claude Code target any ModelId. */
   anthropicBaseUrl: string;
 }
+
+/**
+ * Catalog entry as returned by the gateway's control API (`GET /api/models`) —
+ * the union of cloud models (from enabled providers) and local GGUFs.
+ */
+export interface ModelCatalogEntry {
+  id: ModelId;
+  displayName: string;
+  kind: 'local-gguf' | 'cloud';
+  contextLength?: number;
+  /** Local only: live instance if one is serving this model right now. */
+  instance?: ModelInstance;
+}
+
+/**
+ * Runtime events streamed by the manager over the control API
+ * (`GET /api/events`, SSE) — the dashboard's live Models feed and the
+ * orchestrator's capacity signals.
+ */
+export type RuntimeEvent =
+  | { type: 'instance_state'; instanceId: string; model: ModelId; state: InstanceState; reason?: string }
+  | { type: 'model_degraded'; model: ModelId; from: Quant; to: Quant; reason: 'ram_pressure' | 'load_failure' }
+  | { type: 'instance_restarted'; instanceId: string; model: ModelId; attempt: number }
+  | { type: 'ram_pressure'; freeBytes: number; action: 'none' | 'degrade' | 'unload_lru' }
+  | { type: 'pull_progress'; model: ModelId; pct: number };
+
+/**
+ * Gateway control API (admin bearer; consumed by CLI/dashboard/orchestrator):
+ *   GET    /api/models                → ModelCatalogEntry[]
+ *   POST   /api/models/pull           { source: "hf:<repo>[/<file>.gguf]" | url, name }  → { jobId } (progress via /api/events)
+ *   POST   /api/models/:id/load       { quant?, contextLength? }   idempotent
+ *   POST   /api/models/:id/unload
+ *   GET    /api/runtime/health        → { ramFreeBytes, ramTotalBytes, instances: ModelInstance[] }
+ *   GET    /api/events                → text/event-stream of RuntimeEvent
+ */
