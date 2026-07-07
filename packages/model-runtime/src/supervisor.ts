@@ -18,6 +18,12 @@ export interface SupervisorOpts {
   restartWindowMs: number;
   /** How long to wait for readiness before declaring startup failed. */
   startupTimeoutMs?: number;
+  /**
+   * Args for a one-shot startup retry (e.g. with --no-mmap: mmap loads are
+   * near-instant but hang on some Apple Silicon setups — a startup timeout
+   * gets ONE retry with the fallback before giving up).
+   */
+  fallbackArgs?: string[];
 }
 
 export type SupervisorEvent =
@@ -37,6 +43,7 @@ export class InstanceSupervisor extends EventEmitter {
   private lastHealthy = 0;
   private restarts: number[] = []; // timestamps within window
   private stopping = false;
+  private usedFallback = false;
   private logStream: fs.WriteStream | null = null;
 
   constructor(private readonly opts: SupervisorOpts) {
@@ -65,7 +72,7 @@ export class InstanceSupervisor extends EventEmitter {
     fs.mkdirSync(logsDir(), { recursive: true });
     this.logStream = fs.createWriteStream(path.join(logsDir(), `${this.opts.id}.log`), { flags: "a" });
 
-    const child = spawn(this.opts.binPath, this.opts.args, {
+    const child = spawn(this.opts.binPath, this.usedFallback && this.opts.fallbackArgs ? this.opts.fallbackArgs : this.opts.args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     });
@@ -110,6 +117,15 @@ export class InstanceSupervisor extends EventEmitter {
     const ready = await this.waitReady(this.opts.startupTimeoutMs ?? 120_000);
     if (!ready) {
       await this.stop(0);
+      if (!this.usedFallback && this.opts.fallbackArgs) {
+        // Known failure mode: mmap load hangs on some setups. One retry
+        // with the fallback args (--no-mmap) before declaring failure.
+        this.usedFallback = true;
+        this.stopping = false;
+        this.emit("event", { type: "log", line: "startup timed out — retrying with fallback args (--no-mmap)" } satisfies SupervisorEvent);
+        await this.start();
+        return;
+      }
       this.setState("stopped", "startup timeout");
       throw new Error(`instance ${this.opts.id} failed to become ready`);
     }

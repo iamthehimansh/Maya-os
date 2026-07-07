@@ -54,3 +54,9 @@ assert.deepEqual(args, [
 assert(!llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 1 }).includes("--alias"), "alias optional");
 
 console.log("UNIT PASS ✅ (12 assertions)");
+
+// draft argv (speculation flags appended only when draftPath present)
+const dargs = llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 2048, draftPath: "/d.gguf" });
+assert(dargs.includes("--model-draft") && dargs.includes("/d.gguf") && dargs.includes("--gpu-layers-draft"), "draft flags present");
+assert(!llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 2048 }).includes("--model-draft"), "no draft by default");
+console.log("DRAFT ARGV PASS ✅");

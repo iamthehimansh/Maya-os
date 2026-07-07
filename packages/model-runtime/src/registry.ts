@@ -20,6 +20,7 @@ interface ModelMeta {
   source?: string;
   contextLength?: number;
   chatTemplate?: string;
+  draftModel?: string | false;
 }
 
 /**
@@ -54,6 +55,7 @@ export function scanModels(modelsDir: string): LocalModel[] {
       files: files.sort((a, b) => b.bytes - a.bytes),
       contextLength: meta.contextLength ?? 8192,
       ...(meta.chatTemplate ? { chatTemplate: meta.chatTemplate } : {}),
+      ...(meta.draftModel !== undefined ? { draftModel: meta.draftModel } : {}),
     });
   }
   return out;
