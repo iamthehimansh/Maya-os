@@ -94,6 +94,44 @@ describe('TeamManager', () => {
     expect(final.attempts).toBe(1); // one failure, then success
   }, 30_000);
 
+  it('refuses worker models measured as non-tool-calling (Coder-series lesson)', async () => {
+    running = await startBusServer({ dbPath: ':memory:', port: 0 });
+    const admin = running.bootstrapAdminToken!;
+    const wsBase = `ws://127.0.0.1:${running.port}`;
+    const db = new MayaDb(':memory:');
+    const runtime = new AgentRuntime({ gatewayBaseUrl: 'http://127.0.0.1:1' });
+    runtime.register(new ScriptedWorkers());
+    const bridge = new AgentBusBridge({ wsBase, adminToken: admin.token });
+    const caps: Record<string, { toolCalling?: boolean } | null> = {
+      'local/coder': { toolCalling: false },
+      'local/instruct': { toolCalling: true },
+    };
+    const tm = new TeamManager({
+      db,
+      runtime,
+      bridge,
+      bus: { wsBase, adminToken: admin.token },
+      modelCapabilities: async (m) => caps[m] ?? null,
+    });
+
+    await expect(
+      tm.createTeam({ name: 'bad', topology: 'round-robin', members: [{ adapter: 'scripted', model: 'local/coder', cwd: '/tmp' }] }),
+    ).rejects.toThrow(/cannot tool-call/);
+
+    // Override hatch + measured-true + unknown models all pass.
+    const okTeam = await tm.createTeam({
+      name: 'ok',
+      topology: 'round-robin',
+      members: [
+        { adapter: 'scripted', model: 'local/instruct', cwd: '/tmp' },
+        { adapter: 'scripted', model: 'local/unknown-cloud', cwd: '/tmp' },
+        { adapter: 'scripted', model: 'local/coder', cwd: '/tmp', allowNonToolCalling: true },
+      ],
+    });
+    expect(okTeam.id).toBeTruthy();
+    await tm.drain(okTeam.id, 'test done');
+  }, 30_000);
+
   it('hard-stops the team when the token budget is exhausted', async () => {
     const { db, tm, team, workers } = await setup(500);
     tm.addTask(team.id, 'expensive TOKENS:600 job');

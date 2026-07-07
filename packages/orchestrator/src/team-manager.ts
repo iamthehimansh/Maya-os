@@ -30,6 +30,12 @@ export interface MemberTemplate {
   /** Worker scoping applied to every task spawn from this template. */
   allowedTools?: string[];
   maxTurns?: number;
+  /**
+   * Escape hatch: accept a model whose measured `toolCalling` capability is
+   * false (completion-style specialists can't drive agentic workers — the
+   * Coder-series lesson). Off by default.
+   */
+  allowNonToolCalling?: boolean;
 }
 
 export interface CreateTeamInput {
@@ -46,6 +52,14 @@ export interface TeamManagerOptions {
   bus: { wsBase: string; adminToken: string; httpBase?: string };
   /** Max attempts per task before it stays failed. Default 2. */
   maxAttempts?: number;
+  /**
+   * Capability lookup for worker-model gating; defaults to the gateway
+   * catalog when `gatewayBaseUrl` is set (tests inject their own). Returning
+   * null = unknown model/capability → fail-open with a warning; a measured
+   * `toolCalling:false` fails team creation unless the template opts out.
+   */
+  modelCapabilities?: (model: string) => Promise<{ toolCalling?: boolean } | null>;
+  gatewayBaseUrl?: string;
 }
 
 interface InFlightWorker {
@@ -79,6 +93,7 @@ export class TeamManager {
 
   async createTeam(input: CreateTeamInput): Promise<TeamRow> {
     if (input.members.length === 0) throw new Error('a team needs at least one member template');
+    await this.gateWorkerModels(input.members);
     const team = this.opts.db.createTeam({
       name: input.name,
       topology: input.topology,
@@ -190,6 +205,28 @@ export class TeamManager {
     const lt = this.live.get(teamId);
     if (!lt) throw new Error(`team ${teamId} is not live (create it through this manager)`);
     return lt;
+  }
+
+  /**
+   * Worker models must tool-call (measured capability from the catalog):
+   * a measured false fails fast with a pointer to the fix; unknown models
+   * (no lookup configured / not in catalog / capability unmeasured) pass
+   * open — cloud models and custom gateways stay usable.
+   */
+  private async gateWorkerModels(members: MemberTemplate[]): Promise<void> {
+    const lookup =
+      this.opts.modelCapabilities ??
+      (this.opts.gatewayBaseUrl !== undefined ? gatewayCapabilityLookup(this.opts.gatewayBaseUrl) : null);
+    if (!lookup) return;
+    for (const m of members) {
+      if (m.allowNonToolCalling === true) continue;
+      const caps = await lookup(m.model).catch(() => null);
+      if (caps?.toolCalling === false) {
+        throw new Error(
+          `worker model ${m.model} cannot tool-call (measured) — agentic workers need a tool-calling model (e.g. an Instruct-series); set allowNonToolCalling:true to override`,
+        );
+      }
+    }
   }
 
   private async assign(lt: LiveTeam, task: TaskRow): Promise<TaskRow> {
@@ -323,3 +360,14 @@ export class TeamManager {
 }
 
 export const newRunId = (): string => 'run_' + randomUUID().replaceAll('-', '').slice(0, 10);
+
+/** Default capability lookup: the gateway catalog's measured `capabilities`. */
+function gatewayCapabilityLookup(gatewayBaseUrl: string) {
+  const base = gatewayBaseUrl.replace(/\/$/, '');
+  return async (model: string): Promise<{ toolCalling?: boolean } | null> => {
+    const res = await fetch(`${base}/api/models`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
+    if (!res?.ok) return null;
+    const catalog = (await res.json()) as Array<{ id: string; capabilities?: { toolCalling?: boolean } }>;
+    return catalog.find((m) => m.id === model)?.capabilities ?? null;
+  };
+}
