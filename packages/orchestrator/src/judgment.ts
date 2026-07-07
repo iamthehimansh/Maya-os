@@ -65,6 +65,16 @@ export function makeVerifier(llm: LlmClient, opts?: VerifierOptions): Verifier {
   return async (task: TaskRow) => {
     let workspace = '';
     if (opts?.workspaceDir) {
+      // Deterministic gate FIRST: every filename the spec names must exist
+      // with that EXACT name (observed live: a worker created notices.md for
+      // NOTES.md and the LLM verifier shrugged). No LLM call needed to fail.
+      const missing = requiredFilenames(task.spec).filter((f) => !fileExists(opts.workspaceDir!, f));
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          feedback: `required file(s) missing or misnamed — create EXACTLY: ${missing.join(', ')}`,
+        };
+      }
       workspace = `\n\nWORKSPACE (ground truth — directory listing with file heads):\n${snapshotDir(opts.workspaceDir)}`;
     }
     const user = `Task: ${task.spec}\n\nWorker's reported result: ${task.result ?? '(none)'}${workspace}`;
@@ -74,6 +84,31 @@ export function makeVerifier(llm: LlmClient, opts?: VerifierOptions): Verifier {
       return { ok: obj.ok, ...(typeof obj.feedback === 'string' ? { feedback: obj.feedback } : {}) };
     });
   };
+}
+
+/**
+ * Filenames the spec explicitly requires (extension-bearing tokens, minus
+ * REWORK-feedback echoes). Exported for tests.
+ */
+export function requiredFilenames(spec: string): string[] {
+  // Ignore the rework preamble's repetition of verifier feedback.
+  const base = spec.split('\nREWORK (round')[0] ?? spec;
+  const seen = new Set<string>();
+  for (const m of base.matchAll(/\b([A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z]{1,6})\b/g)) {
+    const name = m[1]!;
+    // Skip version-ish tokens (e.g. "2.5") and bare domains people write in prose.
+    if (/^\d+(\.\d+)+$/.test(name)) continue;
+    seen.add(name);
+  }
+  return [...seen];
+}
+
+function fileExists(dir: string, name: string): boolean {
+  try {
+    return statSync(`${dir}/${name}`).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** Names + first 1KB of up to 20 files (one level deep) — small by design. */
