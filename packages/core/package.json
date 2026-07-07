@@ -1,7 +1,7 @@
 {
   "name": "@maya-ai/core",
   "version": "0.0.1",
-  "description": "Maya shared contracts, config, and platform paths \u2014 every other package builds against this",
+  "description": "Maya shared contracts, config, and platform paths — every other package builds against this",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -18,10 +18,12 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
   },
   "devDependencies": {
+    "@types/node": "^22",
     "typescript": "^5.7.0",
-    "@types/node": "^22"
+    "vitest": "^3.2.0"
   }
 }

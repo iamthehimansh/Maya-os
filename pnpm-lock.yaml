@@ -142,6 +142,9 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/node@22.20.0)
 
   packages/gateway:
     dependencies:
@@ -177,6 +180,31 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+
+  packages/orchestrator:
+    dependencies:
+      '@maya-ai/agent-runtime':
+        specifier: workspace:*
+        version: link:../agent-runtime
+      '@maya-ai/bus-client':
+        specifier: workspace:*
+        version: link:../bus-client
+      '@maya-ai/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@maya-ai/bus':
+        specifier: workspace:*
+        version: link:../bus
+      '@types/node':
+        specifier: ^22
+        version: 22.20.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/node@22.20.0)
 
 packages:
 

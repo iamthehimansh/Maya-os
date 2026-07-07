@@ -1,0 +1,32 @@
+{
+  "name": "@maya-ai/orchestrator",
+  "version": "0.0.1",
+  "description": "Maya orchestrator — teams, task engine with crash-safe reassignment, budgets; the layer the Loop Agent lead drives.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@maya-ai/core": "workspace:*",
+    "@maya-ai/agent-runtime": "workspace:*",
+    "@maya-ai/bus-client": "workspace:*"
+  },
+  "devDependencies": {
+    "@maya-ai/bus": "workspace:*",
+    "@types/node": "^22",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  }
+}
