@@ -61,10 +61,16 @@ importers:
 
   packages/agent-runtime:
     dependencies:
+      '@maya-ai/bus-client':
+        specifier: workspace:*
+        version: link:../bus-client
       '@maya-ai/core':
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@maya-ai/bus':
+        specifier: workspace:*
+        version: link:../bus
       '@types/node':
         specifier: ^22
         version: 22.20.0

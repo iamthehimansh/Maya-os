@@ -12,6 +12,7 @@ import { CodexAdapter, type CodexAdapterOptions } from './adapters/codex.js';
 
 export { ClaudeCodeAdapter, type ClaudeCodeAdapterOptions } from './adapters/claude-code.js';
 export { CodexAdapter, type CodexAdapterOptions } from './adapters/codex.js';
+export { AgentBusBridge, type BusBridgeOptions, type AttachOptions } from './bus-bridge.js';
 export { EventLog } from './events.js';
 
 export interface AgentRuntimeOptions {
