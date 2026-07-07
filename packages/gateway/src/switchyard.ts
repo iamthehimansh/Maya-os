@@ -94,8 +94,9 @@ export function generateSwitchyardConfig(modelsDir: string, gatewayPort: number)
 
 export interface SidecarHandle {
   supervisor: InstanceSupervisor;
+  /** Current live port — flips atomically on blue/green refresh; gateway reads per-request. */
   port: number;
-  /** Regenerate config from the catalog and restart (e.g. after a model pull). */
+  /** Regenerate config from the catalog and swap in a fresh sidecar with zero dead window. */
   refresh(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -107,32 +108,48 @@ export async function startSwitchyard(modelsDir: string, gatewayPort: number): P
   const config = generateSwitchyardConfig(modelsDir, gatewayPort);
   if (!config) return null;
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
-  fs.writeFileSync(configPath(), config);
 
-  const make = (): InstanceSupervisor =>
-    new InstanceSupervisor({
-      id: `switchyard-${SWITCHYARD_PORT}`,
+  // Blue/green: refreshes boot the NEW sidecar on the alternate port with its
+  // own config file, health-check it, atomically flip `handle.port` (the
+  // gateway reads it per-request), then retire the old process. In-flight
+  // requests finish on the old sidecar; new ones hit the new — no dead window.
+  const configFor = (port: number): string => path.join(path.dirname(configPath()), `config-${port}.yaml`);
+  const make = (port: number, cfg: string): InstanceSupervisor => {
+    fs.writeFileSync(configFor(port), cfg);
+    return new InstanceSupervisor({
+      id: `switchyard-${port}`,
       binPath: info.binPath!,
-      args: ["serve", "--config", configPath(), "--host", "127.0.0.1", "--port", String(SWITCHYARD_PORT)],
-      port: SWITCHYARD_PORT,
-      healthUrl: `http://127.0.0.1:${SWITCHYARD_PORT}/v1/models`,
+      args: ["serve", "--config", configFor(port), "--host", "127.0.0.1", "--port", String(port)],
+      port,
+      healthUrl: `http://127.0.0.1:${port}/v1/models`,
       healthCheckIntervalMs: 10_000,
       hungProcessTimeoutMs: 60_000,
       maxRestarts: 3,
       restartWindowMs: 600_000,
       startupTimeoutMs: 60_000,
     });
+  };
 
+  let refreshing = false;
   const handle: SidecarHandle = {
-    supervisor: make(),
+    supervisor: make(SWITCHYARD_PORT, config),
     port: SWITCHYARD_PORT,
     async refresh() {
-      const next = generateSwitchyardConfig(modelsDir, gatewayPort);
-      if (!next) return;
-      fs.writeFileSync(configPath(), next);
-      await handle.supervisor.stop();
-      handle.supervisor = make();
-      await handle.supervisor.start();
+      if (refreshing) return; // coalesce concurrent refreshes (e.g. burst of pulls)
+      refreshing = true;
+      try {
+        const next = generateSwitchyardConfig(modelsDir, gatewayPort);
+        if (!next) return;
+        const nextPort = handle.port === SWITCHYARD_PORT ? SWITCHYARD_PORT + 1 : SWITCHYARD_PORT;
+        const green = make(nextPort, next);
+        await green.start(); // health-checked ready before any traffic moves
+        const blue = handle.supervisor;
+        handle.supervisor = green;
+        handle.port = nextPort; // atomic flip — gateway routes new requests here
+        await blue.stop(); // graceful: in-flight requests drain on SIGTERM grace
+      } finally {
+        refreshing = false;
+      }
     },
     async stop() {
       await handle.supervisor.stop();
