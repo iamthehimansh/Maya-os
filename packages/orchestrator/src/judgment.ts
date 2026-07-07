@@ -12,9 +12,11 @@ import type { Plan, Planner, Verifier } from './loop-lead.js';
 const PLANNER_SYSTEM = `You are the planning head of a software team lead. Decompose the user's goal into 1–5 SELF-CONTAINED tasks for one-shot worker agents (each worker sees ONLY its task text, no other context — write complete instructions).
 Reply with ONLY JSON:
 {"tasks":[{"spec":"complete instruction for one worker","deps":[indexes of tasks that must finish first],"scope":["files/dirs this task may touch"],"acceptance":"how to check it worked"}]}
-Rules:
-- Prefer FEWER, meatier tasks. Parallel tasks must have disjoint scopes.
-- Only if the goal is genuinely undecidable without the owner (e.g. two contradictory readings), reply instead: {"clarification":{"prompt":"the question","options":["option A","option B"]}} — at most ONE clarification, never for preferences you can default sensibly.`;
+HARD RULES:
+- If the goal is SIMPLE (create/write one or a few files), emit EXACTLY ONE task whose spec RESTATES THE GOAL, preserving every exact filename and exact-content requirement VERBATIM (copy "containing exactly: …" strings word for word). Do NOT paraphrase requirements away.
+- NEVER invent files, directories, memory notes, projects, or steps the goal did not ask for. Touch only what the goal names.
+- Prefer FEWER, meatier tasks; split only for genuinely independent work with disjoint scopes.
+- Only if the goal is genuinely undecidable without the owner (two contradictory readings), reply instead: {"clarification":{"prompt":"the question","options":["option A","option B"]}} — at most ONE, never for preferences you can default sensibly.`;
 
 const VERIFIER_SYSTEM = `You are the verification head of a software team lead. Judge whether a worker's task is ACTUALLY complete.
 CRITICAL: workers sometimes claim success without doing the work. When a WORKSPACE section is provided, it is the ground truth — judge ONLY against it (do files with the exact required names exist? does content match the task?), and ignore the worker's own claims. Without a workspace section, judge the reported result pragmatically.
@@ -162,7 +164,9 @@ export function requiredContent(spec: string): string[] {
  * paraphrased tasks. Case-sensitive filename check (macOS's case-insensitive
  * FS otherwise passes `status.md` for `STATUS.md`).
  */
-export function makeGoalCheck(workspaceDir: string): (goal: string) => Promise<{ met: boolean; missing: string[] }> {
+export function makeGoalCheck(
+  workspaceDir: string,
+): (goal: string) => Promise<{ met: boolean; missing: string[]; fixInstruction?: string }> {
   return async (goal: string) => {
     const missing: string[] = [];
     let names: string[] = [];
@@ -172,14 +176,26 @@ export function makeGoalCheck(workspaceDir: string): (goal: string) => Promise<{
       /* unreadable */
     }
     const nameSet = new Set(names);
-    for (const f of requiredFilenames(goal)) {
-      if (!nameSet.has(f)) missing.push(`file ${f} (exact name)`);
-    }
+    const files = requiredFilenames(goal);
+    const contents = requiredContent(goal);
+    for (const f of files) if (!nameSet.has(f)) missing.push(`file ${f} (exact name)`);
     const haystack = concatWorkspace(workspaceDir);
-    for (const c of requiredContent(goal)) {
-      if (!haystack.includes(c)) missing.push(`content ${JSON.stringify(c)}`);
+    for (const c of contents) if (!haystack.includes(c)) missing.push(`content ${JSON.stringify(c)}`);
+    if (missing.length === 0) return { met: true, missing: [] };
+
+    // A CRYSTAL-clear imperative — small workers write templates when given
+    // fuzzy instructions; spell out the literal file + exact bytes.
+    const lines: string[] = ['Use the Write tool. Do NOT add templates, placeholders, headings, or extra text.'];
+    if (files.length && contents.length) {
+      lines.push(`Create the file "${files[0]}". Its ENTIRE content must be EXACTLY this and nothing else:`);
+      lines.push(contents[0]!);
+    } else if (files.length) {
+      lines.push(`Create the file(s): ${files.join(', ')} (use these EXACT names).`);
+    } else if (contents.length) {
+      lines.push('Write a file whose ENTIRE content is EXACTLY this and nothing else:');
+      lines.push(contents[0]!);
     }
-    return { met: missing.length === 0, missing };
+    return { met: false, missing, fixInstruction: lines.join('\n') };
   };
 }
 
