@@ -20,16 +20,33 @@ const MIME: Record<string, string> = {
  */
 /** Same-origin routes served by the AGENT PLANE's orchestrator service (:4400). */
 const ORCHESTRATOR_PREFIXES = ["/api/teams", "/api/agents", "/api/runs", "/api/loop", "/api/orchestrator"];
+/** Bus REST routes exposed to the dashboard — READ-ONLY, bearer injected server-side. */
+const BUS_PREFIX = "/api/channels";
 
-export function serveDashboard(distDir: string, port: number, gatewayPort: number, orchestratorPort?: number): http.Server {
+export interface BusProxy {
+  port: number;
+  /** Injected into bus requests so the browser NEVER holds a bus credential. */
+  adminToken: string;
+}
+
+export function serveDashboard(distDir: string, port: number, gatewayPort: number, orchestratorPort?: number, bus?: BusProxy): http.Server {
   const server = http.createServer((req, res) => {
     const url = req.url ?? "/";
 
     if (url.startsWith("/api/") || url.startsWith("/v1/")) {
-      const toOrchestrator = orchestratorPort !== undefined && ORCHESTRATOR_PREFIXES.some((p) => url.startsWith(p));
-      const targetPort = toOrchestrator ? orchestratorPort : gatewayPort;
+      const toBus = bus !== undefined && url.startsWith(BUS_PREFIX);
+      if (toBus && req.method !== "GET") {
+        // The channel viewer is read-only; token minting/policy writes must
+        // never be reachable from a browser.
+        res.writeHead(405, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "bus routes are read-only via the dashboard", type: "maya_dashboard_proxy" } }));
+        return;
+      }
+      const toOrchestrator = !toBus && orchestratorPort !== undefined && ORCHESTRATOR_PREFIXES.some((p) => url.startsWith(p));
+      const targetPort = toBus ? bus.port : toOrchestrator ? orchestratorPort : gatewayPort;
+      const headers = toBus ? { ...req.headers, authorization: `Bearer ${bus.adminToken}` } : req.headers;
       const upstream = http.request(
-        { host: "127.0.0.1", port: targetPort, path: url, method: req.method, headers: req.headers },
+        { host: "127.0.0.1", port: targetPort, path: url, method: req.method, headers },
         (up) => {
           res.writeHead(up.statusCode ?? 502, up.headers);
           up.pipe(res);
@@ -37,7 +54,7 @@ export function serveDashboard(distDir: string, port: number, gatewayPort: numbe
       );
       upstream.on("error", () => {
         res.writeHead(502, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: { message: toOrchestrator ? "orchestrator unreachable" : "gateway unreachable", type: "maya_dashboard_proxy" } }));
+        res.end(JSON.stringify({ error: { message: toBus ? "bus unreachable" : toOrchestrator ? "orchestrator unreachable" : "gateway unreachable", type: "maya_dashboard_proxy" } }));
       });
       req.pipe(upstream);
       return;

@@ -91,3 +91,9 @@ button.act:disabled { opacity: 0.5; cursor: default; }
 .models table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .models th { text-align: left; font-size: 12px; color: var(--text-secondary); font-weight: 500; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--border); }
 .models td { padding: 8px 10px 8px 0; border-bottom: 1px dotted var(--border); }
+
+/* Conversations tab: channel viewer (lane 01) */
+.convo { display: flex; flex-direction: column; gap: 10px; max-height: 480px; overflow-y: auto; }
+.convo-msg { border-bottom: 1px dotted var(--border); padding-bottom: 8px; font-size: 13px; }
+.convo-meta { display: flex; gap: 8px; align-items: center; margin-bottom: 3px; color: var(--text-secondary); font-size: 12px; }
+.convo-text { white-space: pre-wrap; word-break: break-word; }
