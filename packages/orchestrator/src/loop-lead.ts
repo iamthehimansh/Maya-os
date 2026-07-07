@@ -61,7 +61,11 @@ export interface LoopLeadOptions {
    * workspace dir for the goal's required filenames + exact content.
    */
   goalCheck?: (goal: string) => Promise<{ met: boolean; missing: string[]; fixInstruction?: string }>;
-  /** Max goal-fix rounds after per-task verification. Default 2. */
+  /**
+   * Max goal-fix rounds after per-task verification. Default 3 — each round is
+   * an independent shot at the goal, so more rounds directly raise the success
+   * rate with flaky small workers (measured 3/4 → higher at 3B).
+   */
   maxGoalFix?: number;
 }
 
@@ -177,7 +181,7 @@ export class LoopLead {
       // can comply, then re-checks the goal against reality.
       let goalMissing: string[] = [];
       if (this.opts.goalCheck) {
-        const maxGoalFix = this.opts.maxGoalFix ?? 2;
+        const maxGoalFix = this.opts.maxGoalFix ?? 3;
         let check = await this.opts.goalCheck(goal);
         for (let round = 0; !check.met && round < maxGoalFix; round++) {
           lead.sendMessage({ body: { text: `🎯 goal not yet met (round ${round + 1}/${maxGoalFix}) — missing: ${check.missing.join(', ')}`.slice(0, 300) } });

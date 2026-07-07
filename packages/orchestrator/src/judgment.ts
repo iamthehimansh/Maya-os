@@ -183,16 +183,20 @@ export function makeGoalCheck(
     for (const c of contents) if (!haystack.includes(c)) missing.push(`content ${JSON.stringify(c)}`);
     if (missing.length === 0) return { met: true, missing: [] };
 
-    // A CRYSTAL-clear imperative — small workers write templates when given
-    // fuzzy instructions; spell out the literal file + exact bytes.
-    const lines: string[] = ['Use the Write tool. Do NOT add templates, placeholders, headings, or extra text.'];
+    // A CRYSTAL-clear imperative — small workers write *plausible* templates
+    // when given fuzzy instructions, so spell out the literal file + exact
+    // bytes and tell the worker to COPY them byte-for-byte (02's idea).
+    const lines: string[] = [
+      'Use the Write tool exactly once. Do NOT write a template, title, heading, markdown, placeholder, or ANY extra text.',
+    ];
     if (files.length && contents.length) {
-      lines.push(`Create the file "${files[0]}". Its ENTIRE content must be EXACTLY this and nothing else:`);
+      lines.push(`Create a file named EXACTLY: ${files[0]}`);
+      lines.push('Its content must be COPIED BYTE-FOR-BYTE from the next line and be the file\'s ENTIRE content:');
       lines.push(contents[0]!);
     } else if (files.length) {
-      lines.push(`Create the file(s): ${files.join(', ')} (use these EXACT names).`);
+      lines.push(`Create file(s) named EXACTLY: ${files.join(', ')} — use these exact names, no variations.`);
     } else if (contents.length) {
-      lines.push('Write a file whose ENTIRE content is EXACTLY this and nothing else:');
+      lines.push('Write a file whose ENTIRE content is COPIED BYTE-FOR-BYTE from the next line:');
       lines.push(contents[0]!);
     }
     return { met: false, missing, fixInstruction: lines.join('\n') };
