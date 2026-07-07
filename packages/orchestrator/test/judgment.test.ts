@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { TaskRow } from '@maya-ai/core';
 import { LlmClient } from '../src/llm.js';
-import { makeVerifier, requiredFilenames } from '../src/judgment.js';
+import { makeVerifier, requiredContent, requiredFilenames } from '../src/judgment.js';
 
 const deadLlm = new LlmClient({ gatewayBaseUrl: 'http://127.0.0.1:1', model: 'local/none', timeoutMs: 500 });
 
@@ -60,5 +60,42 @@ describe('makeVerifier filename gate', () => {
     // Gate passes → it proceeds to the (dead) LLM → throws. That throw IS the
     // proof the deterministic gate didn't short-circuit a passing workspace.
     await expect(verify(task('Create NOTES.md with a description'))).rejects.toThrow();
+  });
+});
+
+describe('requiredContent', () => {
+  it('extracts exact-content requirements from common phrasings', () => {
+    expect(requiredContent('create x.txt containing exactly: `MAYA-OK`')).toEqual(['MAYA-OK']);
+    expect(requiredContent('the file content: "Maya M3 demo complete"')).toContain('Maya M3 demo complete');
+  });
+
+  it('ignores filename-looking and code-looking backtick literals', () => {
+    expect(requiredContent('edit `slugify.mjs` and call `slugify(s)`')).toEqual([]);
+  });
+
+  it('excludes rework-echoed content', () => {
+    const spec = 'write exactly: `GOAL-TEXT`\nREWORK (round 1): must contain exactly: "GOAL-TEXT"';
+    expect(requiredContent(spec)).toEqual(['GOAL-TEXT']);
+  });
+});
+
+describe('makeVerifier content gate (finding #2: workers lie about content)', () => {
+  it('fails when required exact content is absent from every file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifc-'));
+    fs.writeFileSync(path.join(dir, 'out.txt'), '2026-07-08'); // the live wrong-content case
+    const verify = makeVerifier(deadLlm, { workspaceDir: dir });
+
+    const verdict = await verify(task('create out.txt containing exactly: `Maya M3 demo complete`'));
+    expect(verdict.ok).toBe(false);
+    expect(verdict.feedback).toContain('Maya M3 demo complete');
+  });
+
+  it('passes the content gate when the exact string is present', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifc-'));
+    fs.writeFileSync(path.join(dir, 'out.txt'), 'header\nMaya M3 demo complete\nfooter');
+    const verify = makeVerifier(deadLlm, { workspaceDir: dir });
+
+    // Both gates pass → reaches the dead LLM → throws (proves gate didn't reject).
+    await expect(verify(task('create out.txt containing exactly: `Maya M3 demo complete`'))).rejects.toThrow();
   });
 });

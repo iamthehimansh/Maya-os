@@ -6,6 +6,9 @@ import { EventLog } from '@maya-ai/agent-runtime';
  * Scripted one-shot worker: prompt markers drive behavior.
  *  - "FAIL_ONCE" → first spawn for that prompt fails, later ones succeed
  *  - "TOKENS:<n>" → emits a token event of n before exiting
+ *  - "HANG" → emits running then NEVER terminates (tests the watchdog);
+ *    only kill() ends it
+ *  - "STDERR:<msg>" → emits a stderr log line before the outcome
  */
 export class ScriptedWorkers implements AgentAdapter {
   readonly id = 'scripted';
@@ -35,12 +38,16 @@ export class ScriptedWorkers implements AgentAdapter {
     const prompt = spec.prompt ?? '';
     const willFail = prompt.includes('FAIL_ONCE') && !this.failedOnce.has(prompt);
     const tokens = /TOKENS:(\d+)/.exec(prompt);
+    const stderr = /STDERR:([^\s]+)/.exec(prompt);
+    const hang = prompt.includes('HANG');
 
     setTimeout(() => {
       log.push({ kind: 'state', state: 'running', at: now() });
+      if (stderr) log.push({ kind: 'log', stream: 'stderr', line: stderr[1]!, at: now() });
       if (tokens) {
         log.push({ kind: 'tokens', input: Number(tokens[1]), output: 0, at: now() });
       }
+      if (hang) return; // never terminal — the watchdog must kill it
       if (willFail) {
         this.failedOnce.add(prompt);
         entry.handle = { ...entry.handle, state: 'failed' };

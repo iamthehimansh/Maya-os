@@ -30,6 +30,12 @@ export interface MemberTemplate {
   /** Worker scoping applied to every task spawn from this template. */
   allowedTools?: string[];
   maxTurns?: number;
+  /**
+   * Escape hatch: accept a model whose measured `toolCalling` capability is
+   * false (completion-style specialists can't drive agentic workers — the
+   * Coder-series lesson). Off by default.
+   */
+  allowNonToolCalling?: boolean;
 }
 
 export interface CreateTeamInput {
@@ -46,6 +52,22 @@ export interface TeamManagerOptions {
   bus: { wsBase: string; adminToken: string; httpBase?: string };
   /** Max attempts per task before it stays failed. Default 2. */
   maxAttempts?: number;
+  /**
+   * Capability lookup for worker-model gating; defaults to the gateway
+   * catalog when `gatewayBaseUrl` is set (tests inject their own). Returning
+   * null = unknown model/capability → fail-open with a warning; a measured
+   * `toolCalling:false` fails team creation unless the template opts out.
+   */
+  modelCapabilities?: (model: string) => Promise<{ toolCalling?: boolean } | null>;
+  gatewayBaseUrl?: string;
+  /**
+   * A worker must reach a terminal state within this budget or it is killed
+   * and the task fails LOUDLY with its captured stderr — no more silent
+   * settle-timeout hangs when a worker wedges (bad cwd, stuck process). The
+   * live incident: a cwd Claude Code wouldn't operate in left the task in
+   * `working` forever. Default 5 min.
+   */
+  workerTimeoutMs?: number;
 }
 
 interface InFlightWorker {
@@ -66,9 +88,11 @@ interface LiveTeam {
 export class TeamManager {
   private readonly live = new Map<string, LiveTeam>();
   private readonly maxAttempts: number;
+  private readonly workerTimeoutMs: number;
 
   constructor(private readonly opts: TeamManagerOptions) {
     this.maxAttempts = opts.maxAttempts ?? 2;
+    this.workerTimeoutMs = opts.workerTimeoutMs ?? 300_000;
   }
 
   private httpBase(): string {
@@ -79,6 +103,7 @@ export class TeamManager {
 
   async createTeam(input: CreateTeamInput): Promise<TeamRow> {
     if (input.members.length === 0) throw new Error('a team needs at least one member template');
+    await this.gateWorkerModels(input.members);
     const team = this.opts.db.createTeam({
       name: input.name,
       topology: input.topology,
@@ -192,6 +217,28 @@ export class TeamManager {
     return lt;
   }
 
+  /**
+   * Worker models must tool-call (measured capability from the catalog):
+   * a measured false fails fast with a pointer to the fix; unknown models
+   * (no lookup configured / not in catalog / capability unmeasured) pass
+   * open — cloud models and custom gateways stay usable.
+   */
+  private async gateWorkerModels(members: MemberTemplate[]): Promise<void> {
+    const lookup =
+      this.opts.modelCapabilities ??
+      (this.opts.gatewayBaseUrl !== undefined ? gatewayCapabilityLookup(this.opts.gatewayBaseUrl) : null);
+    if (!lookup) return;
+    for (const m of members) {
+      if (m.allowNonToolCalling === true) continue;
+      const caps = await lookup(m.model).catch(() => null);
+      if (caps?.toolCalling === false) {
+        throw new Error(
+          `worker model ${m.model} cannot tool-call (measured) — agentic workers need a tool-calling model (e.g. an Instruct-series); set allowNonToolCalling:true to override`,
+        );
+      }
+    }
+  }
+
   private async assign(lt: LiveTeam, task: TaskRow): Promise<TaskRow> {
     const template = lt.templates[lt.nextTemplate % lt.templates.length]!;
     lt.nextTemplate += 1;
@@ -220,10 +267,21 @@ export class TeamManager {
     }
 
     const adapter = this.opts.runtime.adapter(template.adapter);
-    const { busHandle } = await this.opts.bridge.attach(adapter, handle, {
-      channelId: lt.team.channelId,
-      label: `worker-${task.id.slice(-4)}`,
-    });
+    let busHandle: string;
+    try {
+      ({ busHandle } = await this.opts.bridge.attach(adapter, handle, {
+        channelId: lt.team.channelId,
+        label: `worker-${task.id.slice(-4)}`,
+      }));
+    } catch (err) {
+      // Attach failure used to hang the whole run (assign never returned) —
+      // kill the orphan and fail the task with a clear reason instead.
+      await adapter.kill(handle.id).catch(() => {});
+      this.opts.db.transitionTask(task.id, 'failed', { result: `bus attach failed: ${String(err)}`, bumpAttempts: true });
+      lt.manager.sendMessage({ body: { text: `❌ ${task.id} could not join the channel: ${String(err).slice(0, 160)}` } });
+      this.maybeRetry(lt, task.id);
+      return this.opts.db.task(task.id)!;
+    }
     this.opts.db.addAgent({
       id: handle.id,
       teamId: lt.team.id,
@@ -256,7 +314,19 @@ export class TeamManager {
     adapter: ReturnType<AgentRuntime['adapter']>,
   ): Promise<void> {
     let lastOutput = '';
+    let lastStderr = '';
     let failed: string | null = null;
+    let timedOut = false;
+
+    // Watchdog: a worker that never reaches a terminal state gets killed, so
+    // the event stream closes and the terminal handling below runs with a
+    // clear reason — instead of the run hanging until settle timeout.
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      void adapter.kill(agentId).catch(() => {});
+    }, this.workerTimeoutMs);
+    watchdog.unref?.();
+
     try {
       for await (const ev of adapter.events(agentId)) {
         if (ev.kind === 'state') {
@@ -264,11 +334,14 @@ export class TeamManager {
           if (ev.state === 'running') this.safeTransition(taskId, 'working');
         } else if (ev.kind === 'log' && ev.stream === 'stdout' && ev.line.trim()) {
           lastOutput = ev.line;
+        } else if (ev.kind === 'log' && ev.stream === 'stderr' && ev.line.trim()) {
+          lastStderr = ev.line;
         } else if (ev.kind === 'error') {
           failed = ev.message;
         } else if (ev.kind === 'tokens') {
           const { exhausted } = this.opts.db.addTeamTokens(lt.team.id, ev.input + ev.output);
           if (exhausted && !lt.draining) {
+            clearTimeout(watchdog);
             void this.drain(lt.team.id, 'token budget exhausted');
             return;
           }
@@ -277,9 +350,11 @@ export class TeamManager {
     } catch {
       failed = failed ?? 'event stream broke';
     }
+    clearTimeout(watchdog);
 
     lt.inFlight.delete(taskId);
     const final = await adapter.status(agentId).catch(() => null);
+    if (timedOut) failed = `worker exceeded ${Math.round(this.workerTimeoutMs / 1000)}s without finishing${lastStderr ? ` (last stderr: ${lastStderr.slice(0, 160)})` : ''}`;
     const cleanExit = final?.state === 'exited' && failed === null;
     if (cleanExit) {
       this.safeTransition(taskId, 'done', { result: lastOutput.slice(0, 2000) });
@@ -290,7 +365,8 @@ export class TeamManager {
         },
       });
     } else {
-      const reason = failed ?? `worker ended in state ${final?.state ?? 'unknown'}`;
+      const base = failed ?? `worker ended in state ${final?.state ?? 'unknown'} with no result`;
+      const reason = failed === null && lastStderr ? `${base} — last stderr: ${lastStderr.slice(0, 200)}` : base;
       this.safeTransition(taskId, 'failed', { result: reason.slice(0, 500), bumpAttempts: true });
       lt.manager.sendMessage({
         body: {
@@ -323,3 +399,14 @@ export class TeamManager {
 }
 
 export const newRunId = (): string => 'run_' + randomUUID().replaceAll('-', '').slice(0, 10);
+
+/** Default capability lookup: the gateway catalog's measured `capabilities`. */
+function gatewayCapabilityLookup(gatewayBaseUrl: string) {
+  const base = gatewayBaseUrl.replace(/\/$/, '');
+  return async (model: string): Promise<{ toolCalling?: boolean } | null> => {
+    const res = await fetch(`${base}/api/models`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
+    if (!res?.ok) return null;
+    const catalog = (await res.json()) as Array<{ id: string; capabilities?: { toolCalling?: boolean } }>;
+    return catalog.find((m) => m.id === model)?.capabilities ?? null;
+  };
+}

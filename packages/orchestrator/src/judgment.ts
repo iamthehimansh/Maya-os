@@ -75,6 +75,19 @@ export function makeVerifier(llm: LlmClient, opts?: VerifierOptions): Verifier {
           feedback: `required file(s) missing or misnamed — create EXACTLY: ${missing.join(', ')}`,
         };
       }
+      // Content gate: when the spec dictates EXACT content ("containing
+      // exactly: X", "content: X", or a backtick-quoted literal), that string
+      // must actually appear somewhere in the workspace (observed live: goal
+      // wanted "Maya M3 demo complete", worker wrote "2026-07-08", verifier
+      // passed it). Workers lie about content, not just filenames.
+      const haystack = concatWorkspace(opts.workspaceDir);
+      const missingContent = requiredContent(task.spec).filter((s) => !haystack.includes(s));
+      if (missingContent.length > 0) {
+        return {
+          ok: false,
+          feedback: `required content not found in any file — must contain exactly: ${missingContent.map((s) => JSON.stringify(s)).join(', ')}`,
+        };
+      }
       workspace = `\n\nWORKSPACE (ground truth — directory listing with file heads):\n${snapshotDir(opts.workspaceDir)}`;
     }
     const user = `Task: ${task.spec}\n\nWorker's reported result: ${task.result ?? '(none)'}${workspace}`;
@@ -109,6 +122,46 @@ function fileExists(dir: string, name: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Exact-content requirements the spec dictates. Matches the common phrasings
+ * ("containing exactly: X", "content: X", "exactly X") and backtick literals.
+ * Exported for tests. REWORK echoes excluded. Conservative — only fires on an
+ * explicit exactness cue, so free-form goals aren't over-constrained.
+ */
+export function requiredContent(spec: string): string[] {
+  const base = spec.split('\nREWORK (round')[0] ?? spec;
+  const out = new Set<string>();
+  const phrase = /(?:containing|contains?|content(?:s)?|says?|write[s]?|exactly)\s*(?:exactly)?\s*[:=]?\s*[`"“]([^`"”\n]{2,120})[`"”]/gi;
+  for (const m of base.matchAll(phrase)) out.add(m[1]!.trim());
+  // Bare backtick literals used as required content (e.g. `MAYA-OK`).
+  for (const m of base.matchAll(/`([^`\n]{2,120})`/g)) {
+    const s = m[1]!.trim();
+    // Skip things that are clearly filenames or code identifiers with dots/parens.
+    if (!/\.[A-Za-z]{1,6}$/.test(s) && !/[()]/.test(s)) out.add(s);
+  }
+  return [...out];
+}
+
+/** Concatenated head of every workspace file — the content-gate haystack. */
+function concatWorkspace(dir: string): string {
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return '';
+  }
+  const parts: string[] = [];
+  for (const name of entries.slice(0, 40)) {
+    try {
+      const p = `${dir}/${name}`;
+      if (statSync(p).isFile()) parts.push(readHead(p, 4096));
+    } catch {
+      /* skip */
+    }
+  }
+  return parts.join('\n');
 }
 
 /** Names + first 1KB of up to 20 files (one level deep) — small by design. */
