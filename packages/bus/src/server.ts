@@ -58,6 +58,9 @@ export async function startBusServer(opts: BusServerOptions): Promise<RunningBus
   const server = createServer(getRequestListener(api.fetch));
   const wss = new WebSocketServer({ noServer: true });
 
+  // Heartbeat liveness map — a socket that misses two sweeps gets terminated.
+  const alive = new WeakMap<WebSocket, boolean>();
+
   server.on('upgrade', (req, socket, head) => {
     const { channelId, token } = authorizeUpgrade(db, req);
     if (!channelId || !token) {
@@ -66,16 +69,16 @@ export async function startBusServer(opts: BusServerOptions): Promise<RunningBus
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
+      // NOTE: handleUpgrade invokes this callback INSTEAD of emitting a
+      // 'connection' event — install per-socket listeners (heartbeat pong)
+      // here, or they never get installed and the sweep kills live clients.
+      alive.set(ws, true);
+      ws.on('pong', () => alive.set(ws, true));
       attachConnection(ws, channelId, token, db, hub);
     });
   });
 
   // Server-side heartbeat: terminate sockets that stop answering pings.
-  const alive = new WeakMap<WebSocket, boolean>();
-  wss.on('connection', (ws) => {
-    alive.set(ws, true);
-    ws.on('pong', () => alive.set(ws, true));
-  });
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
       if (alive.get(ws) === false) {
@@ -116,7 +119,9 @@ function authorizeUpgrade(
   db: BusDb,
   req: IncomingMessage,
 ): { channelId: string | null; token: TokenRow | null } {
-  const match = /^\/ws\/bus\/([A-Za-z0-9/_-]+)$/.exec((req.url ?? '').split('?')[0] ?? '');
+  // Channel ids arrive percent-encoded (clients encodeURIComponent them, e.g.
+  // "maya/team/x" → "maya%2Fteam%2Fx"), so allow '%' and decode below.
+  const match = /^\/ws\/bus\/([A-Za-z0-9%/_.-]+)$/.exec((req.url ?? '').split('?')[0] ?? '');
   const channelId = match?.[1] ? decodeURIComponent(match[1]) : null;
   if (!channelId) return { channelId: null, token: null };
 

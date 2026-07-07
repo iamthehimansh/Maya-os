@@ -117,11 +117,14 @@ export class Hub {
       from: conn.handle,
       fromTokenId: conn.token.id,
       fromRole: conn.token.role,
+      ...(frame.cid !== undefined ? { cid: frame.cid } : {}),
       to: frame.to ?? null,
       isPrivate: frame.private === true,
       body,
     });
-    this.deliver(stamped);
+    // null = at-least-once dedupe hit: the original of this resend was already
+    // persisted and delivered — drop silently (no error, no redelivery).
+    if (stamped) this.deliver(stamped);
     return null;
   }
 

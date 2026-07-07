@@ -66,6 +66,7 @@ export class BusDb {
       CREATE TABLE IF NOT EXISTS bus_messages (
         channel_id    TEXT NOT NULL,
         seq           INTEGER NOT NULL,
+        cid           TEXT,
         from_handle   TEXT NOT NULL,
         from_token_id TEXT,
         from_role     TEXT,
@@ -77,6 +78,10 @@ export class BusDb {
       );
       CREATE INDEX IF NOT EXISTS idx_bus_messages_channel
         ON bus_messages (channel_id, seq);
+      -- At-least-once dedupe: a resent (channel, token, cid) triple is dropped.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_bus_messages_cid
+        ON bus_messages (channel_id, from_token_id, cid)
+        WHERE cid IS NOT NULL AND from_token_id IS NOT NULL;
     `);
   }
 
@@ -147,33 +152,49 @@ export class BusDb {
 
   // ── messages ──────────────────────────────────────────────────────────
 
-  /** Persist a message, allocating the next seq atomically. Returns the full frame. */
+  /**
+   * Persist a message, allocating the next seq atomically. Returns the full
+   * frame — or null when (channel, token, cid) was already persisted: the
+   * client resent after a reconnect but the original made it (at-least-once
+   * dedupe; callers must NOT deliver a null).
+   */
   appendMessage(
     channelId: string,
     msg: {
       from: string;
       fromTokenId?: string;
       fromRole?: BusRole;
+      cid?: string;
       to?: string | null;
       isPrivate: boolean;
       body: BusMessageFrame['body'];
     },
-  ): BusMessageFrame {
+  ): BusMessageFrame | null {
     const ts = new Date().toISOString();
     this.db.exec('BEGIN IMMEDIATE;');
     try {
+      if (msg.cid !== undefined && msg.fromTokenId !== undefined) {
+        const dupe = this.db
+          .prepare('SELECT seq FROM bus_messages WHERE channel_id = ? AND from_token_id = ? AND cid = ?')
+          .get(channelId, msg.fromTokenId, msg.cid);
+        if (dupe) {
+          this.db.exec('ROLLBACK;');
+          return null;
+        }
+      }
       const row = this.db
         .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM bus_messages WHERE channel_id = ?')
         .get(channelId) as { next: number };
       const seq = Number(row.next);
       this.db
         .prepare(
-          `INSERT INTO bus_messages (channel_id, seq, from_handle, from_token_id, from_role, to_handle, private, ts, body)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO bus_messages (channel_id, seq, cid, from_handle, from_token_id, from_role, to_handle, private, ts, body)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           channelId,
           seq,
+          msg.cid ?? null,
           msg.from,
           msg.fromTokenId ?? null,
           msg.fromRole ?? null,
@@ -193,6 +214,7 @@ export class BusDb {
         private: msg.isPrivate,
         ts,
         body: msg.body,
+        ...(msg.cid !== undefined ? { cid: msg.cid } : {}),
         ...(msg.fromTokenId !== undefined ? { fromTokenId: msg.fromTokenId } : {}),
         ...(msg.fromRole !== undefined ? { fromRole: msg.fromRole } : {}),
       };
@@ -255,7 +277,9 @@ function rowToChannel(r: Record<string, unknown>): ChannelRow {
 function rowToMessage(r: Record<string, unknown>): BusMessageFrame {
   const fromTokenId = r['from_token_id'];
   const fromRole = r['from_role'];
+  const cid = r['cid'];
   return {
+    ...(cid !== null && cid !== undefined ? { cid: String(cid) } : {}),
     v: 1,
     type: 'message',
     channelId: String(r['channel_id']),

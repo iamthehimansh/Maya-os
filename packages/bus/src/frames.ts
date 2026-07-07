@@ -22,6 +22,7 @@ export const sendFrameSchema = z
   .object({
     v: z.literal(1),
     type: z.literal('message'),
+    cid: z.string().min(1).max(64).optional(),
     to: z.string().max(128).optional(),
     private: z.boolean().optional(),
     body: bodySchema,

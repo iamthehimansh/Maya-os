@@ -25,6 +25,13 @@ export interface BusMessageFrame {
   channelId: string;
   /** Server-assigned, strictly increasing per channel — clients dedupe/order by it. */
   seq: number;
+  /**
+   * Client-generated message id (echoed back verbatim). Powers at-least-once
+   * delivery: the sender resends un-echoed messages after a reconnect and the
+   * server dedupes on (channel, token, cid) — a send into a dying socket can't
+   * silently lose a message.
+   */
+  cid?: string;
   from: string;
   /** Present iff sender is an agent token; humans have none. */
   fromTokenId?: string;
@@ -63,6 +70,8 @@ export interface BusHistoryFrame {
 export interface BusSendFrame {
   v: 1;
   type: 'message';
+  /** Client-generated id for at-least-once delivery (see BusMessageFrame.cid). */
+  cid?: string;
   to?: string; // omit = broadcast
   private?: boolean;
   body: BusMessageFrame['body'];

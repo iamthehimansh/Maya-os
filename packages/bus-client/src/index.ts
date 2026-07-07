@@ -12,6 +12,7 @@
  * Token is passed in the WS subprotocol (`mbt.<token>`) — never in the URL.
  */
 
+import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import type {
   BusCancelFrame,
@@ -56,6 +57,14 @@ export class BusClient {
   private ws: WebSocket | null = null;
   private readonly listeners = new Map<EventName, Set<(arg: never) => void>>();
   private readonly outQueue: string[] = [];
+  /**
+   * At-least-once delivery for message frames: every sendMessage() gets a cid
+   * and stays here until the server ECHOES it back (the echo is the ack —
+   * ws.send() succeeding proves nothing; a socket can die mid-flight and
+   * black-hole the frame). On every reconnect all still-pending messages are
+   * resent first, in order; the server dedupes on (channel, token, cid).
+   */
+  private readonly pendingMessages = new Map<string, string>(); // cid → serialized frame
   private attempts = 0;
   private stopped = false;
   private lastSeq = 0;
@@ -115,6 +124,15 @@ export class BusClient {
 
     ws.on('open', () => {
       this.attempts = 0;
+      // Un-acked messages first, in original order — the server dedupes by
+      // cid, so resending one that actually landed is harmless.
+      for (const json of this.pendingMessages.values()) {
+        try {
+          ws.send(json);
+        } catch {
+          break; // socket died again; next reconnect retries
+        }
+      }
       this.flush();
       this.emit('open');
     });
@@ -164,11 +182,18 @@ export class BusClient {
         this.emit('policy', frame);
         return;
       case 'history': {
-        for (const m of frame.messages) if (m.seq > this.lastSeq) this.lastSeq = m.seq;
+        for (const m of frame.messages) {
+          if (m.seq > this.lastSeq) this.lastSeq = m.seq;
+          // A pending message appearing in history means it landed before the
+          // disconnect — that's our ack.
+          if (m.cid !== undefined) this.pendingMessages.delete(m.cid);
+        }
         this.emit('history', frame);
         return;
       }
       case 'message': {
+        // The server echoing our cid back IS the delivery ack.
+        if (frame.cid !== undefined) this.pendingMessages.delete(frame.cid);
         if (frame.seq <= this.lastSeq) return; // dedupe replays across reconnects
         this.lastSeq = frame.seq;
         this.emit('message', frame);
@@ -217,14 +242,29 @@ export class BusClient {
   }
 
   sendMessage(msg: { to?: string; private?: boolean; body: BusSendFrame['body'] }): void {
+    const cid = randomUUID();
     const frame: BusSendFrame = {
       v: 1,
       type: 'message',
+      cid,
       body: msg.body,
       ...(msg.to !== undefined ? { to: msg.to } : {}),
       ...(msg.private !== undefined ? { private: msg.private } : {}),
     };
-    this.send(frame);
+    const json = JSON.stringify(frame);
+    // Tracked until the server echoes the cid back (see pendingMessages doc).
+    if (this.pendingMessages.size >= MAX_QUEUE) {
+      const oldest = this.pendingMessages.keys().next().value;
+      if (oldest !== undefined) this.pendingMessages.delete(oldest);
+    }
+    this.pendingMessages.set(cid, json);
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(json);
+      } catch {
+        // stays pending; resent on next open
+      }
+    }
   }
 
   workStatus(status: Omit<BusWorkStatusFrame, 'v' | 'type' | 'handle'>): void {
