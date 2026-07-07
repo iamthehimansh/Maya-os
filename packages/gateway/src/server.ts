@@ -1,5 +1,5 @@
 import type { ModelCatalogEntry, ModelId, ProviderConfig, RuntimeEvent } from "@maya-ai/core";
-import { type RuntimeManager, availableRam, pullModel, scanModels } from "@maya-ai/model-runtime";
+import { QUANT_QUALITY, type RuntimeManager, availableRam, pullModel, scanModels } from "@maya-ai/model-runtime";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -321,6 +321,8 @@ function catalog(deps: GatewayDeps): ModelCatalogEntry[] {
       displayName: m.name,
       kind: "local-gguf" as const,
       contextLength: m.contextLength,
+      quants: m.files.map((f) => ({ quant: f.quant, quality: QUANT_QUALITY[f.quant] ?? 0.9, bytes: f.bytes })),
+      ...(m.toolCalling !== undefined ? { toolCalling: m.toolCalling } : {}),
       ...(instance ? { instance } : {}),
     };
   });

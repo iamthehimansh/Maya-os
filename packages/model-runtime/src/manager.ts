@@ -13,7 +13,23 @@ import type {
 import { detectLlamaCpp, llamaServerArgs } from "./backends/llamacpp.js";
 import { planFit } from "./estimate.js";
 import { availableRam, processRss } from "./ram.js";
-import { findModel, quantLadderFrom, scanModels } from "./registry.js";
+import { findModel, quantLadderFrom, scanModels, writeModelMeta } from "./registry.js";
+import { fileURLToPath } from "node:url";
+import path2 from "node:path";
+
+/**
+ * Known-broken embedded chat templates, fixed by override. Qwen2.5-Coder
+ * GGUFs ship a tool-call example with single braces where the Instruct
+ * template has double — llama.cpp's chat-format detection fingerprints the
+ * exact pattern, fails on the Coder variant, and silently disables native
+ * tool calling (model answers in markdown JSON). One brace pair.
+ */
+const TEMPLATE_QUIRKS: Array<{ match: RegExp; templateFile: string }> = [
+  {
+    match: /^qwen2[.-]5-coder/i,
+    templateFile: path2.resolve(fileURLToPath(import.meta.url), "../../templates/qwen2.5-tools.jinja"),
+  },
+];
 import { InstanceSupervisor, type SupervisorEvent } from "./supervisor.js";
 
 export interface LoadOpts {
@@ -116,12 +132,14 @@ export class RuntimeManager extends EventEmitter {
     const ram = await availableRam();
     const comfortable = ram.availableBytes - this.guardrails.minFreeRamBytes >= plan.estimateBytes * 1.2;
     const extra = comfortable ? ["--mlock"] : [];
+    const quirk = TEMPLATE_QUIRKS.find((q) => q.match.test(local.name));
     const argsFor = (opts2: { noMmap?: boolean; draft?: string }): string[] =>
       llamaServerArgs({
         modelPath: file.path,
         port,
         contextLength: plan.contextLength,
         alias: model,
+        ...(quirk ? { chatTemplateFile: quirk.templateFile } : {}),
         ...(opts2.draft ? { draftPath: opts2.draft } : {}),
         extra: opts2.noMmap ? [...extra, "--no-mmap"] : extra,
       });
@@ -182,6 +200,7 @@ export class RuntimeManager extends EventEmitter {
     if (plan.degraded.quant || plan.degraded.context) instance.state = "degraded";
     this.startLruSweep();
     void this.sampleRss(managed);
+    if (local.toolCalling === undefined) void this.probeToolCalling(local.name, instance);
     return instance;
   }
 
@@ -204,19 +223,13 @@ export class RuntimeManager extends EventEmitter {
       const named = all.find((m) => m.name === local.draftModel);
       return named?.files[named.files.length - 1]?.path;
     }
-    const family = local.name.split(/[-.]/)[0];
-    if (!family) return undefined;
-    const mainBytes = local.files[0]?.bytes ?? 0;
-    // Measured (3B main + 0.5B draft on M2 Pro): 1.01x — a wash. Speculation
-    // pays when the MAIN is slow; only auto-pair for big models. Explicit
-    // maya.json draftModel still overrides for experimentation.
-    if (mainBytes < 4 * 1024 ** 3) return undefined;
-    const candidates = all
-      .filter((m) => m.name !== local.name && m.name.split(/[-.]/)[0] === family)
-      .map((m) => m.files[m.files.length - 1]!)
-      .filter((f) => f.bytes <= mainBytes * 0.25)
-      .sort((a, b) => a.bytes - b.bytes);
-    return candidates[0]?.path;
+    // MEASURED on M2 Pro (llama.cpp Metal, q8 KV): 3B+0.5B draft = 1.01x,
+    // 7B+0.5B draft = 1.00x — speculation buys nothing here while costing the
+    // draft's RAM. Auto-pairing is therefore OFF; explicit maya.json
+    // draftModel remains for experimentation and for backends where it pays
+    // (CUDA batch-verify, future MLX). Plumbing (flags, budget reserve,
+    // no-draft fallback) stays.
+    return undefined;
   }
 
   async unload(model: ModelId): Promise<void> {
@@ -259,6 +272,47 @@ export class RuntimeManager extends EventEmitter {
       })();
     }, 60_000);
     this.lruTimer.unref?.();
+  }
+
+  /**
+   * Measure native tool-calling once per model (persisted to maya.json).
+   * Some models (e.g. the Qwen2.5-Coder series) answer tool requests in
+   * markdown instead of native tool calls — orchestrators need the truth,
+   * not the model card. One tiny probe at first ready; never repeated.
+   */
+  private async probeToolCalling(name: string, instance: ModelInstance): Promise<void> {
+    try {
+      const res = await fetch(`http://127.0.0.1:${instance.port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "probe",
+          max_tokens: 80,
+          temperature: 0,
+          messages: [{ role: "user", content: "Create a file hello.txt containing OK. Use the Write tool." }],
+          tools: [{
+            type: "function",
+            function: {
+              name: "Write",
+              description: "Write a file",
+              parameters: {
+                type: "object",
+                properties: { file_path: { type: "string" }, content: { type: "string" } },
+                required: ["file_path", "content"],
+              },
+            },
+          }],
+        }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (!res.ok) return; // inconclusive — leave unprobed for a retry next load
+      const body = (await res.json()) as { choices?: Array<{ message?: { tool_calls?: unknown[] } }> };
+      const measured = Boolean(body.choices?.[0]?.message?.tool_calls?.length);
+      writeModelMeta(this.modelsDir, name, { toolCalling: measured });
+      this.emitEvent({ type: "instance_state", instanceId: instance.id, model: instance.model, state: instance.state, reason: `tool-calling probe: ${measured ? "native" : "NOT native (markdown fallback)"}` });
+    } catch {
+      // inconclusive — leave undefined so a later load retries
+    }
   }
 
   private async sampleRss(m: Managed): Promise<void> {
