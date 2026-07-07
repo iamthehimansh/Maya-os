@@ -50,3 +50,7 @@ r = resolveProvider("nope/x", []);
 assert(r.status === 400 && r.error.includes("known:"), "unknown provider lists known ids");
 delete process.env.OPENAI_API_KEY;
 console.log("PROVIDER UNIT PASS ✅");
+
+// responses route present (Codex >=0.142 requirement)
+assert(serverSrc.includes("/v1/responses"), "responses route present");
+console.log("RESPONSES ROUTE GUARD PASS ✅");

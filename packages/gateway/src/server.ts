@@ -158,6 +158,46 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
     });
   });
 
+  // OpenAI Responses API (Codex >=0.142 speaks ONLY this): openai/* models
+  // pass through natively; everything else translates via the sidecar, which
+  // calls back into our /v1 (same pattern as /v1/messages).
+  app.post("/v1/responses", async (c) => {
+    const raw = await c.req.arrayBuffer();
+    let model = "";
+    try {
+      model = String((JSON.parse(Buffer.from(raw).toString()) as { model?: string }).model ?? "");
+    } catch {
+      return oaiError("invalid JSON body", 400);
+    }
+    if (model.startsWith("openai/")) {
+      const resolved = resolveProvider(model as ModelId, deps.providers ?? []);
+      if ("error" in resolved) return oaiError(resolved.error, resolved.status);
+      const rewritten = JSON.stringify({ ...(JSON.parse(Buffer.from(raw).toString()) as Record<string, unknown>), model: resolved.upstreamModel });
+      const upstream = await fetch(`${resolved.baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${resolved.apiKey}` },
+        body: rewritten,
+      });
+      return new Response(upstream.body, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
+      });
+    }
+    const port = deps.anthropicSidecarPort?.();
+    if (!port) {
+      return oaiError("Responses API needs the Switchyard sidecar — run `maya doctor --install-switchyard`, then restart `maya serve`", 501);
+    }
+    const upstream = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": c.req.header("content-type") ?? "application/json" },
+      body: raw,
+    });
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
+    });
+  });
+
   app.get("/v1/models", (c) => {
     const data = catalog(deps).map((m) => ({
       id: m.id,
