@@ -186,10 +186,16 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
     // Async job; progress flows over /api/events as pull_progress.
     void pullModel(deps.modelsDir, { source, ...(name ? { name } : {}) }, fanout)
       .then(() => deps.onCatalogChange?.())
-      .catch((err) =>
-      fanout({ type: "pull_progress", model: `local/${name ?? source}` as ModelId, pct: -1 }) ??
-      console.error("pull failed:", err),
-    );
+      .catch((err) => {
+        // Surface the failure to every UI (dashboard events feed) — a pull
+        // that dies only in the server console looks like a silent hang.
+        fanout({
+          type: "pull_failed",
+          model: `local/${name ?? source}` as ModelId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        console.error("pull failed:", err);
+      });
     return c.json({ started: true, source });
   });
 

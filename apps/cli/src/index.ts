@@ -2,6 +2,10 @@ import { defaultGuardrails, ensureDirs, loadConfig, mayaHome } from "@maya-ai/co
 import type { ModelId } from "@maya-ai/core";
 import { RuntimeManager, pullModel, scanModels, detectLlamaCpp } from "@maya-ai/model-runtime";
 import { detectSwitchyard, provisionSwitchyard, startGateway, startSwitchyard, type SidecarHandle } from "@maya-ai/gateway";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import fs from "node:fs";
+import { serveDashboard } from "./dashboard.js";
 
 const HELP = `maya — local-first AI OS for developers (Apple Silicon first)
 
@@ -48,6 +52,13 @@ export async function main(argv: string[]): Promise<void> {
       process.exitCode = 1;
       return;
     }
+    const holder = await portHolder(cfg.gateway.port);
+    if (holder) {
+      console.error(`maya serve is already running — gateway :${cfg.gateway.port} is held by pid ${holder}.`);
+      console.error("Use the running instance, or stop it first (announce on the team channel before killing a shared serve).");
+      process.exitCode = 1;
+      return;
+    }
     const manager = new RuntimeManager(cfg.modelsDir, cfg.guardrails, cfg.guardrails.autoDowngradeQuant ? 1800 : 1800);
     manager.on("event", (ev) => console.log(`[runtime] ${JSON.stringify(ev)}`));
     let sidecar: SidecarHandle | null = null;
@@ -71,10 +82,20 @@ export async function main(argv: string[]): Promise<void> {
     } else {
       console.log("anthropic api → off (install: maya doctor --install-switchyard; needs ≥1 pulled model)");
     }
+    // Dashboard SPA (same-origin proxy to the gateway — no CORS surface).
+    const dashDist = path.resolve(fileURLToPath(import.meta.url), "../../../dashboard/dist");
+    let dashServer: ReturnType<typeof serveDashboard> | null = null;
+    if (fs.existsSync(path.join(dashDist, "index.html"))) {
+      dashServer = serveDashboard(dashDist, cfg.dashboard.port, cfg.gateway.port);
+      console.log(`dashboard     → http://127.0.0.1:${cfg.dashboard.port}`);
+    } else {
+      console.log("dashboard     → not built (pnpm --filter @maya-ai/dashboard build)");
+    }
     console.log("Ctrl-C to stop (unloads every model instance).");
     const shutdown = (): void => {
       console.log("\nshutting down…");
       server.close();
+      dashServer?.close();
       void Promise.allSettled([manager.unloadAll(), sidecar?.stop() ?? Promise.resolve()]).then(() => process.exit(0));
       setTimeout(() => process.exit(0), 8_000).unref?.();
     };
@@ -160,4 +181,16 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   console.log(HELP);
+}
+
+/** Pid holding a local TCP port, or null when it's free (best-effort, macOS/Linux). */
+async function portHolder(port: number): Promise<string | null> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  try {
+    const { stdout } = await promisify(execFile)("lsof", ["-ti", `:${port}`], { timeout: 3_000 });
+    return stdout.trim().split("\n")[0] || null;
+  } catch {
+    return null; // lsof absent or port free
+  }
 }
