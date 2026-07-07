@@ -1,0 +1,39 @@
+{
+  "name": "@maya-ai/bus",
+  "version": "0.0.1",
+  "description": "Maya bus — the platform's own WebSocket message bus: channels, scoped tokens, server-stamped roles, history, policy. Fresh MIT code (walkie-talkie-style protocol).",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "bin": {
+    "maya-bus": "./bin/maya-bus.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@maya-ai/core": "workspace:*",
+    "hono": "^4.6.0",
+    "@hono/node-server": "^1.13.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@maya-ai/bus-client": "workspace:*",
+    "@types/node": "^22",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  }
+}
