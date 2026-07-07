@@ -18,10 +18,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@maya-ai/core": "workspace:*"
+    "@hono/node-server": "^2.0.8",
+    "@maya-ai/core": "workspace:*",
+    "hono": "^4.12.28",
+    "@maya-ai/model-runtime": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "@types/node": "^22"
+    "@types/node": "^22",
+    "typescript": "^5.7.0"
   }
 }

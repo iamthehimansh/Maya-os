@@ -1,10 +1,9 @@
 /**
  * @maya-ai/gateway — one endpoint for every model (model plane / 02).
  *
- * OpenAI-compatible /v1 + Anthropic-compatible /v1/messages over local GGUF
- * instances and enabled cloud providers, addressed by ModelId
- * ("local/…", "anthropic/…"). Coding agents point ANTHROPIC_BASE_URL here to
- * run on ANY configured model. M1 lands: chat completions passthrough +
- * control API (/api/models, pull, load/unload, health, SSE events).
+ * OpenAI-compatible /v1 over local GGUF instances (cloud providers + the
+ * Anthropic-compatible surface arrive with M2), plus the admin control API
+ * (/api/models, pull, load/unload, health, SSE runtime events). Local chat is
+ * a zero-copy stream passthrough — JS never parses token deltas.
  */
-export const GATEWAY_MILESTONE = "M1";
+export { createGateway, startGateway, type GatewayDeps } from "./server.js";

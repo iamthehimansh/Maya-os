@@ -39,9 +39,18 @@ importers:
 
   packages/gateway:
     dependencies:
+      '@hono/node-server':
+        specifier: ^2.0.8
+        version: 2.0.8(hono@4.12.28)
       '@maya-ai/core':
         specifier: workspace:*
         version: link:../core
+      '@maya-ai/model-runtime':
+        specifier: workspace:*
+        version: link:../model-runtime
+      hono:
+        specifier: ^4.12.28
+        version: 4.12.28
     devDependencies:
       '@types/node':
         specifier: ^22
@@ -65,8 +74,18 @@ importers:
 
 packages:
 
+  '@hono/node-server@2.0.8':
+    resolution: {integrity: sha512-GuCWzLxwg218fy1JaHculFsdcuY12hxit83V+algozTPnwhNjLrRL/Alg9OYjLZLoUZ1rw/S4CdTMsnkSKCmFA==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      hono: ^4
+
   '@types/node@22.20.0':
     resolution: {integrity: sha512-QWlFW2wf3nTjC13/DqRnBpR4ZO36VJH/JVBkA/vcnmbTBNQIlnObqyqZE1tUR7+Ni23Lda8R1BxMfbXRpCUx5g==}
+
+  hono@4.12.28:
+    resolution: {integrity: sha512-YwUvVpSF7m1yOblFPrU3Hbo8XhPheBoiyfGuII6z19LnOr6JpDnyyp7LFNrfV56wS8tpvtBFGRISHN02pDdLOA==}
+    engines: {node: '>=16.9.0'}
 
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
@@ -78,9 +97,15 @@ packages:
 
 snapshots:
 
+  '@hono/node-server@2.0.8(hono@4.12.28)':
+    dependencies:
+      hono: 4.12.28
+
   '@types/node@22.20.0':
     dependencies:
       undici-types: 6.21.0
+
+  hono@4.12.28: {}
 
   typescript@5.9.3: {}
 
