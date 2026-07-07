@@ -1,0 +1,29 @@
+{
+  "name": "maya-os",
+  "version": "0.0.1",
+  "description": "Maya — a local-first AI operating system for developers. One command: models, coding agents, teams, and a Loop Agent lead on your Mac.",
+  "license": "MIT",
+  "author": "Himansh Raj <iamthehimansh@gmail.com>",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "bin": {
+    "maya": "./bin/maya.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": ["dist", "bin"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@maya-ai/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "keywords": ["ai", "agents", "llama.cpp", "gguf", "claude-code", "apple-silicon", "local-first"]
+}

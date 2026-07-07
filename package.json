@@ -1,0 +1,21 @@
+{
+  "name": "maya-monorepo",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Maya — a local-first AI operating system for developers (Apple Silicon first)",
+  "license": "MIT",
+  "author": "Himansh Raj <iamthehimansh@gmail.com>",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "packageManager": "pnpm@11.5.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

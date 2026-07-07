@@ -1,0 +1,25 @@
+{
+  "name": "@maya-ai/core",
+  "version": "0.0.1",
+  "description": "Maya shared contracts, config, and platform paths — every other package builds against this",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./contracts": "./dist/contracts.js",
+    "./config": "./dist/config.js",
+    "./paths": "./dist/paths.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --experimental-strip-types src/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
