@@ -109,7 +109,7 @@ export class RuntimeManager extends EventEmitter {
     const supervisor = new InstanceSupervisor({
       id: `${local.name}-${port}`,
       binPath: llama.binPath,
-      args: llamaServerArgs({ modelPath: file.path, port, contextLength: plan.contextLength }),
+      args: llamaServerArgs({ modelPath: file.path, port, contextLength: plan.contextLength, alias: model }),
       port,
       healthUrl: `http://127.0.0.1:${port}/health`,
       healthCheckIntervalMs: this.guardrails.healthCheckIntervalMs,

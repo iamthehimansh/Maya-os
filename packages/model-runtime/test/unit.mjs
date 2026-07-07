@@ -44,10 +44,11 @@ assert.equal(plan.degraded.context, true);
 assert.equal(planFit(files, "Q8_0", 8192, 1 * GIB, quantLadderFrom), null);
 
 // argv builder is exact (contract with llama-server flags)
-const args = llamaServerArgs({ modelPath: "/m.gguf", port: 41100, contextLength: 4096 });
+const args = llamaServerArgs({ modelPath: "/m.gguf", port: 41100, contextLength: 4096, alias: "local/m" });
 assert.deepEqual(args, [
-  "--model", "/m.gguf", "--port", "41100", "--host", "127.0.0.1",
+  "--model", "/m.gguf", "--alias", "local/m", "--port", "41100", "--host", "127.0.0.1",
   "--ctx-size", "4096", "--n-gpu-layers", "999", "--jinja", "--no-webui", "--metrics",
 ]);
+assert(!llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 1 }).includes("--alias"), "alias optional");
 
 console.log("UNIT PASS ✅ (12 assertions)");

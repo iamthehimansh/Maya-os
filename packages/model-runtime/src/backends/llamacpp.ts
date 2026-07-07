@@ -48,6 +48,8 @@ export interface LlamaServerArgs {
   modelPath: string;
   port: number;
   contextLength: number;
+  /** Model name reported in /v1 responses (the ModelId) — without it llama-server echoes the absolute GGUF path, leaking local paths into agent logs. */
+  alias?: string;
   /** Extra raw args appended last (model profiles / power users). */
   extra?: string[];
 }
@@ -60,6 +62,7 @@ export interface LlamaServerArgs {
 export function llamaServerArgs(a: LlamaServerArgs): string[] {
   return [
     "--model", a.modelPath,
+    ...(a.alias ? ["--alias", a.alias] : []),
     "--port", String(a.port),
     "--host", "127.0.0.1",
     "--ctx-size", String(a.contextLength),
