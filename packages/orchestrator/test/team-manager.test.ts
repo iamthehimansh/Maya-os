@@ -145,4 +145,31 @@ describe('TeamManager', () => {
     expect(db.task(later.id)?.state).toBe('queued'); // never dispatched
     expect(workers.spawned).toBe(1);
   }, 30_000);
+
+  it('watchdog fails a hung worker loudly with its stderr (no silent settle-timeout)', async () => {
+    // Finding #1: a worker that never terminates used to hang the whole run.
+    running = await startBusServer({ dbPath: ':memory:', port: 0 });
+    const admin = running.bootstrapAdminToken!;
+    const wsBase = `ws://127.0.0.1:${running.port}`;
+    const db = new MayaDb(':memory:');
+    const runtime = new AgentRuntime({ gatewayBaseUrl: 'http://127.0.0.1:1' });
+    runtime.register(new ScriptedWorkers());
+    const bridge = new AgentBusBridge({ wsBase, adminToken: admin.token });
+    const tm = new TeamManager({
+      db,
+      runtime,
+      bridge,
+      bus: { wsBase, adminToken: admin.token },
+      workerTimeoutMs: 600, // short for the test
+      maxAttempts: 1,
+    });
+    const team = await tm.createTeam({ name: 'wd', topology: 'round-robin', members: [{ adapter: 'scripted', model: 'local/x', cwd: '/tmp' }] });
+    const t = tm.addTask(team.id, 'this one HANG STDERR:cwd-not-trusted forever');
+
+    await tm.settle(team.id);
+    const final = db.task(t.id)!;
+    expect(final.state).toBe('failed');
+    expect(final.result).toContain('without finishing');
+    expect(final.result).toContain('cwd-not-trusted'); // captured stderr surfaced
+  }, 30_000);
 });
