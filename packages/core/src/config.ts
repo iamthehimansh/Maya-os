@@ -30,6 +30,7 @@ export const defaultConfig = (): PlatformConfig => ({
   gateway: { port: 4100 },
   dashboard: { port: 4200 },
   bus: { port: 4300 },
+  orchestrator: { port: 4400 },
   modelsDir: modelsDir(),
   providers: CLOUD_PROVIDERS.map((id) => ({
     id,

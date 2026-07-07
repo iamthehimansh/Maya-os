@@ -19,9 +19,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@maya-ai/core": "workspace:*",
+    "@hono/node-server": "^1.13.0",
     "@maya-ai/agent-runtime": "workspace:*",
-    "@maya-ai/bus-client": "workspace:*"
+    "@maya-ai/bus-client": "workspace:*",
+    "@maya-ai/core": "workspace:*",
+    "hono": "^4.6.0"
   },
   "devDependencies": {
     "@maya-ai/bus": "workspace:*",

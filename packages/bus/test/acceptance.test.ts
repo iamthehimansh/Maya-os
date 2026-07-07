@@ -114,7 +114,20 @@ describe('bus acceptance', () => {
     writer.say('queued-1');
     writer.say('queued-2');
 
-    running = await startBusServer({ dbPath, port });
+    // Rebinding the SAME port can race other suites' ephemeral allocations
+    // (observed under parallel `pnpm -r test`) — bounded retries, not a
+    // server-side auto-retry, which would mask the friendly "already
+    // running (pid X)" detection.
+    running = await (async () => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await startBusServer({ dbPath, port });
+        } catch (err) {
+          if (attempt >= 8) throw err;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+    })();
     await until(() => seen.length === 3, 20_000);
 
     expect(seen.map((m) => m.body.text)).toEqual(['before-restart', 'queued-1', 'queued-2']);

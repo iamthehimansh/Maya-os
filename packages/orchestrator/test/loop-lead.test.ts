@@ -1,0 +1,140 @@
+/**
+ * LoopLead integration: deterministic planner/verifier + scripted workers
+ * over a REAL bus. Proves the M3 mechanics: decompose → seed → dispatch →
+ * verify → rework → report, clarification round-trip with a human answer,
+ * and the never-hang question timeout.
+ */
+
+import { afterEach, describe, expect, it } from 'vitest';
+import type { BusMessageFrame, LoopBody } from '@maya-ai/core';
+import { MayaDb } from '@maya-ai/core';
+import { AgentBusBridge, AgentRuntime } from '@maya-ai/agent-runtime';
+import { BusClient } from '@maya-ai/bus-client';
+import { mintToken, startBusServer, type RunningBusServer } from '@maya-ai/bus';
+import { LoopLead, type Plan, type Planner, type Verifier } from '../src/loop-lead.js';
+import { TeamManager } from '../src/team-manager.js';
+import { ScriptedWorkers } from './scripted-workers.js';
+
+let running: RunningBusServer | null = null;
+const clients: BusClient[] = [];
+
+afterEach(async () => {
+  for (const c of clients) c.close();
+  clients.length = 0;
+  if (running) {
+    await running.close();
+    running = null;
+  }
+});
+
+async function setup(planner: Planner, verifier: Verifier, questionTimeoutMs?: number) {
+  running = await startBusServer({ dbPath: ':memory:', port: 0 });
+  const admin = running.bootstrapAdminToken!;
+  const wsBase = `ws://127.0.0.1:${running.port}`;
+  const db = new MayaDb(':memory:');
+  const runtime = new AgentRuntime({ gatewayBaseUrl: 'http://127.0.0.1:1' });
+  runtime.register(new ScriptedWorkers());
+  const bridge = new AgentBusBridge({ wsBase, adminToken: admin.token });
+  const teams = new TeamManager({ db, runtime, bridge, bus: { wsBase, adminToken: admin.token } });
+  const lead = new LoopLead({
+    db,
+    teams,
+    team: { topology: 'manager-tree', members: [{ adapter: 'scripted', model: 'local/x', cwd: '/tmp' }] },
+    planner,
+    verifier,
+    bus: { wsBase, adminToken: admin.token },
+    ...(questionTimeoutMs !== undefined ? { questionTimeoutMs } : {}),
+  });
+  return { db, lead, wsBase };
+}
+
+const okVerifier: Verifier = async () => ({ ok: true });
+
+describe('LoopLead', () => {
+  it('runs a two-task plan with a dependency to a verified success report', async () => {
+    const planner: Planner = async () => ({
+      tasks: [
+        { spec: 'write the module', acceptance: 'module exists' },
+        { spec: 'test the module', deps: [0] },
+      ],
+    });
+    const { lead } = await setup(planner, okVerifier);
+    const report = await lead.run('build a module with tests');
+
+    expect(report.outcome).toBe('success');
+    expect(report.tasks).toHaveLength(2);
+    expect(report.tasks.every((t) => t.state === 'done' && t.verified)).toBe(true);
+    expect(report.questionsAsked).toBe(0);
+  }, 30_000);
+
+  it('asks exactly one clarification, uses the human answer, and completes', async () => {
+    const plans: string[] = [];
+    const planner: Planner = async (_goal, context) => {
+      plans.push(context.answer ?? '(none)');
+      if (!context.answer) {
+        return { tasks: [], clarification: { prompt: 'REST or GraphQL?', options: ['REST', 'GraphQL'] } };
+      }
+      return { tasks: [{ spec: `build the ${context.answer} API` }] };
+    };
+    const { db, lead, wsBase } = await setup(planner, okVerifier);
+
+    // A "human" watching for the question and answering it.
+    const runPromise = lead.run('build the API');
+    const human = await (async () => {
+      // Wait for the team channel to exist (first team in the db).
+      for (;;) {
+        const teams = db.teams();
+        if (teams.length > 0) {
+          const { token } = mintToken(running!.db, { label: 'himansh', role: 'owner', scopes: [teams[0]!.channelId] });
+          const c = new BusClient({ wsBase, channelId: teams[0]!.channelId, token }).connect();
+          clients.push(c);
+          await new Promise<void>((r) => c.on('joined', () => r()));
+          return c;
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    })();
+    human.on('message', (m) => {
+      const maya = m.body.maya as LoopBody | undefined;
+      if (maya?.kind === 'question') {
+        const answer: LoopBody = { kind: 'answer', qid: maya.qid, optionId: '1' }; // GraphQL
+        human.sendMessage({ body: { text: 'GraphQL', maya: answer } });
+      }
+    });
+
+    const report = await runPromise;
+    expect(report.outcome).toBe('success');
+    expect(report.questionsAsked).toBe(1);
+    expect(plans).toEqual(['(none)', 'GraphQL']);
+    expect(report.tasks[0]?.spec).toContain('GraphQL');
+  }, 30_000);
+
+  it('reworks a rejected task once, then accepts', async () => {
+    const planner: Planner = async () => ({ tasks: [{ spec: 'produce the report', acceptance: 'mentions Q3' }] });
+    let verdicts = 0;
+    const verifier: Verifier = async () => {
+      verdicts += 1;
+      return verdicts === 1 ? { ok: false, feedback: 'missing Q3 numbers' } : { ok: true };
+    };
+    const { db, lead } = await setup(planner, verifier);
+    const report = await lead.run('quarterly report');
+
+    expect(report.outcome).toBe('success');
+    const all = db.tasks(report.team.id);
+    expect(all).toHaveLength(2); // original + rework
+    expect(all.some((t) => t.spec.includes('REWORK'))).toBe(true);
+    expect(verdicts).toBe(2);
+  }, 30_000);
+
+  it('question timeout falls back to the first option instead of hanging', async () => {
+    const planner: Planner = async (_goal, context) =>
+      context.answer !== undefined
+        ? { tasks: [{ spec: `go with ${context.answer}` }] }
+        : { tasks: [], clarification: { prompt: 'pick one', options: ['alpha', 'beta'] } };
+    const { lead } = await setup(planner, okVerifier, 500);
+    const report = await lead.run('ambiguous goal');
+
+    expect(report.outcome).toBe('success');
+    expect(report.tasks[0]?.spec).toContain('alpha'); // first option
+  }, 30_000);
+});
