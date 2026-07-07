@@ -15,7 +15,10 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node test/unit.mjs",
+    "test:smoke": "node test/smoke.mjs",
+    "test:chaos": "node test/chaos.mjs"
   },
   "dependencies": {
     "@maya-ai/core": "workspace:*"
