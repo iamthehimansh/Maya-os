@@ -23,7 +23,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@maya-ai/core": "workspace:*"
+    "@maya-ai/core": "workspace:*",
+    "@maya-ai/model-runtime": "workspace:*",
+    "@maya-ai/gateway": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

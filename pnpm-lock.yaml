@@ -20,6 +20,12 @@ importers:
       '@maya-ai/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@maya-ai/gateway':
+        specifier: workspace:*
+        version: link:../../packages/gateway
+      '@maya-ai/model-runtime':
+        specifier: workspace:*
+        version: link:../../packages/model-runtime
     devDependencies:
       '@types/node':
         specifier: ^22
