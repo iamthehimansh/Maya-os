@@ -8,8 +8,10 @@
 
 import type { AgentAdapter, AgentHandle, AgentSpawnSpec } from '@maya-ai/core';
 import { ClaudeCodeAdapter, type ClaudeCodeAdapterOptions } from './adapters/claude-code.js';
+import { CodexAdapter, type CodexAdapterOptions } from './adapters/codex.js';
 
 export { ClaudeCodeAdapter, type ClaudeCodeAdapterOptions } from './adapters/claude-code.js';
+export { CodexAdapter, type CodexAdapterOptions } from './adapters/codex.js';
 export { EventLog } from './events.js';
 
 export interface AgentRuntimeOptions {
@@ -22,7 +24,8 @@ export class AgentRuntime {
 
   constructor(opts: AgentRuntimeOptions) {
     this.register(new ClaudeCodeAdapter({ gatewayBaseUrl: opts.gatewayBaseUrl }));
-    // codex + opencode adapters land next on the same interface.
+    this.register(new CodexAdapter({ gatewayBaseUrl: opts.gatewayBaseUrl }));
+    // opencode adapter lands next on the same interface.
   }
 
   register(adapter: AgentAdapter): void {
