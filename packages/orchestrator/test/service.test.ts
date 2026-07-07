@@ -1,0 +1,92 @@
+/**
+ * Orchestrator service: HTTP surface over real components — start a loop run
+ * via POST /api/loop with scripted workers + a stub planner model? No — the
+ * service wires the REAL LLM planner, so instead we exercise the read routes
+ * against a seeded db and validate the POST contract + auth gate. (Full loop
+ * runs through the service are covered by the live script; the LoopLead
+ * internals have their own integration tests.)
+ */
+
+import { afterEach, describe, expect, it } from 'vitest';
+import { startBusServer, type RunningBusServer } from '@maya-ai/bus';
+import { startOrchestratorService, type RunningOrchestrator } from '../src/service.js';
+
+let bus: RunningBusServer | null = null;
+let svc: RunningOrchestrator | null = null;
+
+afterEach(async () => {
+  if (svc) {
+    await svc.close();
+    svc = null;
+  }
+  if (bus) {
+    await bus.close();
+    bus = null;
+  }
+});
+
+async function setup(adminToken?: string) {
+  bus = await startBusServer({ dbPath: ':memory:', port: 0 });
+  svc = await startOrchestratorService({
+    dbPath: ':memory:',
+    gatewayBaseUrl: 'http://127.0.0.1:1',
+    bus: { wsBase: `ws://127.0.0.1:${bus.port}`, adminToken: bus.bootstrapAdminToken!.token },
+    port: 0,
+    ...(adminToken !== undefined ? { adminToken } : {}),
+  });
+  return `http://127.0.0.1:${svc.port}`;
+}
+
+describe('orchestrator service', () => {
+  it('serves health, teams, tasks, agents from the db', async () => {
+    const base = await setup();
+    expect((await fetch(`${base}/api/orchestrator/health`)).ok).toBe(true);
+
+    const team = svc!.db.createTeam({ name: 'ui-team', topology: 'manager-tree' });
+    svc!.db.createTask({ teamId: team.id, spec: 'do something' });
+    svc!.db.addAgent({ id: 'ag_x', teamId: team.id, adapter: 'claude-code', model: 'local/q', busHandle: 'w1', state: 'running' });
+
+    const teams = (await (await fetch(`${base}/api/teams`)).json()) as Array<{ id: string; inFlight: number }>;
+    expect(teams.map((t) => t.id)).toContain(team.id);
+
+    const tasks = (await (await fetch(`${base}/api/teams/${team.id}/tasks`)).json()) as unknown[];
+    expect(tasks).toHaveLength(1);
+
+    const agents = (await (await fetch(`${base}/api/teams/${team.id}/agents`)).json()) as Array<{ id: string }>;
+    expect(agents[0]?.id).toBe('ag_x');
+  });
+
+  it('validates the loop POST contract and registers the run', async () => {
+    const base = await setup();
+    const bad = await fetch(`${base}/api/loop`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    expect(bad.status).toBe(400);
+
+    const res = await fetch(`${base}/api/loop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ goal: 'x', leadModel: 'local/x', workerModel: 'local/x', cwd: '/tmp' }),
+    });
+    expect(res.status).toBe(202);
+    const { runId } = (await res.json()) as { runId: string };
+
+    // The run will fail fast (gateway is a dead port) but must be REGISTERED
+    // and settle into state done with a failure report — never vanish or hang.
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const runs = (await (await fetch(`${base}/api/runs`)).json()) as Array<{ runId: string; state: string }>;
+      const run = runs.find((r) => r.runId === runId);
+      expect(run).toBeTruthy();
+      if (run!.state === 'done') break;
+      if (Date.now() > deadline) throw new Error('run never settled');
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }, 20_000);
+
+  it('gates mutating routes behind the admin bearer when configured', async () => {
+    const base = await setup('secret-admin');
+    const unauthed = await fetch(`${base}/api/loop`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    expect(unauthed.status).toBe(401);
+    // Reads stay open on localhost.
+    expect((await fetch(`${base}/api/teams`)).ok).toBe(true);
+  });
+});

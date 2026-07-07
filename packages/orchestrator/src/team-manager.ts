@@ -175,6 +175,15 @@ export class TeamManager {
     return { team, tasks: this.opts.db.tasks(teamId), inFlight: this.live.get(teamId)?.inFlight.size ?? 0 };
   }
 
+  /** status() for dashboards: null for unknown/not-live teams instead of throwing. */
+  statusSafe(teamId: string): { team: TeamRow; tasks: TaskRow[]; inFlight: number } | null {
+    try {
+      return this.status(teamId);
+    } catch {
+      return null;
+    }
+  }
+
   // ── internals ─────────────────────────────────────────────────────────
 
   private mustLive(teamId: string): LiveTeam {
