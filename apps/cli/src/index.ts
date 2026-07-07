@@ -1,7 +1,7 @@
 import { defaultGuardrails, ensureDirs, loadConfig, mayaHome } from "@maya-ai/core";
 import type { ModelId } from "@maya-ai/core";
 import { RuntimeManager, pullModel, scanModels, detectLlamaCpp } from "@maya-ai/model-runtime";
-import { startGateway } from "@maya-ai/gateway";
+import { detectSwitchyard, provisionSwitchyard, startGateway, startSwitchyard, type SidecarHandle } from "@maya-ai/gateway";
 
 const HELP = `maya — local-first AI OS for developers (Apple Silicon first)
 
@@ -50,14 +50,32 @@ export async function main(argv: string[]): Promise<void> {
     }
     const manager = new RuntimeManager(cfg.modelsDir, cfg.guardrails, cfg.guardrails.autoDowngradeQuant ? 1800 : 1800);
     manager.on("event", (ev) => console.log(`[runtime] ${JSON.stringify(ev)}`));
-    const server = startGateway({ manager, modelsDir: cfg.modelsDir, port: cfg.gateway.port });
+    let sidecar: SidecarHandle | null = null;
+    const server = startGateway({
+      manager,
+      modelsDir: cfg.modelsDir,
+      port: cfg.gateway.port,
+      anthropicSidecarPort: () => sidecar?.port,
+      providers: cfg.providers,
+      onCatalogChange: () => void sidecar?.refresh().catch((e) => console.error("[switchyard] refresh failed:", e)),
+    });
     console.log(`maya gateway  → http://127.0.0.1:${cfg.gateway.port}/v1  (llama.cpp ${llama.version ?? "?"})`);
     console.log(`models        → ${scanModels(cfg.modelsDir).map((m) => `local/${m.name}`).join(", ") || "none — maya models pull hf:…"}`);
+    sidecar = await startSwitchyard(cfg.modelsDir, cfg.gateway.port).catch((e) => {
+      console.error("[switchyard] failed to start:", e instanceof Error ? e.message : e);
+      return null;
+    });
+    if (sidecar) {
+      console.log(`anthropic api → http://127.0.0.1:${cfg.gateway.port}/v1/messages  (Switchyard sidecar :${sidecar.port})`);
+      console.log(`                point coding agents here: ANTHROPIC_BASE_URL=http://127.0.0.1:${cfg.gateway.port}`);
+    } else {
+      console.log("anthropic api → off (install: maya doctor --install-switchyard; needs ≥1 pulled model)");
+    }
     console.log("Ctrl-C to stop (unloads every model instance).");
     const shutdown = (): void => {
       console.log("\nshutting down…");
       server.close();
-      void manager.unloadAll().then(() => process.exit(0));
+      void Promise.allSettled([manager.unloadAll(), sidecar?.stop() ?? Promise.resolve()]).then(() => process.exit(0));
       setTimeout(() => process.exit(0), 8_000).unref?.();
     };
     process.on("SIGINT", shutdown);
@@ -122,6 +140,12 @@ export async function main(argv: string[]): Promise<void> {
   if (cmd === "doctor") {
     ensureDirs();
     const cfg = loadConfig();
+    if (argv.includes("--install-switchyard")) {
+      console.log("provisioning Switchyard venv (isolated, ~/.maya/runtimes/switchyard)…");
+      const info = await provisionSwitchyard((line) => console.log(`  ${line}`));
+      console.log(info.installed ? `✓ switchyard ${info.version} ready` : `✗ ${info.installHint}`);
+      return;
+    }
     const llama = await detectLlamaCpp();
     const { availableRam } = await import("@maya-ai/model-runtime");
     const ram = await availableRam();
@@ -130,6 +154,8 @@ export async function main(argv: string[]): Promise<void> {
     console.log(`llama-server  ${llama.installed ? `✓ ${llama.binPath} (${llama.version})` : `✗ ${llama.installHint}`}`);
     console.log(`ram           ${gb(ram.availableBytes)} available of ${gb(ram.totalBytes)} (guardrail floor ${gb(defaultGuardrails().minFreeRamBytes)})`);
     console.log(`models dir    ${cfg.modelsDir} (${scanModels(cfg.modelsDir).length} installed)`);
+    const sy = await detectSwitchyard();
+    console.log(`switchyard    ${sy.installed ? `✓ ${sy.version} (Anthropic-API agents enabled)` : `✗ ${sy.installHint}`}`);
     return;
   }
 

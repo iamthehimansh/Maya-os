@@ -64,6 +64,7 @@ export function llamaServerArgs(a: LlamaServerArgs): string[] {
     "--host", "127.0.0.1",
     "--ctx-size", String(a.contextLength),
     "--n-gpu-layers", "999",
+    "--jinja", // chat-template engine: required for native tool-calling (agents send tools)
     "--no-webui",
     "--metrics",
     ...(a.extra ?? []),
