@@ -196,6 +196,11 @@ export class MayaDb {
     return (this.db.prepare('SELECT * FROM team_agents WHERE team_id = ? ORDER BY created_at').all(teamId) as Record<string, unknown>[]).map(toAgent);
   }
 
+  /** Every agent across teams, newest first (dashboard Agents tab). */
+  agentsAll(limit = 200): TeamAgentRow[] {
+    return (this.db.prepare('SELECT * FROM team_agents ORDER BY created_at DESC LIMIT ?').all(limit) as Record<string, unknown>[]).map(toAgent);
+  }
+
   // ── tasks ─────────────────────────────────────────────────────────────
 
   createTask(input: { teamId: string; spec: string; parentId?: string; scope?: string[]; deps?: string[] }): TaskRow {

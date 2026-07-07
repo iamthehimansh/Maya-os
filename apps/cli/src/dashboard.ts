@@ -18,13 +18,18 @@ const MIME: Record<string, string> = {
  * gateway — the browser never makes a cross-origin call, so no CORS surface
  * exists at all. SSE streams straight through the pipe. Binds 127.0.0.1 only.
  */
-export function serveDashboard(distDir: string, port: number, gatewayPort: number): http.Server {
+/** Same-origin routes served by the AGENT PLANE's orchestrator service (:4400). */
+const ORCHESTRATOR_PREFIXES = ["/api/teams", "/api/agents", "/api/runs", "/api/loop", "/api/orchestrator"];
+
+export function serveDashboard(distDir: string, port: number, gatewayPort: number, orchestratorPort?: number): http.Server {
   const server = http.createServer((req, res) => {
     const url = req.url ?? "/";
 
     if (url.startsWith("/api/") || url.startsWith("/v1/")) {
+      const toOrchestrator = orchestratorPort !== undefined && ORCHESTRATOR_PREFIXES.some((p) => url.startsWith(p));
+      const targetPort = toOrchestrator ? orchestratorPort : gatewayPort;
       const upstream = http.request(
-        { host: "127.0.0.1", port: gatewayPort, path: url, method: req.method, headers: req.headers },
+        { host: "127.0.0.1", port: targetPort, path: url, method: req.method, headers: req.headers },
         (up) => {
           res.writeHead(up.statusCode ?? 502, up.headers);
           up.pipe(res);
@@ -32,7 +37,7 @@ export function serveDashboard(distDir: string, port: number, gatewayPort: numbe
       );
       upstream.on("error", () => {
         res.writeHead(502, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: { message: "gateway unreachable", type: "maya_dashboard_proxy" } }));
+        res.end(JSON.stringify({ error: { message: toOrchestrator ? "orchestrator unreachable" : "gateway unreachable", type: "maya_dashboard_proxy" } }));
       });
       req.pipe(upstream);
       return;

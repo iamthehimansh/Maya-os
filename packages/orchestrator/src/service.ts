@@ -86,6 +86,7 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
   );
   app.get('/api/teams/:id/tasks', (c) => c.json(db.tasks(c.req.param('id'))));
   app.get('/api/teams/:id/agents', (c) => c.json(db.agents(c.req.param('id'))));
+  app.get('/api/agents', (c) => c.json(db.agentsAll()));
   app.get('/api/runs', (c) => c.json([...runs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt))));
 
   app.post('/api/loop', async (c) => {

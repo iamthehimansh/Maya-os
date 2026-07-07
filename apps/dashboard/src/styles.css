@@ -81,3 +81,13 @@ button.act:disabled { opacity: 0.5; cursor: default; }
 .events div { padding: 2px 0; border-bottom: 1px dotted var(--border); }
 .empty { color: var(--text-muted); padding: 12px 0; }
 .error-banner { background: var(--surface-1); border: 1px solid var(--status-critical); color: var(--text-primary); border-radius: 8px; padding: 10px 14px; margin: 16px 0; font-size: 13px; }
+
+/* Teams tab: task board (lane 01) */
+.board { display: flex; gap: 12px; overflow-x: auto; padding-top: 8px; }
+.board-col { min-width: 180px; flex: 1; }
+.board-col h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); margin: 0 0 8px; }
+.board-card { border: 1px solid var(--border); background: var(--surface-0); border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-bottom: 8px; }
+.board-card code { font-size: 11px; color: var(--text-muted); margin-right: 6px; }
+.models table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.models th { text-align: left; font-size: 12px; color: var(--text-secondary); font-weight: 500; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--border); }
+.models td { padding: 8px 10px 8px 0; border-bottom: 1px dotted var(--border); }
