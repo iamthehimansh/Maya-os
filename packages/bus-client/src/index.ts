@@ -10,6 +10,11 @@
  * - policy auto-ack, app-level keepalive ping
  *
  * Token is passed in the WS subprotocol (`mbt.<token>`) — never in the URL.
+ *
+ * USAGE RULE: attach event handlers BEFORE calling connect(). Multiple server
+ * frames (joined → policy → history) can arrive in one TCP segment and fire
+ * synchronously back-to-back — a handler attached after `await`ing 'joined'
+ * can miss the history frame that came in the same batch.
  */
 
 import { randomUUID } from 'node:crypto';
