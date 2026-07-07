@@ -69,6 +69,15 @@ describe('requiredContent', () => {
     expect(requiredContent('the file content: "Maya M3 demo complete"')).toContain('Maya M3 demo complete');
   });
 
+  it('extracts UNQUOTED content after an exactness cue (the v2 capstone miss)', () => {
+    // 02's live capstone: unquoted, to end of line — the quoted pattern missed it.
+    expect(requiredContent('Create a file named STATUS.md containing exactly: Maya M3 demo complete')).toEqual([
+      'Maya M3 demo complete',
+    ]);
+    expect(requiredContent('write x.txt containing exactly: HELLO and nothing else')).toEqual(['HELLO']);
+    expect(requiredContent('the content: build passed.')).toEqual(['build passed']);
+  });
+
   it('ignores filename-looking and code-looking backtick literals', () => {
     expect(requiredContent('edit `slugify.mjs` and call `slugify(s)`')).toEqual([]);
   });

@@ -23,7 +23,7 @@ import { Hono } from 'hono';
 import { MayaDb } from '@maya-ai/core';
 import { AgentBusBridge, AgentRuntime } from '@maya-ai/agent-runtime';
 import { LlmClient } from './llm.js';
-import { makePlanner, makeVerifier } from './judgment.js';
+import { makeGoalCheck, makePlanner, makeVerifier } from './judgment.js';
 import { LoopLead, type LoopReport } from './loop-lead.js';
 import { TeamManager } from './team-manager.js';
 
@@ -122,6 +122,7 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
       },
       planner: makePlanner(llm),
       verifier: makeVerifier(llm, { workspaceDir: body.cwd }),
+      goalCheck: makeGoalCheck(body.cwd),
       bus: opts.bus,
     });
     const runId = 'run_' + Date.now().toString(36);

@@ -27,7 +27,11 @@ afterEach(async () => {
   }
 });
 
-async function setup(planner: Planner, verifier: Verifier, questionTimeoutMs?: number) {
+async function setup(
+  planner: Planner,
+  verifier: Verifier,
+  extra?: { questionTimeoutMs?: number; goalCheck?: (goal: string) => Promise<{ met: boolean; missing: string[] }> },
+) {
   running = await startBusServer({ dbPath: ':memory:', port: 0 });
   const admin = running.bootstrapAdminToken!;
   const wsBase = `ws://127.0.0.1:${running.port}`;
@@ -43,7 +47,8 @@ async function setup(planner: Planner, verifier: Verifier, questionTimeoutMs?: n
     planner,
     verifier,
     bus: { wsBase, adminToken: admin.token },
-    ...(questionTimeoutMs !== undefined ? { questionTimeoutMs } : {}),
+    ...(extra?.questionTimeoutMs !== undefined ? { questionTimeoutMs: extra.questionTimeoutMs } : {}),
+    ...(extra?.goalCheck !== undefined ? { goalCheck: extra.goalCheck } : {}),
   });
   return { db, lead, wsBase };
 }
@@ -138,10 +143,42 @@ describe('LoopLead', () => {
       context.answer !== undefined
         ? { tasks: [{ spec: `go with ${context.answer}` }] }
         : { tasks: [], clarification: { prompt: 'pick one', options: ['alpha', 'beta'] } };
-    const { lead } = await setup(planner, okVerifier, 500);
+    const { lead } = await setup(planner, okVerifier, { questionTimeoutMs: 500 });
     const report = await lead.run('ambiguous goal');
 
     expect(report.outcome).toBe('success');
     expect(report.tasks[0]?.spec).toContain('alpha'); // first option
+  }, 30_000);
+
+  it('goal-acceptance catches a planner that drops a hard requirement (02 capstone v2)', async () => {
+    // Planner paraphrases the goal away, so every task "passes" its own gate —
+    // but the goalCheck sees the GOAL is unmet, queues an explicit fix, and if
+    // still unmet downgrades to partial with the exact gap named.
+    const planner: Planner = async () => ({ tasks: [{ spec: 'write a status file' }] });
+    let round = 0;
+    const goalCheck = async () => {
+      round += 1;
+      // Even after the explicit fix task, still unmet (scripted worker writes nothing real).
+      return { met: false, missing: ['content "Maya M3 demo complete"'] };
+    };
+    const { lead } = await setup(planner, okVerifier, { goalCheck });
+    const report = await lead.run('Create STATUS.md containing exactly: Maya M3 demo complete');
+
+    expect(report.outcome).toBe('partial');
+    expect(report.summary).toContain('Maya M3 demo complete');
+    expect(round).toBe(2); // initial check + re-check after the explicit fix task
+  }, 30_000);
+
+  it('goal-acceptance passes cleanly when the fix task satisfies the goal', async () => {
+    const planner: Planner = async () => ({ tasks: [{ spec: 'write a status file' }] });
+    let round = 0;
+    const goalCheck = async () => {
+      round += 1;
+      return round === 1 ? { met: false, missing: ['content "X"'] } : { met: true, missing: [] };
+    };
+    const { lead } = await setup(planner, okVerifier, { goalCheck });
+    const report = await lead.run('goal with a requirement');
+    expect(report.outcome).toBe('success');
+    expect(round).toBe(2);
   }, 30_000);
 });

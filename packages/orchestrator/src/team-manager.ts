@@ -339,6 +339,7 @@ export class TeamManager {
         } else if (ev.kind === 'error') {
           failed = ev.message;
         } else if (ev.kind === 'tokens') {
+          if (process.env.MAYA_DEBUG_TOKENS) console.error(`[dbg tokens] task=${taskId} +${ev.input}/${ev.output}`);
           const { exhausted } = this.opts.db.addTeamTokens(lt.team.id, ev.input + ev.output);
           if (exhausted && !lt.draining) {
             clearTimeout(watchdog);
