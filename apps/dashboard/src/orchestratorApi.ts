@@ -115,6 +115,68 @@ export async function createTeam(input: CreateTeamInput): Promise<Team> {
 export const drainTeam = (teamId: string): Promise<Response> =>
   fetch(`/api/teams/${encodeURIComponent(teamId)}/drain`, { method: "POST" });
 
+// ── Persistent bus agents (the multi-agent path) ───────────────────────────
+// Distinct from `TeamAgent` above (the older task-worker shape from /api/agents):
+// these are addressable @handle agents that live on the team's bus channel —
+// spawned, @mentioned, and replied-to. Shared by SoloView (02) + team-chat (01).
+
+export interface SpawnAgentInput {
+  handle: string; // "@builder" — unique within the team
+  type: "claude-code" | "codex" | "opencode";
+  model: string; // gateway ModelId, e.g. "local/qwen2.5-7b-instruct"
+  cwd: string;
+  role?: "lead" | "worker";
+  systemPrompt?: string;
+  allowedTools?: string[]; // omitted or ["*"] = all tools (full freedom)
+}
+
+export interface AgentStatus {
+  handle: string;
+  type: string;
+  model: string;
+  role: "lead" | "worker";
+  cwd: string;
+  allowedTools?: string[];
+  state: "spawning" | "live" | "working" | "stopped" | "failed";
+  pid?: number;
+  lastMessageAt?: string;
+}
+
+/** One message as stored on a bus channel (what the chat panes render). */
+export interface ChannelMessage {
+  seq: number;
+  from: string;
+  to?: string;
+  ts: string;
+  fromTokenId?: string; // present ⇒ an agent/token sender; absent ⇒ a human
+  body: { text?: string; maya?: unknown };
+}
+
+const postJson = async <T>(url: string, body: unknown): Promise<T> => {
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
+  return res.json() as Promise<T>;
+};
+
+/** Spawn a persistent, addressable agent into a team (it joins the bus channel). */
+export const spawnTeamAgent = (teamId: string, agent: SpawnAgentInput): Promise<AgentStatus> =>
+  postJson(`/api/teams/${encodeURIComponent(teamId)}/agents`, { agent });
+
+/** Live roster of a team's persistent agents. */
+export const getTeamAgents = (teamId: string): Promise<AgentStatus[]> => get(`/api/teams/${encodeURIComponent(teamId)}/agents`);
+
+/** Retire an agent — revokes its bus token and kills its tracked process. */
+export const stopTeamAgent = (teamId: string, handle: string): Promise<Response> =>
+  fetch(`/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(handle)}`, { method: "DELETE" });
+
+/** Post to the team channel; `to` directs it at an @handle (wakes that agent). */
+export const sendTeamMessage = (teamId: string, text: string, to?: string): Promise<unknown> =>
+  postJson(`/api/teams/${encodeURIComponent(teamId)}/messages`, { text, ...(to ? { to } : {}) });
+
+/** Read a bus channel's recent history (GET-only proxy; the chat stream). */
+export const getChannelHistory = (channelId: string, limit = 60): Promise<{ messages: ChannelMessage[] }> =>
+  get(`/api/channels/${encodeURIComponent(channelId)}/history?limit=${limit}`);
+
 /** Answer a loop that's waiting on a proactive question (routes over the bus). */
 export async function answerRun(runId: string, answer: { qid?: string; optionId?: string; text?: string }): Promise<void> {
   const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/answer`, {
