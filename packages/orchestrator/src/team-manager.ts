@@ -312,7 +312,15 @@ export class TeamManager {
   }
 
   private statusOf(handle: string, a: PersistentAgent): AgentStatus {
-    return { handle, type: a.spec.type, model: a.spec.model, role: a.spec.role ?? 'worker', state: a.state };
+    return {
+      handle,
+      type: a.spec.type,
+      model: a.spec.model,
+      role: a.spec.role ?? 'worker',
+      cwd: a.spec.cwd,
+      state: a.state,
+      ...(a.spec.allowedTools !== undefined ? { allowedTools: a.spec.allowedTools } : {}),
+    };
   }
 
   // ── internals ─────────────────────────────────────────────────────────

@@ -173,6 +173,32 @@ describe('TeamManager', () => {
     expect(final.result).toContain('cwd-not-trusted'); // captured stderr surfaced
   }, 30_000);
 
+  it('spawns, lists, and stops a standing agent — handle-enforced', async () => {
+    const { tm, team } = await setup();
+    const spec = (h: string, extra: Record<string, unknown> = {}) =>
+      ({ handle: h, type: 'scripted', model: 'local/x', cwd: '/tmp', ...extra }) as unknown as import('@maya-ai/core').AgentSpec;
+
+    const status = await tm.spawnAgent(team.id, spec('@backend'));
+    expect(status.handle).toBe('@backend');
+    expect(status.state).toBe('live');
+    expect(status.cwd).toBe('/tmp');
+    expect(tm.listAgents(team.id).map((a) => a.handle)).toContain('@backend');
+
+    // duplicate handle → rejected (never auto-suffixed)
+    await expect(tm.spawnAgent(team.id, spec('@backend'))).rejects.toThrow(/already in use/);
+    // malformed handle → rejected
+    await expect(tm.spawnAgent(team.id, spec('nodash'))).rejects.toThrow(/invalid handle/);
+    // @lead reserved for the lead role
+    await expect(tm.spawnAgent(team.id, spec('@lead', { role: 'worker' }))).rejects.toThrow(/reserved/);
+
+    // stop frees the handle so it can be reused
+    await tm.stopAgent(team.id, '@backend');
+    expect(tm.listAgents(team.id).map((a) => a.handle)).not.toContain('@backend');
+    await expect(tm.stopAgent(team.id, '@backend')).rejects.toThrow(/no agent/);
+    const reused = await tm.spawnAgent(team.id, spec('@backend'));
+    expect(reused.handle).toBe('@backend');
+  }, 30_000);
+
   it('flags a clean exit with zero tool calls (the small-model "parrot")', async () => {
     // A 3B worker under the full agentic prompt can NARRATE success (in Claude
     // Code's own post-tool phrasing) and exit 0 without ever calling a tool.

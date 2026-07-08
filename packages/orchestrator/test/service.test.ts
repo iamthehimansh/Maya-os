@@ -52,8 +52,12 @@ describe('orchestrator service', () => {
     const tasks = (await (await fetch(`${base}/api/teams/${team.id}/tasks`)).json()) as unknown[];
     expect(tasks).toHaveLength(1);
 
-    const agents = (await (await fetch(`${base}/api/teams/${team.id}/agents`)).json()) as Array<{ id: string }>;
-    expect(agents[0]?.id).toBe('ag_x');
+    // Historical task-worker records live at /workers now; /agents is the
+    // standing (persistent) agents, empty for a team not created via the manager.
+    const workers = (await (await fetch(`${base}/api/teams/${team.id}/workers`)).json()) as Array<{ id: string }>;
+    expect(workers[0]?.id).toBe('ag_x');
+    const agents = (await (await fetch(`${base}/api/teams/${team.id}/agents`)).json()) as unknown[];
+    expect(agents).toHaveLength(0);
   });
 
   it('validates the loop POST contract and registers the run', async () => {
