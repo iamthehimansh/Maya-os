@@ -269,7 +269,39 @@ export async function main(argv: string[]): Promise<void> {
       return;
     }
     console.log(`run     ${runId}\n`);
-    // Follow live: poll the run + print new team-channel frames as they land.
+    // Follow live via the orchestrator's SSE run-events (replay + real-time,
+    // closes on the terminal report). Falls back to polling if SSE fails.
+    try {
+      const res2 = await fetch(`http://127.0.0.1:${cfg2.orchestrator.port}/api/runs/${runId}/events`);
+      if (res2.ok && res2.body) {
+        const reader = res2.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        let done = false;
+        while (!done) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buf += dec.decode(chunk.value, { stream: true });
+          const lines = buf.split("\n\n");
+          buf = lines.pop() ?? "";
+          for (const block of lines) {
+            const data = block.split("\n").find((l) => l.startsWith("data: "))?.slice(6);
+            if (!data) continue;
+            const e = JSON.parse(data) as { kind: string; detail?: string; outcome?: string; tokensUsed?: number };
+            if (e.kind === "report") {
+              console.log(`\n${e.outcome === "success" ? "✅ success" : `◐ ${e.outcome}`}  ·  ${e.tokensUsed ?? "?"} tokens`);
+              if (e.outcome !== "success") process.exitCode = 2;
+              done = true;
+              break;
+            }
+            console.log(`  ${e.kind}${e.detail ? ` — ${e.detail.slice(0, 100)}` : ""}`);
+          }
+        }
+        if (done) return;
+      }
+    } catch {
+      // fall through to polling
+    }
     let lastPrinted = 0;
     for (;;) {
       await new Promise((r) => setTimeout(r, 3000));
