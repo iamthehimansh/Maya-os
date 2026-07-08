@@ -24,7 +24,7 @@ import { MayaDb } from '@maya-ai/core';
 import { AgentBusBridge, AgentRuntime } from '@maya-ai/agent-runtime';
 import { LlmClient } from './llm.js';
 import { makeGoalCheck, makePlanner, makeVerifier } from './judgment.js';
-import { LoopLead, type LoopReport } from './loop-lead.js';
+import { LoopLead, type LoopEvent, type LoopReport } from './loop-lead.js';
 import { TeamManager } from './team-manager.js';
 
 export interface OrchestratorServiceOptions {
@@ -44,6 +44,8 @@ export interface RunRecord {
   state: 'running' | 'done';
   startedAt: string;
   report?: LoopReport;
+  /** Buffered live events, so a late SSE subscriber gets the full timeline. */
+  events: LoopEvent[];
 }
 
 export interface RunningOrchestrator {
@@ -62,6 +64,8 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
   });
   const teams = new TeamManager({ db, runtime, bridge, bus: opts.bus });
   const runs = new Map<string, RunRecord>();
+  /** Live SSE subscribers per run — fed by each run's onEvent. */
+  const runSubs = new Map<string, Set<(e: LoopEvent) => void>>();
 
   const app = new Hono();
 
@@ -87,7 +91,49 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
   app.get('/api/teams/:id/tasks', (c) => c.json(db.tasks(c.req.param('id'))));
   app.get('/api/teams/:id/agents', (c) => c.json(db.agents(c.req.param('id'))));
   app.get('/api/agents', (c) => c.json(db.agentsAll()));
-  app.get('/api/runs', (c) => c.json([...runs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt))));
+  app.get('/api/runs', (c) =>
+    c.json([...runs.values()].map(({ events: _events, ...r }) => r).sort((a, b) => b.startedAt.localeCompare(a.startedAt))),
+  );
+
+  // Live run progress (SSE): replays buffered events, then streams new ones,
+  // and closes when the run reports. The CLI + dashboard consume this for
+  // real-time progress instead of polling.
+  app.get('/api/runs/:id/events', (c) => {
+    const record = runs.get(c.req.param('id'));
+    if (!record) return c.json({ error: 'unknown run' }, 404);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const enc = new TextEncoder();
+        const send = (e: LoopEvent): void => {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+          if (e.kind === 'report') {
+            subs.delete(listener);
+            try {
+              controller.close();
+            } catch {
+              /* already closed */
+            }
+          }
+        };
+        const listener = (e: LoopEvent): void => send(e);
+        for (const e of record.events) send(e); // replay timeline
+        if (record.state === 'done') {
+          try {
+            controller.close();
+          } catch {
+            /* closed */
+          }
+          return;
+        }
+        const subs = runSubs.get(record.runId) ?? new Set();
+        runSubs.set(record.runId, subs);
+        subs.add(listener);
+      },
+    });
+    return new Response(stream, {
+      headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' },
+    });
+  });
 
   app.post('/api/loop', async (c) => {
     const body = (await c.req.json().catch(() => null)) as {
@@ -103,10 +149,24 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     if (!body?.goal || !body.leadModel || !body.workerModel || !body.cwd) {
       return c.json({ error: 'goal, leadModel, workerModel, cwd required' }, 400);
     }
+    const runId = 'run_' + Date.now().toString(36);
+    const record: RunRecord = { runId, goal: body.goal, state: 'running', startedAt: new Date().toISOString(), events: [] };
+    runs.set(runId, record);
+    const onEvent = (e: LoopEvent): void => {
+      record.events.push(e);
+      for (const sub of runSubs.get(runId) ?? []) {
+        try {
+          sub(e);
+        } catch {
+          /* a dead subscriber must not break the run */
+        }
+      }
+    };
     const llm = new LlmClient({ gatewayBaseUrl: opts.gatewayBaseUrl, model: body.leadModel });
     const lead = new LoopLead({
       db,
       teams,
+      onEvent,
       team: {
         topology: 'manager-tree',
         members: [
@@ -125,9 +185,6 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
       goalCheck: makeGoalCheck(body.cwd),
       bus: opts.bus,
     });
-    const runId = 'run_' + Date.now().toString(36);
-    const record: RunRecord = { runId, goal: body.goal, state: 'running', startedAt: new Date().toISOString() };
-    runs.set(runId, record);
     void lead
       .run(body.goal, { name: runId })
       .then((report) => {
@@ -136,16 +193,15 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
       })
       .catch((err) => {
         record.state = 'done';
-        record.report = {
-          runId,
-          goal: body.goal ?? '',
-          team: null as never,
-          outcome: 'failed',
-          tasks: [],
-          questionsAsked: 0,
-          summary: `service error: ${String(err).slice(0, 300)}`,
-        };
-      });
+        const summary = `service error: ${String(err).slice(0, 300)}`;
+        record.report = { runId, goal: body.goal ?? '', team: null as never, outcome: 'failed', tasks: [], questionsAsked: 0, summary };
+        // The run threw before finish()'s report event — synthesize one so
+        // SSE subscribers get a terminal event and the stream closes.
+        if (!record.events.some((e) => e.kind === 'report')) {
+          onEvent({ kind: 'report', outcome: 'failed', summary, tokensUsed: 0, at: new Date().toISOString() });
+        }
+      })
+      .finally(() => runSubs.delete(runId));
     return c.json({ runId }, 202);
   });
 
