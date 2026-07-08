@@ -161,12 +161,15 @@ export class AgentBusBridge {
             client.sendMessage({ body: { text: `⚠️ agent ${handle.id}: ${ev.message.slice(0, 200)}` } });
             break;
           case 'say':
-            // The agent completed a turn — post its reply to the channel. This
-            // is what makes a non-outbox agent converse (@mention → send → turn →
-            // result → say → channel). In outbox mode the OUTBOX file is the
-            // agent's channel, so suppress `say` there or every reply double-posts
-            // (once via say, once via the line it wrote to its outbox).
-            if (!opts.outboxPath && ev.text.trim()) client.sendMessage({ body: { text: ev.text } });
+            // The agent completed a turn — post its reply to the channel (@mention
+            // → send → turn → result → say → channel). We ALSO post outbox lines,
+            // so an agent that both writes its outbox AND says the same text can
+            // double-post — but suppressing `say` for outbox agents silenced any
+            // agent that replies normally instead of writing its outbox, which made
+            // debugging blind. Visibility wins; the double-post is cosmetic. (A
+            // clean fix later: suppress `say` only if the agent wrote its outbox
+            // THAT turn — needs per-turn tracking.)
+            if (ev.text.trim()) client.sendMessage({ body: { text: ev.text } });
             break;
           default:
             break; // logs/tokens stay local — the channel is for signal, not noise
