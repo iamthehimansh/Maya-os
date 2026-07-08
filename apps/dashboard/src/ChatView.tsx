@@ -1,18 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getModels, type CatalogEntry } from "./api";
+import { getModels, getCldzProfiles, type CatalogEntry, type CldzProfile } from "./api";
 import { renderMarkdown } from "./md";
+import { AgentSetupForm, newAgentDraft, toSpawnInput, draftReady, type AgentDraft } from "./AgentSetupForm";
+import { TeamBuilder } from "./TeamBuilder";
 import {
   answerRun,
+  createTeam,
   getChannelHistory,
   getTeamAgents,
   getTeams,
   sendTeamMessage,
+  spawnTeamAgent,
   startLoop,
   streamRun,
   type AgentStatus,
   type ChannelMessage,
   type LoopEvent,
   type OpenTeam,
+  type SpawnAgentInput,
   type Team,
 } from "./orchestratorApi";
 
@@ -50,9 +55,14 @@ interface ChatViewProps {
 export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): React.JSX.Element {
   const [models, setModels] = useState<CatalogEntry[]>([]);
   const [teamList, setTeamList] = useState<Team[]>([]);
+  const [profiles, setProfiles] = useState<CldzProfile[]>([]);
+  // Rich "add an agent to this team" draft (when a team is connected).
+  const [addDraft, setAddDraft] = useState<AgentDraft>(() => newAgentDraft("@member"));
+  const [creating, setCreating] = useState(false); // building a whole team
+  const [adding, setAdding] = useState(false); // spawning one agent into a team
   const [lead, setLead] = useState("");
   const [worker, setWorker] = useState("");
-  const [cwd, setCwd] = useState("~/maya-demo");
+  const [cwd] = useState("~/maya-demo"); // front-door quick-loop cwd (team-builder sets its own)
   const [showSetup, setShowSetup] = useState(false);
   const [draft, setDraft] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
@@ -80,6 +90,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
       setLead((p) => p || caller?.id || "");
       setWorker((p) => p || caller?.id || "");
     });
+    void getCldzProfiles().then(setProfiles).catch(() => {});
     const loadTeams = (): void => void getTeams().then(setTeamList).catch(() => {});
     loadTeams();
     const t = setInterval(loadTeams, 5000);
@@ -131,7 +142,6 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     stream.current?.scrollTo({ top: stream.current.scrollHeight, behavior: "smooth" });
   }, [msgs]);
 
-  const workerOptions = useMemo(() => models.filter((m) => m.capabilities?.toolCalling !== false), [models]);
 
   // Distinct handles seen in the stream drive the filter chips (like @lead/@builder).
   const handles = useMemo(() => {
@@ -169,6 +179,40 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     }
     const t = teamList.find((x) => x.id === id);
     if (t) onOpenChat({ id: t.id, channelId: t.channelId, name: t.name, live: t.state !== "closed" });
+  }
+
+  // Rich team creation: make the team, spawn the lead + each member (full Solo-
+  // style config), then open the new team's chat.
+  async function createFullTeam(name: string, lead: SpawnAgentInput, members: SpawnAgentInput[]): Promise<void> {
+    setCreating(true);
+    setError(null);
+    try {
+      const team = await createTeam({ name, workerModel: lead.model, cwd: lead.cwd });
+      await spawnTeamAgent(team.id, lead);
+      for (const m of members) await spawnTeamAgent(team.id, m);
+      setShowSetup(false);
+      onOpenChat({ id: team.id, channelId: team.channelId, name: team.name, live: true });
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  // Add one fully-configured agent into the currently-open team's channel.
+  async function addAgent(): Promise<void> {
+    if (!openTeam || !draftReady(addDraft) || adding) return;
+    setAdding(true);
+    setError(null);
+    try {
+      await spawnTeamAgent(openTeam.id, toSpawnInput(addDraft));
+      setAddDraft(newAgentDraft("@member"));
+      setShowSetup(false);
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setAdding(false);
+    }
   }
 
   function send(): void {
@@ -288,40 +332,24 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
               {f}
             </button>
           ))}
-          {!openTeam && (
+          {(!openTeam || openTeam.live) && (
             <button className="cchat-setup disclosure" onClick={() => setShowSetup((v) => !v)}>
-              {showSetup ? "hide setup" : "setup"}
+              {showSetup ? "hide" : openTeam ? "＋ add agent" : "＋ create a team"}
             </button>
           )}
         </div>
 
         {showSetup && !openTeam && (
           <div className="cchat-setup-row">
-            <label className="field grow">
-              <span>Directory</span>
-              <input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="~/any/dir" />
-            </label>
-            <label className="field">
-              <span>Lead</span>
-              <select value={lead} onChange={(e) => setLead(e.target.value)}>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.id}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Worker</span>
-              <select value={worker} onChange={(e) => setWorker(e.target.value)}>
-                {workerOptions.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.id}
-                    {m.capabilities?.toolCalling ? " ✓tools" : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <TeamBuilder models={models} profiles={profiles} busy={creating} onSubmit={createFullTeam} defaultModel={worker || lead} />
+          </div>
+        )}
+        {showSetup && openTeam && openTeam.live && (
+          <div className="cchat-setup-row cchat-addagent">
+            <AgentSetupForm title={`Add an agent to ${openTeam.name}`} value={addDraft} onChange={setAddDraft} models={models} profiles={profiles} />
+            <button className="act primary" onClick={() => void addAgent()} disabled={!draftReady(addDraft) || adding}>
+              {adding ? "Adding…" : "Add agent to this channel"}
+            </button>
           </div>
         )}
 
