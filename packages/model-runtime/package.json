@@ -20,7 +20,8 @@
     "test": "node test/unit.mjs",
     "test:smoke": "node test/smoke.mjs",
     "test:chaos": "node test/chaos.mjs",
-    "bench:spec": "node bench/spec-bench.mjs"
+    "bench:spec": "node bench/spec-bench.mjs",
+    "test:tune": "node test/tune.mjs"
   },
   "dependencies": {
     "@maya-ai/core": "workspace:*"

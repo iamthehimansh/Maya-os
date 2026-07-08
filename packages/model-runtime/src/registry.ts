@@ -22,6 +22,14 @@ interface ModelMeta {
   chatTemplate?: string;
   draftModel?: string | false;
   toolCalling?: boolean;
+  /** Winning config from `maya tune --save` — measured on this host. */
+  tuned?: {
+    quant: Quant;
+    contextLength: number;
+    draft?: string | false;
+    genTokPerSec: number;
+    at: string; // ISO 8601
+  };
 }
 
 /**

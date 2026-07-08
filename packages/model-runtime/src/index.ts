@@ -12,3 +12,16 @@ export { RuntimeManager, type LoadOpts } from "./manager.js";
 export { availableRam, processRss, sampleRam, type RamSnapshot } from "./ram.js";
 export { findModel, quantFromFilename, quantLadderFrom, scanModels, writeModelMeta } from "./registry.js";
 export { InstanceSupervisor, type SupervisorEvent, type SupervisorOpts } from "./supervisor.js";
+export {
+  buildSearchSpace,
+  benchCandidate,
+  tuneModel,
+  type BenchOpts,
+  type BuildSearchSpaceOpts,
+  type DraftOption,
+  type TuneCandidate,
+  type TuneEvent,
+  type TuneOpts,
+  type TuneReport,
+  type TuneResult,
+} from "./tune.js";
