@@ -95,6 +95,16 @@ export class MayaDb {
         state TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      -- Standing agents (the persistent Lead + workers). Their full AgentSpec is
+      -- stored as JSON so a serve restart can RE-HYDRATE them (reload + re-spawn)
+      -- instead of silently losing every live team. Keyed by (team, handle).
+      CREATE TABLE IF NOT EXISTS standing_agents (
+        team_id TEXT NOT NULL REFERENCES teams(id),
+        handle TEXT NOT NULL,
+        spec TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (team_id, handle)
+      );
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY,
         team_id TEXT NOT NULL REFERENCES teams(id),
@@ -199,6 +209,33 @@ export class MayaDb {
   /** Every agent across teams, newest first (dashboard Agents tab). */
   agentsAll(limit = 200): TeamAgentRow[] {
     return (this.db.prepare('SELECT * FROM team_agents ORDER BY created_at DESC LIMIT ?').all(limit) as Record<string, unknown>[]).map(toAgent);
+  }
+
+  // ── standing agents (persist the Lead + workers so restarts can re-hydrate) ──
+
+  /** Persist (or replace) a standing agent's full spec for later re-hydration. */
+  addStandingAgent(teamId: string, handle: string, spec: unknown): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO standing_agents (team_id, handle, spec, created_at) VALUES (?,?,?,?)')
+      .run(teamId, handle, JSON.stringify(spec), new Date().toISOString());
+  }
+
+  /** Standing-agent specs for one team, oldest first (Lead was spawned first). */
+  standingAgents(teamId: string): { handle: string; spec: unknown }[] {
+    return (
+      this.db.prepare('SELECT handle, spec FROM standing_agents WHERE team_id = ? ORDER BY created_at').all(teamId) as {
+        handle: string;
+        spec: string;
+      }[]
+    ).map((r) => ({ handle: r.handle, spec: JSON.parse(r.spec) as unknown }));
+  }
+
+  removeStandingAgent(teamId: string, handle: string): void {
+    this.db.prepare('DELETE FROM standing_agents WHERE team_id = ? AND handle = ?').run(teamId, handle);
+  }
+
+  removeStandingAgents(teamId: string): void {
+    this.db.prepare('DELETE FROM standing_agents WHERE team_id = ?').run(teamId);
   }
 
   // ── tasks ─────────────────────────────────────────────────────────────

@@ -421,6 +421,17 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : 0;
 
+  // Re-hydrate standing teams in the background (non-blocking): a restart must
+  // not silently wipe live teams + their agents (the dead-composer bug). The
+  // serve already accepts requests; teams come back live + agents re-spawn
+  // shortly after boot. Best-effort — a failure logs, never crashes the serve.
+  void teams
+    .rehydrate()
+    .then((r) => {
+      if (r.teams > 0) console.log(`[orchestrator] rehydrated ${r.teams} team(s), ${r.agents} agent(s)`);
+    })
+    .catch((err) => console.error('[orchestrator] rehydrate failed:', err instanceof Error ? err.message : err));
+
   return {
     port,
     db,

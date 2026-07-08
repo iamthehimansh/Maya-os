@@ -129,7 +129,15 @@ export class TeamManager {
       ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
     });
 
-    // The manager joins the room with its own scoped token (admin-minted).
+    const lt = await this.bringLive(team, input.members);
+    lt.manager.sendMessage({ body: { text: `🧭 team **${input.name}** ready — ${input.members.length} member template(s), topology ${input.topology}` } });
+    return team;
+  }
+
+  /** Bring a team's live shell up: mint the manager's scoped token, connect its
+   * BusClient, join the room, register the LiveTeam. Shared by createTeam +
+   * rehydrate (agents are added separately). */
+  private async bringLive(team: TeamRow, templates: MemberTemplate[]): Promise<LiveTeam> {
     const res = await fetch(`${this.httpBase()}/api/tokens`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${this.opts.bus.adminToken}` },
@@ -141,19 +149,58 @@ export class TeamManager {
     const joined = new Promise<string>((r) => manager.on('joined', (j: { handle: string }) => r(j.handle)));
     manager.connect();
     const managerHandle = await joined;
-
-    this.live.set(team.id, {
+    const lt: LiveTeam = {
       team,
-      templates: input.members,
+      templates,
       manager,
       managerHandle,
       inFlight: new Map<string, InFlightWorker>(),
       persistent: new Map<string, PersistentAgent>(),
       nextTemplate: 0,
       draining: false,
-    });
-    manager.sendMessage({ body: { text: `🧭 team **${input.name}** ready — ${input.members.length} member template(s), topology ${input.topology}` } });
-    return team;
+    };
+    this.live.set(team.id, lt);
+    return lt;
+  }
+
+  /**
+   * Re-hydrate standing teams after a serve restart: reload every active team
+   * from the DB, reconnect its manager, and re-spawn its persisted standing
+   * agents — so a restart never silently wipes a live team + its agents again
+   * (the bug where the dashboard composer went dead because nothing was "live").
+   * Best-effort: a team whose manager won't reconnect is left for a later boot;
+   * an agent spec that won't spawn is dropped so it doesn't retry every boot.
+   * NOTE: member TEMPLATES aren't persisted, so task-dispatch needs them re-added
+   * after a restart — standing agents (what users chat with) are what we restore.
+   */
+  async rehydrate(): Promise<{ teams: number; agents: number }> {
+    let teamsBack = 0;
+    let agentsBack = 0;
+    for (const team of this.opts.db.teams()) {
+      if (team.state !== 'active' || this.live.has(team.id)) continue;
+      let lt: LiveTeam;
+      try {
+        lt = await this.bringLive(team, []);
+      } catch {
+        continue;
+      }
+      teamsBack++;
+      const specs = this.opts.db.standingAgents(team.id);
+      let restored = 0;
+      for (const { handle, spec } of specs) {
+        try {
+          await this.spawnAgent(team.id, spec as AgentSpec);
+          restored++;
+          agentsBack++;
+        } catch {
+          this.opts.db.removeStandingAgent(team.id, handle);
+        }
+      }
+      if (specs.length > 0) {
+        lt.manager.sendMessage({ body: { text: `♻️ **${team.name}** restored after restart — ${restored}/${specs.length} agent(s) back online` } });
+      }
+    }
+    return { teams: teamsBack, agents: agentsBack };
   }
 
   addTask(teamId: string, spec: string, opts?: { deps?: string[]; scope?: string[] }): TaskRow {
@@ -196,12 +243,19 @@ export class TeamManager {
   }
 
   /** Stop accepting work; kill in-flight workers; mark the team closed. */
-  async drain(teamId: string, reason: string): Promise<void> {
+  /**
+   * Tear a live team down. `close` (default true) marks it `closed` in the DB
+   * and drops its persisted agent specs — a permanent close. On **serve
+   * shutdown** pass `close=false`: kill the live processes but leave the team
+   * `active` + keep its standing-agent specs, so `rehydrate()` restores it on the
+   * next boot instead of the restart silently killing every team.
+   */
+  async drain(teamId: string, reason: string, close = true): Promise<void> {
     const lt = this.mustLive(teamId);
     if (lt.draining) return;
     lt.draining = true;
-    this.opts.db.setTeamState(teamId, 'draining');
-    lt.manager.sendMessage({ body: { text: `🛑 team draining: ${reason}` } });
+    if (close) this.opts.db.setTeamState(teamId, 'draining');
+    lt.manager.sendMessage({ body: { text: `🛑 team ${close ? 'draining' : 'pausing for restart'}: ${reason}` } });
     for (const [taskId, worker] of [...lt.inFlight]) {
       await worker.adapter.kill(worker.agentId).catch(() => {});
       lt.inFlight.delete(taskId);
@@ -218,7 +272,11 @@ export class TeamManager {
         await a.adapter.kill(a.agentId).catch(() => {});
       }
     }
-    this.opts.db.setTeamState(teamId, 'closed');
+    if (close) {
+      this.opts.db.setTeamState(teamId, 'closed');
+      this.opts.db.removeStandingAgents(teamId); // permanent close → don't re-hydrate
+    }
+    // close=false (serve shutdown): team stays 'active' + specs kept → rehydrate() restores it.
     lt.manager.close();
     this.live.delete(teamId);
   }
@@ -303,6 +361,9 @@ export class TeamManager {
       const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, { channelId: lt.team.channelId, label: handle, inboxPath, outboxPath });
       const entry: PersistentAgent = { spec, agentId: agentHandle.id, busHandle, adapter, state: 'live' };
       lt.persistent.set(handle, entry);
+      // Persist the full spec so a serve restart can re-hydrate this agent
+      // instead of silently losing it (INSERT OR REPLACE — safe on re-spawn).
+      this.opts.db.addStandingAgent(teamId, handle, spec);
       // Announce WITHOUT the leading @ so the join notice doesn't @mention (and
       // thus wake) the agent that just joined — it'd greet its own arrival.
       // Real pokes still @mention normally. (himansh's pokes come via the manager
@@ -328,6 +389,7 @@ export class TeamManager {
     const a = lt.persistent.get(handle);
     if (!a) throw new Error(`no agent ${handle} on this team`);
     lt.persistent.delete(handle);
+    this.opts.db.removeStandingAgent(teamId, handle); // stop persisting → won't re-hydrate
     if (a.agentId) {
       await this.opts.bridge.detach(a.agentId).catch(() => {}); // detach revokes the token
       await a.adapter.kill(a.agentId).catch(() => {});
@@ -375,7 +437,9 @@ export class TeamManager {
    * grep, so human Claude Code sessions are never touched.
    */
   async drainAll(reason = 'serve shutdown'): Promise<void> {
-    await Promise.all([...this.live.keys()].map((id) => this.drain(id, reason).catch(() => {})));
+    // close=false: a shutdown must NOT close teams — leave them active + keep
+    // their specs so rehydrate() brings them back on the next boot.
+    await Promise.all([...this.live.keys()].map((id) => this.drain(id, reason, false).catch(() => {})));
   }
 
   // ── internals ─────────────────────────────────────────────────────────
