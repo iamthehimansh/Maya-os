@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getModels, type CatalogEntry } from "./api";
-import { answerRun, getTeamAgents, startLoop, streamRun, type LoopEvent, type TeamAgent } from "./orchestratorApi";
+import { answerRun, getTeamAgents, startLoop, streamRun, type AgentStatus, type LoopEvent } from "./orchestratorApi";
 
 /**
  * Chat — Maya's front door, in the team-channel layout: a center message stream,
@@ -34,7 +34,7 @@ export function ChatView(): React.JSX.Element {
   const [showSetup, setShowSetup] = useState(false);
   const [draft, setDraft] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
-  const [agents, setAgents] = useState<TeamAgent[]>([]);
+  const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("All");
@@ -77,7 +77,7 @@ export function ChatView(): React.JSX.Element {
     return m.handle === filter;
   });
 
-  const online = 1 + agents.filter((a) => a.state === "running" || a.state === "working").length;
+  const online = 1 + agents.filter((a) => a.state === "live" || a.state === "working").length;
 
   function push(m: Omit<Msg, "id">): void {
     setMsgs((prev) => [...prev, { ...m, id: nextId.current++ }]);
@@ -272,10 +272,11 @@ export function ChatView(): React.JSX.Element {
             <p className="empty">No agents yet — send a message and the Lead spins up the team.</p>
           ) : (
             agents.map((a) => (
-              <div className="crail-agent" key={a.id}>
+              <div className="crail-agent" key={a.handle}>
                 <div className="crail-agent-head">
-                  <span className={`cavatar h-${hashColor(a.adapter)}`}>{initials(a.adapter)}</span>
-                  <strong>{a.adapter}</strong>
+                  <span className={`cavatar h-${hashColor(a.handle)}`}>{initials(a.handle)}</span>
+                  <strong>{a.handle}</strong>
+                  <span className="chip">{a.type}</span>
                   <span className={`chip state-${a.state}`}>{a.state}</span>
                 </div>
                 <code className="crail-model">{a.model}</code>
