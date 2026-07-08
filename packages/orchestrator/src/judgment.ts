@@ -77,17 +77,16 @@ export function makeVerifier(llm: LlmClient, opts?: VerifierOptions): Verifier {
           feedback: `required file(s) missing or misnamed — create EXACTLY: ${missing.join(', ')}`,
         };
       }
-      // Content gate: when the spec dictates EXACT content ("containing
-      // exactly: X", "content: X", or a backtick-quoted literal), that string
-      // must actually appear somewhere in the workspace (observed live: goal
-      // wanted "Maya M3 demo complete", worker wrote "2026-07-08", verifier
-      // passed it). Workers lie about content, not just filenames.
-      const haystack = concatWorkspace(opts.workspaceDir);
-      const missingContent = requiredContent(task.spec).filter((s) => !haystack.includes(s));
+      // Content gate: an "exactly" requirement means some file's ENTIRE
+      // content IS that literal — not that it appears buried in a template.
+      // (Live: a worker wrote "## Maya M3 demo complete\n\n**Why:** …" — a junk
+      // template that *contained* the phrase; a substring match let it pass.
+      // Strict equality forces the worker to write ONLY the required bytes.)
+      const missingContent = requiredContent(task.spec).filter((s) => !fileHasExactContent(opts.workspaceDir!, s));
       if (missingContent.length > 0) {
         return {
           ok: false,
-          feedback: `required content not found in any file — must contain exactly: ${missingContent.map((s) => JSON.stringify(s)).join(', ')}`,
+          feedback: `no file's ENTIRE content is exactly ${missingContent.map((s) => JSON.stringify(s)).join(' / ')} — the file must contain ONLY that text, no template/heading/extra`,
         };
       }
       workspace = `\n\nWORKSPACE (ground truth — directory listing with file heads):\n${snapshotDir(opts.workspaceDir)}`;
@@ -124,6 +123,26 @@ function fileExists(dir: string, name: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Does some file in `dir` have EXACTLY `literal` as its whole content (trimmed)? */
+function fileHasExactContent(dir: string, literal: string): boolean {
+  const want = literal.trim();
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return false;
+  }
+  for (const name of names.slice(0, 40)) {
+    try {
+      const p = `${dir}/${name}`;
+      if (statSync(p).isFile() && readHead(p, 8192).trim() === want) return true;
+    } catch {
+      /* skip */
+    }
+  }
+  return false;
 }
 
 /**
@@ -179,8 +198,9 @@ export function makeGoalCheck(
     const files = requiredFilenames(goal);
     const contents = requiredContent(goal);
     for (const f of files) if (!nameSet.has(f)) missing.push(`file ${f} (exact name)`);
-    const haystack = concatWorkspace(workspaceDir);
-    for (const c of contents) if (!haystack.includes(c)) missing.push(`content ${JSON.stringify(c)}`);
+    // Strict: some file's ENTIRE content must equal the literal (not merely
+    // contain it) — a template with the phrase as a heading does NOT satisfy.
+    for (const c of contents) if (!fileHasExactContent(workspaceDir, c)) missing.push(`a file whose ENTIRE content is exactly ${JSON.stringify(c)}`);
     if (missing.length === 0) return { met: true, missing: [] };
 
     // A CRYSTAL-clear imperative — small workers write *plausible* templates

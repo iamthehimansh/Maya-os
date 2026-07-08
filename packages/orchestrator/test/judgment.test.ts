@@ -99,12 +99,23 @@ describe('makeVerifier content gate (finding #2: workers lie about content)', ()
     expect(verdict.feedback).toContain('Maya M3 demo complete');
   });
 
-  it('passes the content gate when the exact string is present', async () => {
+  it('REJECTS a template that merely contains the phrase (strict, not substring)', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifc-'));
-    fs.writeFileSync(path.join(dir, 'out.txt'), 'header\nMaya M3 demo complete\nfooter');
+    // The live junk-template case: contains the phrase as a heading + extra.
+    fs.writeFileSync(path.join(dir, 'out.txt'), '## Maya M3 demo complete\n\n**Why:** to ensure the task…');
     const verify = makeVerifier(deadLlm, { workspaceDir: dir });
 
-    // Both gates pass → reaches the dead LLM → throws (proves gate didn't reject).
+    const verdict = await verify(task('create out.txt containing exactly: `Maya M3 demo complete`'));
+    expect(verdict.ok).toBe(false);
+    expect(verdict.feedback).toContain('ONLY');
+  });
+
+  it('passes the content gate only when a file IS exactly the literal (trim-tolerant)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifc-'));
+    fs.writeFileSync(path.join(dir, 'out.txt'), 'Maya M3 demo complete\n'); // exact + trailing newline
+    const verify = makeVerifier(deadLlm, { workspaceDir: dir });
+
+    // Gate passes → reaches the dead LLM → throws (proves gate didn't reject).
     await expect(verify(task('create out.txt containing exactly: `Maya M3 demo complete`'))).rejects.toThrow();
   });
 });
