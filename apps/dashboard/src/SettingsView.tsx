@@ -18,6 +18,7 @@ interface Guardrails {
   restartWindowMs: number;
 }
 interface WebConfig {
+  user?: { handle: string };
   gateway: { port: number };
   dashboard: { port: number };
   bus: { port: number };
@@ -170,6 +171,21 @@ export function SettingsView(): React.JSX.Element {
   return (
     <>
       <HealthPanel />
+      <section className="panel">
+        <h2>Your identity <span className="hint">— your @handle in team channels (agents can tag you)</span></h2>
+        <label className="field" style={{ maxWidth: 320 }}>
+          <span>@handle</span>
+          <input
+            className="mono"
+            value={cfg.user?.handle ?? "@me"}
+            onChange={(e) => {
+              let h = e.target.value.trim();
+              if (h && !h.startsWith("@")) h = "@" + h;
+              patch((c) => ({ ...c, user: { handle: h } }));
+            }}
+          />
+        </label>
+      </section>
       <TunnelsPanel />
       {error && <div className="error-banner" role="alert">{error}</div>}
       {note && <div className="save-note">{note}</div>}

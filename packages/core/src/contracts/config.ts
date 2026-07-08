@@ -16,6 +16,8 @@ export interface ProviderConfig {
 
 /** Shape of ~/.maya/config.json (defaults + loader live in @maya-ai/core/config). */
 export interface PlatformConfig {
+  /** The human's identity in team channels — their @handle (tag-able like an agent). */
+  user?: { handle: string };
   gateway: { port: number }; // default 4100
   dashboard: { port: number }; // default 4200
   bus: { port: number }; // Maya's own bus (packages/bus), default 4300
