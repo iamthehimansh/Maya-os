@@ -1,6 +1,8 @@
 import { defaultGuardrails, ensureDirs, loadConfig, mayaHome } from "@maya-ai/core";
 import type { ModelId } from "@maya-ai/core";
-import { RuntimeManager, pullModel, scanModels, detectLlamaCpp } from "@maya-ai/model-runtime";
+import { RuntimeManager, pullModel, scanModels, detectLlamaCpp, tuneModel, writeModelMeta } from "@maya-ai/model-runtime";
+import type { DraftOption, TuneResult } from "@maya-ai/model-runtime";
+import type { Quant } from "@maya-ai/core";
 import { detectSwitchyard, provisionSwitchyard, startGateway, startSwitchyard, type SidecarHandle } from "@maya-ai/gateway";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -19,6 +21,9 @@ Usage:
   maya models pull <source>      hf:owner/repo[/file.gguf] or URL   [--name <n>]
   maya models run <name>         load a model (guardrails apply)
   maya models stop <name>        unload a model
+  maya tune <name>               auto-search quant × ctx × draft for max tok/s within RAM
+                                 [--min-ctx N] [--target-ctx N] [--quants Q,Q] [--draft [model]]
+                                 [--gen N] [--save] [--json]
   maya loop "<goal>"             run an AI team on a goal (lead plans, workers execute, gates verify)
                                  [--worker <model>] [--lead <model>] [--cwd <dir>] [--tools Write,Edit] [--max-turns N]
   maya runs                      recent loop runs with outcomes + tokens
@@ -390,6 +395,136 @@ export async function main(argv: string[]): Promise<void> {
     }
   }
 
+  if (cmd === "tune") {
+    ensureDirs();
+    const cfg = loadConfig();
+    const name = sub && !sub.startsWith("--") ? sub : undefined;
+    if (!name) {
+      console.error("usage: maya tune <name> [--min-ctx N] [--target-ctx N] [--quants Q,Q] [--draft [model]] [--gen N] [--save] [--json]");
+      process.exitCode = 1;
+      return;
+    }
+    const flag = (n: string): string | undefined => {
+      const i = argv.indexOf(`--${n}`);
+      if (i === -1) return undefined;
+      const v = argv[i + 1];
+      return v && !v.startsWith("--") ? v : undefined;
+    };
+    const has = (n: string): boolean => argv.includes(`--${n}`);
+    const json = has("json");
+
+    const local = scanModels(cfg.modelsDir).find((m) => m.name === name.replace(/^local\//, ""));
+    if (!local) {
+      console.error(`model not installed: ${name} — maya models pull hf:… (see maya models ls)`);
+      process.exitCode = 1;
+      return;
+    }
+    const llama = await detectLlamaCpp();
+    if (!llama.installed) {
+      console.error(`llama-server not found — ${llama.installHint}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    // Draft candidates for speculative decoding (--draft): a specific model, or
+    // auto = the smallest OTHER installed model (≤35% of this model's weights).
+    // The tuner MEASURES whether it actually helps — vocab-mismatch drafts just
+    // fail to start and are reported as such, never silently skewing the pick.
+    let drafts: DraftOption[] = [];
+    if (has("draft")) {
+      const all = scanModels(cfg.modelsDir);
+      const mainBytes = local.files[local.files.length - 1]?.bytes ?? Infinity;
+      const named = flag("draft");
+      const pool = all
+        .filter((m) => m.name !== local.name)
+        .map((m) => ({ name: m.name, file: m.files[m.files.length - 1] }))
+        .filter((m): m is { name: string; file: NonNullable<typeof m.file> } => Boolean(m.file));
+      if (named) {
+        const d = pool.find((m) => m.name === named.replace(/^local\//, ""));
+        if (!d) return void console.error(`draft model not installed: ${named}`);
+        drafts = [{ name: d.name, path: d.file.path, bytes: d.file.bytes }];
+      } else {
+        const auto = pool
+          .filter((m) => m.file.bytes <= mainBytes * 0.35)
+          .sort((a, b) => a.file.bytes - b.file.bytes)[0];
+        if (auto) drafts = [{ name: auto.name, path: auto.file.path, bytes: auto.file.bytes }];
+        else if (!json) console.log("no smaller model to use as a draft — testing without speculation");
+      }
+    }
+
+    const quants = flag("quants")
+      ?.split(",")
+      .map((q) => q.trim().toUpperCase() as Quant);
+
+    if (!json) {
+      console.log(`tuning local/${local.name}  —  installed: ${local.files.map((f) => f.quant).join(", ")}`);
+      console.log("measuring real tok/s per config (spawns a llama-server per candidate)…\n");
+    }
+
+    const report = await tuneModel(cfg.modelsDir, local, drafts, {
+      ...(flag("min-ctx") ? { minCtx: Number(flag("min-ctx")) } : {}),
+      ...(flag("target-ctx") ? { targetCtx: Number(flag("target-ctx")) } : {}),
+      ...(quants ? { quants } : {}),
+      ...(flag("gen") ? { genTokens: Number(flag("gen")) } : {}),
+      minFreeRamBytes: cfg.guardrails.minFreeRamBytes,
+      ...(json
+        ? {}
+        : {
+          onProgress: (ev) => {
+            if (ev.kind === "plan") {
+              console.log(`${ev.candidates} configs fit the RAM budget — benching each\n`);
+            }
+            if (ev.kind === "bench") {
+              process.stdout.write(
+                `  [${ev.index + 1}/${ev.total}] ${ev.candidate.quant} @ ${ev.candidate.contextLength}` +
+                  `${ev.candidate.draft ? ` +draft ${ev.candidate.draft}` : ""} … `,
+              );
+            }
+            if (ev.kind === "result") {
+              const r = ev.result;
+              console.log(r.ok ? `${r.genTokPerSec} tok/s` : `failed (${r.error?.slice(0, 60)})`);
+            }
+          },
+        }),
+    });
+
+    if (json) {
+      console.log(JSON.stringify(report, null, 2));
+      if (!report.best) process.exitCode = 2;
+      return;
+    }
+
+    if (!report.best) {
+      console.error("\nnothing fit — free RAM or lower --min-ctx (all candidates exceeded the budget or failed to serve).");
+      process.exitCode = 2;
+      return;
+    }
+
+    console.log("\nmeasured (fastest first):");
+    printTuneTable(report.results);
+
+    const b = report.best;
+    console.log(`\noptimal → local/${local.name}  ${b.candidate.quant} @ ${b.candidate.contextLength}` +
+      `${b.candidate.draft ? ` +draft ${b.candidate.draft}` : ""}  =  ${b.genTokPerSec} tok/s`);
+
+    if (has("save")) {
+      writeModelMeta(cfg.modelsDir, local.name, {
+        contextLength: b.candidate.contextLength,
+        tuned: {
+          quant: b.candidate.quant,
+          contextLength: b.candidate.contextLength,
+          draft: b.candidate.draft ?? false,
+          genTokPerSec: b.genTokPerSec,
+          at: new Date().toISOString(),
+        },
+      });
+      console.log(`saved → maya.json — \`maya models run ${local.name}\` now loads at ${b.candidate.contextLength} ctx`);
+    } else {
+      console.log("(re-run with --save to make this the model's default context)");
+    }
+    return;
+  }
+
   if (cmd === "doctor") {
     ensureDirs();
     const cfg = loadConfig();
@@ -413,6 +548,28 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   console.log(HELP);
+}
+
+/** Render measured tune results as an aligned table (fastest first). */
+function printTuneTable(results: TuneResult[]): void {
+  const rows = results.map((r) => ({
+    cfg: `${r.candidate.quant} @ ${r.candidate.contextLength}${r.candidate.draft ? ` +${r.candidate.draft}` : ""}`,
+    gen: r.ok ? `${r.genTokPerSec}` : "—",
+    prompt: r.ok ? `${r.promptTokPerSec}` : "—",
+    load: r.ok ? `${(r.loadMs / 1000).toFixed(1)}s` : "—",
+    note: r.ok ? "" : `failed: ${r.error?.slice(0, 40) ?? "?"}`,
+  }));
+  const w = (k: keyof (typeof rows)[number], head: string): number =>
+    Math.max(head.length, ...rows.map((row) => row[k].length));
+  const wc = w("cfg", "config");
+  const wg = w("gen", "gen tok/s");
+  const wp = w("prompt", "prompt tok/s");
+  const wl = w("load", "load");
+  const pad = (s: string, n: number): string => s.padEnd(n);
+  console.log(`  ${pad("config", wc)}  ${pad("gen tok/s", wg)}  ${pad("prompt tok/s", wp)}  ${pad("load", wl)}`);
+  for (const row of rows) {
+    console.log(`  ${pad(row.cfg, wc)}  ${pad(row.gen, wg)}  ${pad(row.prompt, wp)}  ${pad(row.load, wl)}  ${row.note}`.trimEnd());
+  }
 }
 
 /** Pid holding a local TCP port, or null when it's free (best-effort, macOS/Linux). */
