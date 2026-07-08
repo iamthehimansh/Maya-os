@@ -91,6 +91,8 @@ interface LiveTeam {
   team: TeamRow;
   templates: MemberTemplate[];
   manager: BusClient;
+  /** The manager's bus handle — its system announcements must not wake agents. */
+  managerHandle: string;
   /** taskId → live worker (one worker per in-flight task). */
   inFlight: Map<string, InFlightWorker>;
   /** @handle → standing agent (the persistent Lead + workers). */
@@ -133,14 +135,15 @@ export class TeamManager {
     if (!res.ok) throw new Error(`manager token mint failed: HTTP ${res.status}`);
     const minted = (await res.json()) as { token: string };
     const manager = new BusClient({ wsBase: this.opts.bus.wsBase, channelId: team.channelId, token: minted.token });
-    const joined = new Promise<void>((r) => manager.on('joined', () => r()));
+    const joined = new Promise<string>((r) => manager.on('joined', (j: { handle: string }) => r(j.handle)));
     manager.connect();
-    await joined;
+    const managerHandle = await joined;
 
     this.live.set(team.id, {
       team,
       templates: input.members,
       manager,
+      managerHandle,
       inFlight: new Map<string, InFlightWorker>(),
       persistent: new Map<string, PersistentAgent>(),
       nextTemplate: 0,
@@ -280,7 +283,11 @@ export class TeamManager {
         },
       };
       const agentHandle = await this.opts.runtime.spawn(spawnSpec);
-      const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, { channelId: lt.team.channelId, label: handle });
+      const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, {
+        channelId: lt.team.channelId,
+        label: handle,
+        ignoreFrom: [lt.managerHandle], // don't wake on the manager's own "➕ @x joined" notice
+      });
       const entry: PersistentAgent = { spec, agentId: agentHandle.id, busHandle, adapter, state: 'live' };
       lt.persistent.set(handle, entry);
       lt.manager.sendMessage({ body: { text: `➕ **${handle}** joined the team (${spec.type} · ${spec.model})` } });
