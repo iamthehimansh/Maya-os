@@ -66,6 +66,9 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   const unsub = useRef<() => void>(() => {});
   const agentPoll = useRef<ReturnType<typeof setInterval> | null>(null);
   const chanPoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Texts the user sent this session — so their own messages (which relay through
+  // the manager, losing the human sender identity) render as "You", not "manager".
+  const sentRef = useRef<Set<string>>(new Set());
   const stream = useRef<HTMLDivElement>(null);
 
   // Mount: model catalog (for the front-door setup) + the team list (for the switcher).
@@ -109,7 +112,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     const tick = (): void =>
       void getChannelHistory(openTeam.channelId, 200)
         .then(({ messages }) => {
-          if (alive) setMsgs(messages.map(channelToMsg));
+          if (alive) setMsgs(messages.map((cm) => channelToMsg(cm, sentRef.current)));
         })
         .catch(() => {});
     tick();
@@ -138,6 +141,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   }, [msgs]);
 
   const shown = msgs.filter((m) => {
+    if (m.who === "system") return false; // manager housekeeping — not part of the conversation
     if (filter === "All") return true;
     if (filter === "@Me") return m.who === "you";
     return m.handle === filter;
@@ -182,6 +186,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
       setSending(true);
       const mentionsSomeone = /@[a-z0-9][a-z0-9-]/i.test(text);
       const wake = mentionsSomeone ? undefined : (agents.find((a) => a.role === "lead") ?? agents[0])?.handle;
+      sentRef.current.add(text); // so the manager-relayed echo renders as "You"
       void sendTeamMessage(openTeam.id, text, wake)
         .catch((e) => setError(String(e instanceof Error ? e.message : e)))
         .finally(() => setSending(false));
@@ -463,14 +468,25 @@ const ICON: Record<LoopEvent["kind"], string> = {
   report: "🏁",
 };
 
-/** A bus channel message → a stream bubble. No fromTokenId ⇒ a human (you). */
-function channelToMsg(cm: ChannelMessage): Msg {
-  const human = !cm.fromTokenId;
+/** Manager housekeeping (join/leave/ready/stop) — Maya plumbing, not conversation. */
+const SYSTEM_LINE = /^\s*[🧭➕➖🛑]/u;
+
+/**
+ * A bus channel message → a stream bubble.
+ *  • Manager housekeeping ("➕ @x joined", "🧭 team ready") → 'system' (hidden).
+ *  • A message whose text the user just sent → "You" (it relayed through the
+ *    manager, which drops the human identity — matching on text recovers it).
+ *  • No fromTokenId also means a human sender.
+ */
+function channelToMsg(cm: ChannelMessage, sent: Set<string>): Msg {
+  const text = cm.body?.text ?? "(structured frame)";
+  const system = SYSTEM_LINE.test(text);
+  const human = !cm.fromTokenId || sent.has(text.trim());
   return {
     id: cm.seq,
-    who: human ? "you" : "agent",
-    handle: human ? "You" : cm.from,
-    text: cm.body?.text ?? "(structured frame)",
+    who: system ? "system" : human ? "you" : "agent",
+    handle: system ? "system" : human ? "You" : cm.from,
+    text,
   };
 }
 
