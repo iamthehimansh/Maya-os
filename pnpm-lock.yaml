@@ -16,6 +16,10 @@ importers:
         version: 5.9.3
 
   apps/cli:
+    dependencies:
+      node-pty:
+        specifier: ^1.1.0
+        version: 1.1.0
     devDependencies:
       '@maya-ai/bus':
         specifier: workspace:*

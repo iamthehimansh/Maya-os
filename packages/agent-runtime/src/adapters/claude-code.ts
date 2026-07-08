@@ -21,7 +21,12 @@ import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_pro
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { spawn as ptySpawn, type IPty } from 'node-pty';
+// node-pty is a NATIVE module: importing it at module load breaks the bundled
+// ESM CLI (its CJS loader uses __dirname, undefined in ESM). Type-only import
+// here (erased at compile); the runtime binding is loaded LAZILY in spawnPty()
+// via dynamic import, so agent-runtime loading never touches it — only an actual
+// pty spawn does. (tsup also marks node-pty external so it loads from node_modules.)
+import type { IPty } from 'node-pty';
 import { resolveCwd } from '../cwd.js';
 import { join } from 'node:path';
 import type {
@@ -236,7 +241,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // pseudo-terminal so the dashboard can stream its actual TUI. Distinct from
     // the headless stream-json path below (which stays the default).
     if (interactive && spec.options?.['pty'] === true) {
-      return this.spawnPty(id, spec, cwd, env);
+      return await this.spawnPty(id, spec, cwd, env);
     }
 
     const child = spawn(this.bin(), this.buildArgs(spec), {
@@ -304,12 +309,14 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   /** Spawn interactive claude in a real PTY and stream its raw terminal bytes as
    * `pty` events (the dashboard renders them in xterm). Messages are delivered by
    * TYPING into the pty (send()); chat output flows via the agent's outbox file. */
-  private spawnPty(
+  private async spawnPty(
     id: string,
     spec: AgentSpawnSpec,
     cwd: string | undefined,
     env: Record<string, string | undefined>,
-  ): AgentHandle {
+  ): Promise<AgentHandle> {
+    // Lazy native-module load — keeps agent-runtime import-safe in the bundled CLI.
+    const { spawn: ptySpawn } = await import('node-pty');
     const p = ptySpawn(this.ptyBin(), this.buildPtyArgs(spec), {
       name: 'xterm-256color',
       cols: 120,

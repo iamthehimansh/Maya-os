@@ -25,6 +25,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepack": "node scripts/copy-assets.mjs"
   },
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  },
   "devDependencies": {
     "@types/node": "^22",
     "tsup": "^8.5.1",
