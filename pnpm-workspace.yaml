@@ -3,3 +3,7 @@ packages:
   - "packages/*"
 allowBuilds:
   esbuild: true
+  # node-pty is a native module; its build script compiles the prebuilt binding
+  # AND sets +x on spawn-helper. Without this, pnpm skips it and spawn-helper
+  # ships non-executable → posix_spawnp fails at runtime (the pty never starts).
+  node-pty: true

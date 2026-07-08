@@ -37,6 +37,10 @@ export interface AgentSpec {
    * Opus/Sonnet) instead of the local gateway. The profile NAME only (e.g.
    * "god"); credentials are resolved server-side and never leave the machine. */
   cldzProfile?: string;
+  /** Run the agent as INTERACTIVE claude in a real PTY (the actual Claude TUI,
+   * watchable live in the dashboard terminal) instead of headless stream-json.
+   * Messages are typed into the terminal; chat output flows via the outbox file. */
+  pty?: boolean;
 }
 
 /** A team = one lead + N workers, all persistent + parallel, sharing a channel. */
