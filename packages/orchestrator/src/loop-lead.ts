@@ -38,6 +38,16 @@ export interface Plan {
 export type Planner = (goal: string, context: { answer?: string }) => Promise<Plan>;
 export type Verifier = (task: TaskRow) => Promise<{ ok: boolean; feedback?: string }>;
 
+/** Live run milestones (SSE payloads). `at` is an ISO timestamp. */
+export type LoopEvent =
+  | { kind: 'started'; runId: string; goal: string; at: string }
+  | { kind: 'planned'; tasks: number; at: string }
+  | { kind: 'question'; prompt: string; at: string }
+  | { kind: 'verified'; taskId: string; ok: boolean; feedback?: string; at: string }
+  | { kind: 'rework'; taskId: string; round: number; feedback?: string; at: string }
+  | { kind: 'goal_check'; met: boolean; missing: string[]; at: string }
+  | { kind: 'report'; outcome: LoopReport['outcome']; summary: string; tokensUsed: number; at: string };
+
 export interface LoopLeadOptions {
   db: MayaDb;
   teams: TeamManager;
@@ -49,6 +59,12 @@ export interface LoopLeadOptions {
   maxRework?: number;
   /** How long to wait for a human answer before proceeding with a default. */
   questionTimeoutMs?: number;
+  /**
+   * Structured progress hook — fires at each run milestone. The service wires
+   * it to an SSE stream so the CLI/dashboard show live progress without
+   * polling. Independent of the bus messages (which are human-facing chat).
+   */
+  onEvent?: (event: LoopEvent) => void;
   /**
    * Goal-level acceptance: a final check that the GOAL is actually met, run
    * after per-task verification. It exists because weak planners paraphrase
@@ -89,6 +105,14 @@ export class LoopLead {
       ...this.opts.team,
     });
     let questionsAsked = 0;
+    const emit = (e: LoopEvent): void => {
+      try {
+        this.opts.onEvent?.(e);
+      } catch {
+        /* a listener must never break the run */
+      }
+    };
+    emit({ kind: 'started', runId, goal, at: new Date().toISOString() });
 
     // The lead speaks on the team channel with its own identity.
     const lead = await this.joinChannel(team);
@@ -106,6 +130,7 @@ export class LoopLead {
       // the stale object under-reports (invisible with :memory: fresh reads,
       // exposed by a persistent db — 02's tokens=0 report bug).
       const freshTeam = this.opts.db.team(team.id) ?? team;
+      emit({ kind: 'report', outcome, summary, tokensUsed: freshTeam.tokensUsed, at: new Date().toISOString() });
       lead.sendMessage({ body: { text: `🏁 loop ${runId}: **${outcome}** — ${summary}` } });
       lead.close();
       return { runId, goal, team: freshTeam, outcome, tasks, questionsAsked, summary };
@@ -116,6 +141,7 @@ export class LoopLead {
       let plan = await this.opts.planner(goal, {});
       if (plan.clarification) {
         questionsAsked += 1;
+        emit({ kind: 'question', prompt: plan.clarification.prompt, at: new Date().toISOString() });
         const answer = await this.ask(lead, plan.clarification);
         plan = await this.opts.planner(goal, { answer });
         if (plan.clarification) {
@@ -124,6 +150,7 @@ export class LoopLead {
         }
       }
       if (plan.tasks.length === 0) return await finish('failed', 'planner produced no tasks', new Set());
+      emit({ kind: 'planned', tasks: plan.tasks.length, at: new Date().toISOString() });
       lead.sendMessage({ body: { text: `🧠 plan: ${plan.tasks.length} task(s) for "${goal.slice(0, 80)}"` } });
 
       // 2. Seed the board (plan-index deps → task-id deps).
@@ -158,6 +185,7 @@ export class LoopLead {
         let anyRework = false;
         for (const task of done) {
           const verdict = await this.opts.verifier(task); // judgment point #2
+          emit({ kind: 'verified', taskId: task.id, ok: verdict.ok, at: new Date().toISOString(), ...(verdict.feedback !== undefined ? { feedback: verdict.feedback } : {}) });
           if (verdict.ok) {
             verified.add(task.id);
             continue;
@@ -171,6 +199,7 @@ export class LoopLead {
           reworked.set(task.id, rounds + 1);
           superseded.add(task.id);
           anyRework = true;
+          emit({ kind: 'rework', taskId: task.id, round: rounds + 1, at: new Date().toISOString(), ...(verdict.feedback !== undefined ? { feedback: verdict.feedback } : {}) });
           const spec = `${task.spec}\n\nREWORK (round ${rounds + 1}): the previous attempt was rejected — ${verdict.feedback ?? 'does not meet acceptance'}.${acceptance.get(task.id) ? `\nAcceptance: ${acceptance.get(task.id)}` : ''}`;
           const rework = this.opts.teams.addTask(team.id, spec, { scope: task.scope });
           reworked.set(rework.id, rounds + 1); // the replacement inherits the round count
@@ -188,6 +217,7 @@ export class LoopLead {
       if (this.opts.goalCheck) {
         const maxGoalFix = this.opts.maxGoalFix ?? 3;
         let check = await this.opts.goalCheck(goal);
+        emit({ kind: 'goal_check', met: check.met, missing: check.missing, at: new Date().toISOString() });
         for (let round = 0; !check.met && round < maxGoalFix; round++) {
           lead.sendMessage({ body: { text: `🎯 goal not yet met (round ${round + 1}/${maxGoalFix}) — missing: ${check.missing.join(', ')}`.slice(0, 300) } });
           const fixSpec =
@@ -200,6 +230,7 @@ export class LoopLead {
             if (v.ok) verified.add(t.id);
           }
           check = await this.opts.goalCheck(goal);
+          emit({ kind: 'goal_check', met: check.met, missing: check.missing, at: new Date().toISOString() });
         }
         goalMissing = check.met ? [] : check.missing;
       }

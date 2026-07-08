@@ -82,6 +82,34 @@ describe('orchestrator service', () => {
     }
   }, 20_000);
 
+  it('streams run progress over SSE and closes on the terminal report', async () => {
+    const base = await setup();
+    const res = await fetch(`${base}/api/loop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ goal: 'x', leadModel: 'local/x', workerModel: 'local/x', cwd: '/tmp' }),
+    });
+    const { runId } = (await res.json()) as { runId: string };
+
+    // Read the SSE stream to completion (the run fails fast on the dead
+    // gateway, so a 'report' event arrives and closes the stream).
+    const sse = await fetch(`${base}/api/runs/${runId}/events`);
+    expect(sse.headers.get('content-type')).toContain('text/event-stream');
+    const text = await sse.text(); // resolves when the stream closes
+    const events = text
+      .split('\n\n')
+      .filter((b) => b.startsWith('data: '))
+      .map((b) => JSON.parse(b.slice(6)) as { kind: string });
+    expect(events[0]?.kind).toBe('started');
+    expect(events.some((e) => e.kind === 'report')).toBe(true);
+  }, 20_000);
+
+  it('returns 404 SSE for an unknown run', async () => {
+    const base = await setup();
+    const res = await fetch(`${base}/api/runs/nope/events`);
+    expect(res.status).toBe(404);
+  });
+
   it('gates mutating routes behind the admin bearer when configured', async () => {
     const base = await setup('secret-admin');
     const unauthed = await fetch(`${base}/api/loop`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });

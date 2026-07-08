@@ -9,6 +9,7 @@ export {
   LoopLead,
   type LoopLeadOptions,
   type LoopReport,
+  type LoopEvent,
   type Plan,
   type PlannedTask,
   type Planner,
