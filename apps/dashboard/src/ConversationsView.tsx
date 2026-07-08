@@ -39,6 +39,7 @@ export function ConversationsView(): React.JSX.Element {
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [showClosed, setShowClosed] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -82,12 +83,32 @@ export function ConversationsView(): React.JSX.Element {
         ) : channels.length === 0 ? (
           <p className="empty">No channels yet — teams and loop runs create their own rooms.</p>
         ) : (
-          <div className="tabs" role="tablist" aria-label="channels">
-            {channels.map((c) => (
-              <button key={c.id} className="tab" role="tab" aria-selected={selected === c.id} onClick={() => setSelected(c.id)}>
-                {c.id} <span className="soon">{c.participants.length} live</span>
+          <div className="chan-list" role="tablist" aria-label="channels">
+            {/* Live channels (participants) first; the pile of closed rooms
+                collapses behind a toggle so the picker stays scannable. */}
+            {[...channels]
+              .sort((a, b) => b.participants.length - a.participants.length)
+              .filter((c) => showClosed || c.participants.length > 0 || c.id === selected)
+              .map((c) => (
+                <button
+                  key={c.id}
+                  className="chan"
+                  role="tab"
+                  aria-selected={selected === c.id}
+                  onClick={() => setSelected(c.id)}
+                  title={c.id}
+                >
+                  <code>{c.id.replace(/^maya\/team\//, "")}</code>
+                  <span className={c.participants.length > 0 ? "chip state-active" : "muted"}>
+                    {c.participants.length > 0 ? `${c.participants.length} live` : "closed"}
+                  </span>
+                </button>
+              ))}
+            {channels.some((c) => c.participants.length === 0) && (
+              <button className="disclosure" onClick={() => setShowClosed((v) => !v)}>
+                {showClosed ? "hide closed" : `+${channels.filter((c) => c.participants.length === 0).length} closed`}
               </button>
-            ))}
+            )}
           </div>
         )}
       </div>

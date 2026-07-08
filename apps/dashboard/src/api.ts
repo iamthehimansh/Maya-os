@@ -19,6 +19,8 @@ export interface CatalogEntry {
   contextLength?: number;
   quants?: Array<{ quant: string; quality: number; bytes: number }>;
   instance?: Instance;
+  /** Measured on first load — only tool-callers are valid loop WORKERS. */
+  capabilities?: { toolCalling?: boolean };
 }
 
 export interface Health {

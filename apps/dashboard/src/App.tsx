@@ -1,18 +1,19 @@
 import { useState } from "react";
-import { AgentsView } from "./AgentsView";
 import { ConversationsView } from "./ConversationsView";
 import { ModelsView } from "./ModelsView";
+import { RunPanel } from "./RunPanel";
 import { TeamsView } from "./TeamsView";
 
 /**
- * Dashboard shell — tab-based so each lane's views slot in independently.
- * Models = lane 02. Agents / Teams / Conversations = lane 01 (all live).
+ * Action-first shell: Run is the home tab (describe a goal + dir → go). Models
+ * and Teams are the other doers; Conversations is the live channel viewer.
+ * (The old read-only Agents dump is gone — agents show per run/team instead.)
  */
-const TABS = ["Models", "Agents", "Teams", "Conversations"] as const;
+const TABS = ["Run", "Models", "Teams", "Conversations"] as const;
 type Tab = (typeof TABS)[number];
 
 export function App(): React.JSX.Element {
-  const [active, setActive] = useState<Tab>("Models");
+  const [active, setActive] = useState<Tab>("Run");
   return (
     <div className="shell">
       <header className="topbar">
@@ -26,8 +27,8 @@ export function App(): React.JSX.Element {
         </nav>
       </header>
       <main>
+        {active === "Run" && <RunPanel />}
         {active === "Models" && <ModelsView />}
-        {active === "Agents" && <AgentsView />}
         {active === "Teams" && <TeamsView />}
         {active === "Conversations" && <ConversationsView />}
       </main>
