@@ -1,0 +1,30 @@
+{
+  "name": "@maya-ai/eval",
+  "version": "0.0.1",
+  "description": "Maya eval — run the Loop on a task suite and score pass-rate + an honesty (fake-success) metric against ground truth.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "bin": {
+    "maya-eval": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "suites"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  }
+}
