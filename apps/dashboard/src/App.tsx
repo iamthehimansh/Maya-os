@@ -3,6 +3,7 @@ import { ChatView } from "./ChatView";
 import { ConversationsView } from "./ConversationsView";
 import { ModelsView } from "./ModelsView";
 import { RunPanel } from "./RunPanel";
+import { FilesView } from "./FilesView";
 import { SettingsView } from "./SettingsView";
 import { TeamsView } from "./TeamsView";
 
@@ -12,7 +13,7 @@ import { TeamsView } from "./TeamsView";
  * is the raw channel viewer. Lane split: Chat / Run / Teams / Conversations =
  * 01; Models / Settings = 02.
  */
-const TABS = ["Chat", "Run", "Models", "Teams", "Settings", "Conversations"] as const;
+const TABS = ["Chat", "Run", "Models", "Teams", "Files", "Settings", "Conversations"] as const;
 type Tab = (typeof TABS)[number];
 
 export function App(): React.JSX.Element {
@@ -34,6 +35,7 @@ export function App(): React.JSX.Element {
         {active === "Run" && <RunPanel />}
         {active === "Models" && <ModelsView />}
         {active === "Teams" && <TeamsView />}
+        {active === "Files" && <FilesView />}
         {active === "Settings" && <SettingsView />}
         {active === "Conversations" && <ConversationsView />}
       </main>

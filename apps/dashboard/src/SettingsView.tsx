@@ -39,6 +39,52 @@ interface SystemInfo {
   liveInstances: number;
 }
 
+interface Tunnel { id: string; port: number; url: string | null; state: string; }
+function TunnelsPanel(): React.JSX.Element {
+  const [tunnels, setTunnels] = useState<Tunnel[]>([]);
+  const [installed, setInstalled] = useState(true);
+  const [port, setPort] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const load = (): void => void fetch("/api/tunnels").then((r) => r.json()).then((d) => { setTunnels(d.tunnels ?? []); setInstalled(d.installed !== false); }).catch(() => {});
+  useEffect(() => { load(); const t = setInterval(load, 4000); return () => clearInterval(t); }, []);
+  const open = async (): Promise<void> => {
+    if (!port.trim()) return;
+    setBusy(true); setErr(null);
+    try {
+      const res = await fetch("/api/tunnels", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ port: Number(port) }) });
+      const b = await res.json();
+      if (!res.ok) throw new Error(b.error?.message ?? "failed");
+      setPort(""); load();
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
+  };
+  const stop = (id: string): void => void fetch(`/api/tunnels/${id}`, { method: "DELETE" }).then(load);
+  return (
+    <section className="panel">
+      <h2>Port forwarding <span className="hint">— expose a local port publicly via Cloudflare (explicit + stoppable)</span></h2>
+      {!installed && <div className="error-banner">cloudflared not installed — <code>brew install cloudflared</code></div>}
+      <div className="pull">
+        <input type="number" placeholder="local port (e.g. 3000)" value={port} onChange={(e) => setPort(e.target.value)} />
+        <button className="act primary" disabled={busy || !installed} onClick={() => void open()}>{busy ? "opening…" : "Expose"}</button>
+      </div>
+      {err && <div className="save-note" style={{ borderColor: "var(--status-critical)" }}>{err}</div>}
+      {tunnels.length > 0 && (
+        <table className="models" style={{ marginTop: 10 }}>
+          <tbody>
+            {tunnels.map((t) => (
+              <tr key={t.id}>
+                <td>:{t.port}</td>
+                <td>{t.url ? <a href={t.url} target="_blank" rel="noreferrer" className="mono">{t.url}</a> : <span className="chip"><span className="dot" style={{ background: "var(--status-warning)" }} />{t.state}</span>}</td>
+                <td style={{ textAlign: "right" }}><button className="act" onClick={() => stop(t.id)}>Stop</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
 function HealthPanel(): React.JSX.Element {
   const [sys, setSys] = useState<SystemInfo | null>(null);
   useEffect(() => {
@@ -124,6 +170,7 @@ export function SettingsView(): React.JSX.Element {
   return (
     <>
       <HealthPanel />
+      <TunnelsPanel />
       {error && <div className="error-banner" role="alert">{error}</div>}
       {note && <div className="save-note">{note}</div>}
 
