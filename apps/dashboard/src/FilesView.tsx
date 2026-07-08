@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { renderMarkdown } from "./md";
 
 interface FsEntry {
   name: string;
@@ -92,7 +93,11 @@ export function FilesView(): React.JSX.Element {
           <h2>
             {preview.path.split("/").pop()} <span className="hint">{preview.truncated ? "— preview (truncated)" : ""}</span>
           </h2>
-          <pre className="fs-preview">{preview.text}</pre>
+          {/\.(md|markdown)$/i.test(preview.path) ? (
+            <div className="md-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(preview.text) }} />
+          ) : (
+            <pre className="fs-preview">{preview.text}</pre>
+          )}
         </section>
       )}
     </>
