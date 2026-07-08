@@ -19,7 +19,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { AgentEvent, AgentSpawnSpec, LoopBody, MayaDb, TaskRow, TeamRow, TeamTopology } from '@maya-ai/core';
+import type { AgentEvent, AgentSpawnSpec, AgentSpec, AgentStatus, LoopBody, MayaDb, TaskRow, TeamRow, TeamTopology } from '@maya-ai/core';
+import { HANDLE_RE, RESERVED_LEAD_HANDLE } from '@maya-ai/core';
 import type { AgentRuntime, AgentBusBridge } from '@maya-ai/agent-runtime';
 import { BusClient } from '@maya-ai/bus-client';
 
@@ -75,12 +76,25 @@ interface InFlightWorker {
   adapter: ReturnType<AgentRuntime['adapter']>;
 }
 
+/** A standing agent on the team channel — spawned interactive (no one-shot
+ * prompt), attached to the bus, addressable by its @handle, woken by messages. */
+interface PersistentAgent {
+  spec: AgentSpec;
+  agentId: string; // adapter handle id
+  busHandle: string;
+  adapter: ReturnType<AgentRuntime['adapter']>;
+  state: AgentStatus['state'];
+  pid?: number;
+}
+
 interface LiveTeam {
   team: TeamRow;
   templates: MemberTemplate[];
   manager: BusClient;
   /** taskId → live worker (one worker per in-flight task). */
   inFlight: Map<string, InFlightWorker>;
+  /** @handle → standing agent (the persistent Lead + workers). */
+  persistent: Map<string, PersistentAgent>;
   nextTemplate: number;
   draining: boolean;
 }
@@ -128,6 +142,7 @@ export class TeamManager {
       templates: input.members,
       manager,
       inFlight: new Map<string, InFlightWorker>(),
+      persistent: new Map<string, PersistentAgent>(),
       nextTemplate: 0,
       draining: false,
     });
@@ -189,6 +204,14 @@ export class TeamManager {
         this.opts.db.transitionTask(taskId, 'failed', { result: `drained: ${reason}` });
       }
     }
+    // Tear down the standing agents too — detach revokes each bus token.
+    for (const [handle, a] of [...lt.persistent]) {
+      lt.persistent.delete(handle);
+      if (a.agentId) {
+        await this.opts.bridge.detach(a.agentId).catch(() => {});
+        await a.adapter.kill(a.agentId).catch(() => {});
+      }
+    }
     this.opts.db.setTeamState(teamId, 'closed');
     lt.manager.close();
     this.live.delete(teamId);
@@ -219,6 +242,95 @@ export class TeamManager {
   /** Is this team currently live (created through this manager, not drained)? */
   isLive(teamId: string): boolean {
     return this.live.has(teamId);
+  }
+
+  // ── persistent agents (the multi-agent team on the bus) ────────────────
+
+  /**
+   * Spawn a STANDING agent into a live team: a real coding agent
+   * (claude-code/codex/opencode) started interactive (no one-shot prompt, so it
+   * stays alive) and attached to the team channel with a least-capability
+   * ['receive','send'] token, addressable by its @handle. This is the seam that
+   * 02's MCP `spawn_agent` AND the human "solo agent" both call. The handle is
+   * caller-provided and enforced unique per the contract (never auto-suffixed).
+   */
+  async spawnAgent(teamId: string, spec: AgentSpec): Promise<AgentStatus> {
+    const lt = this.mustLive(teamId);
+    const { handle } = spec;
+    if (!HANDLE_RE.test(handle)) throw new Error(`invalid handle "${handle}" — must be @lowercase-kebab (${HANDLE_RE.source})`);
+    const role: 'lead' | 'worker' = spec.role ?? 'worker';
+    if (handle === RESERVED_LEAD_HANDLE && role !== 'lead') throw new Error(`${RESERVED_LEAD_HANDLE} is reserved for the team lead`);
+    if (role === 'lead' && handle !== RESERVED_LEAD_HANDLE) throw new Error(`the lead's handle must be ${RESERVED_LEAD_HANDLE}`);
+    if (lt.persistent.has(handle)) throw new Error(`handle ${handle} already in use on this team — pick another (handles are unique, never auto-suffixed)`);
+
+    const adapter = this.opts.runtime.adapter(spec.type);
+    // Reserve the handle up-front so a concurrent spawn of the same name loses.
+    lt.persistent.set(handle, { spec, agentId: '', busHandle: '', adapter, state: 'spawning' });
+    try {
+      const spawnSpec: AgentSpawnSpec = {
+        adapter: spec.type as AgentSpawnSpec['adapter'],
+        model: spec.model as AgentSpawnSpec['model'],
+        cwd: spec.cwd,
+        // NO `prompt` → the adapter runs INTERACTIVE: the process stays alive and
+        // is driven by bus messages (the bridge feeds @mentions in, posts out).
+        permissionMode: 'auto',
+        options: {
+          ...(spec.allowedTools !== undefined ? { allowedTools: spec.allowedTools } : {}),
+          ...(spec.systemPrompt !== undefined ? { appendSystemPrompt: spec.systemPrompt } : {}),
+        },
+      };
+      const agentHandle = await this.opts.runtime.spawn(spawnSpec);
+      const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, { channelId: lt.team.channelId, label: handle });
+      const entry: PersistentAgent = { spec, agentId: agentHandle.id, busHandle, adapter, state: 'live' };
+      lt.persistent.set(handle, entry);
+      lt.manager.sendMessage({ body: { text: `➕ **${handle}** joined the team (${spec.type} · ${spec.model})` } });
+      return this.statusOf(handle, entry);
+    } catch (err) {
+      lt.persistent.delete(handle); // release the reserved handle on failure
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+  }
+
+  /** All standing agents on a live team (Lead + workers). Empty for unknown/drained. */
+  listAgents(teamId: string): AgentStatus[] {
+    const lt = this.live.get(teamId);
+    if (!lt) return [];
+    return [...lt.persistent.entries()].map(([h, a]) => this.statusOf(h, a));
+  }
+
+  /** Stop a standing agent: revoke its bus token (via detach) + kill it, free the handle. */
+  async stopAgent(teamId: string, handle: string): Promise<void> {
+    const lt = this.mustLive(teamId);
+    const a = lt.persistent.get(handle);
+    if (!a) throw new Error(`no agent ${handle} on this team`);
+    lt.persistent.delete(handle);
+    if (a.agentId) {
+      await this.opts.bridge.detach(a.agentId).catch(() => {}); // detach revokes the token
+      await a.adapter.kill(a.agentId).catch(() => {});
+    }
+    lt.manager.sendMessage({ body: { text: `➖ **${handle}** left the team` } });
+  }
+
+  private statusOf(handle: string, a: PersistentAgent): AgentStatus {
+    return {
+      handle,
+      type: a.spec.type,
+      model: a.spec.model,
+      role: a.spec.role ?? 'worker',
+      cwd: a.spec.cwd,
+      state: a.state,
+      ...(a.spec.allowedTools !== undefined ? { allowedTools: a.spec.allowedTools } : {}),
+    };
+  }
+
+  /**
+   * Post a message into the team channel on the manager's connection. Dual-use:
+   * the lead's MCP `send_to` (directed to an @handle), the human chat composer,
+   * and @wake — a directed message wakes the target agent via the bridge.
+   */
+  postMessage(teamId: string, text: string, to?: string): void {
+    const lt = this.mustLive(teamId);
+    lt.manager.sendMessage({ ...(to ? { to } : {}), body: { text } });
   }
 
   // ── internals ─────────────────────────────────────────────────────────
