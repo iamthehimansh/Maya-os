@@ -336,9 +336,9 @@ export class TeamManager {
    * the lead's MCP `send_to` (directed to an @handle), the human chat composer,
    * and @wake — a directed message wakes the target agent via the bridge.
    */
-  postMessage(teamId: string, text: string, to?: string): void {
+  postMessage(teamId: string, text: string, to?: string, human?: boolean): void {
     const lt = this.mustLive(teamId);
-    lt.manager.sendMessage({ ...(to ? { to } : {}), body: { text } });
+    lt.manager.sendMessage({ ...(to ? { to } : {}), body: { text, ...(human ? { human: true } : {}) } });
   }
 
   /**

@@ -163,7 +163,7 @@ export interface ChannelMessage {
   to?: string;
   ts: string;
   fromTokenId?: string; // present ⇒ an agent/token sender; absent ⇒ a human
-  body: { text?: string; maya?: unknown };
+  body: { text?: string; maya?: unknown; human?: boolean };
 }
 
 const postJson = async <T>(url: string, body: unknown): Promise<T> => {
@@ -183,9 +183,10 @@ export const getTeamAgents = (teamId: string): Promise<AgentStatus[]> => get(`/a
 export const stopTeamAgent = (teamId: string, handle: string): Promise<Response> =>
   fetch(`/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(handle)}`, { method: "DELETE" });
 
-/** Post to the team channel; `to` directs it at an @handle (wakes that agent). */
-export const sendTeamMessage = (teamId: string, text: string, to?: string): Promise<unknown> =>
-  postJson(`/api/teams/${encodeURIComponent(teamId)}/messages`, { text, ...(to ? { to } : {}) });
+/** Post to the team channel; `to` directs it at an @handle (wakes that agent).
+ * `human` marks it as the owner's own message so the UI renders it as "You". */
+export const sendTeamMessage = (teamId: string, text: string, to?: string, human?: boolean): Promise<unknown> =>
+  postJson(`/api/teams/${encodeURIComponent(teamId)}/messages`, { text, ...(to ? { to } : {}), ...(human ? { human: true } : {}) });
 
 /** Read a bus channel's recent history (GET-only proxy; the chat stream). */
 export const getChannelHistory = (channelId: string, limit = 60): Promise<{ messages: ChannelMessage[] }> =>
