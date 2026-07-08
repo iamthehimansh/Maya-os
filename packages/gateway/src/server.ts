@@ -318,6 +318,7 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
     const cfg = loadConfig();
     return c.json({
       ...cfg,
+      user: cfg.user ?? { handle: "@me" },
       providers: cfg.providers.map((p) => ({
         id: p.id,
         baseUrl: p.baseUrl ?? "",
@@ -348,6 +349,7 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
       }
     }
     const next: PlatformConfig = {
+      ...(body.user?.handle || cur.user ? { user: { handle: String(body.user?.handle ?? cur.user?.handle ?? "@me") } } : {}),
       gateway: { port: Number(body.gateway?.port ?? cur.gateway.port) },
       dashboard: { port: Number(body.dashboard?.port ?? cur.dashboard.port) },
       bus: { port: Number(body.bus?.port ?? cur.bus.port) },

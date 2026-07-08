@@ -84,7 +84,9 @@ export function buildServer(client: MayaClient): McpServer {
         await client.sendTo(handle, msg);
         return text(`sent to ${handle}`);
       } catch (e) {
-        return text(`send failed: ${e instanceof Error ? e.message : String(e)}`);
+        // Graceful: if direct-send isn't wired, the lead just @mentions in the
+        // shared channel (the primary wake mechanism anyway).
+        return text(`direct send unavailable (${e instanceof Error ? e.message : e}). Instead, @mention ${handle} in the team channel — the monitor wakes them.`);
       }
     },
   );

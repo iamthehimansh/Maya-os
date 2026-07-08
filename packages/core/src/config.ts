@@ -27,6 +27,7 @@ const CLOUD_PROVIDERS: CloudProvider[] = [
 ];
 
 export const defaultConfig = (): PlatformConfig => ({
+  user: { handle: "@me" },
   gateway: { port: 4100 },
   dashboard: { port: 4200 },
   bus: { port: 4300 },

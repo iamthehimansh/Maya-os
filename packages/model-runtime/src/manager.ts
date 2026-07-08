@@ -95,8 +95,18 @@ export class RuntimeManager extends EventEmitter {
   async load(model: ModelId, opts: LoadOpts = {}): Promise<ModelInstance> {
     const existing = this.managed.get(model);
     if (existing && existing.instance.state !== "stopped") {
-      existing.lastUsed = Date.now();
-      return existing.instance;
+      // Reuse only when the caller isn't asking for different params. A load
+      // that requests a context or quant unlike what's live must RELOAD
+      // (restart llama-server) — otherwise "load at 32k" over an 8k instance is
+      // a silent no-op (observed: all-tools agents 400 because the requested
+      // larger context never actually took effect).
+      const ctxDiffers = opts.contextLength !== undefined && opts.contextLength !== existing.instance.contextLength;
+      const quantDiffers = opts.quant !== undefined && opts.quant !== existing.instance.quant;
+      if (!ctxDiffers && !quantDiffers) {
+        existing.lastUsed = Date.now();
+        return existing.instance;
+      }
+      await this.unload(model);
     }
 
     const local = findModel(this.modelsDir, model);
