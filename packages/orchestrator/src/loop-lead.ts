@@ -101,9 +101,14 @@ export class LoopLead {
         verified: verified.has(t.id),
         result: t.result,
       }));
+      // Re-read the team FRESH: `team` was snapshotted at creation with
+      // tokensUsed=0; the ledger is updated on the db row during the run, so
+      // the stale object under-reports (invisible with :memory: fresh reads,
+      // exposed by a persistent db — 02's tokens=0 report bug).
+      const freshTeam = this.opts.db.team(team.id) ?? team;
       lead.sendMessage({ body: { text: `🏁 loop ${runId}: **${outcome}** — ${summary}` } });
       lead.close();
-      return { runId, goal, team, outcome, tasks, questionsAsked, summary };
+      return { runId, goal, team: freshTeam, outcome, tasks, questionsAsked, summary };
     };
 
     try {
