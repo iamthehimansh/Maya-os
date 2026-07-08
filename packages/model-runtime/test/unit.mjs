@@ -58,6 +58,10 @@ console.log("UNIT PASS ✅ (12 assertions)");
 // draft argv (speculation flags appended only when draftPath present)
 const dargs = llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 2048, draftPath: "/d.gguf" });
 assert(dargs.includes("--model-draft") && dargs.includes("/d.gguf") && dargs.includes("--gpu-layers-draft"), "draft flags present");
+// --spec-type is REQUIRED to actually enable speculation (build 9890+): without
+// it --model-draft is a silent no-op and the draft never loads. Guard the fix.
+assert(dargs.includes("--spec-type") && dargs.includes("draft-simple"), "spec-type enables speculation");
+assert(dargs.includes("--spec-draft-p-min"), "draft p-min tuned");
 assert(!llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 2048 }).includes("--model-draft"), "no draft by default");
 console.log("DRAFT ARGV PASS ✅");
 

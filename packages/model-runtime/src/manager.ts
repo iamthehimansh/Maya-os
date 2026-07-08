@@ -253,12 +253,20 @@ export class RuntimeManager extends EventEmitter {
       const named = all.find((m) => m.name === local.draftModel);
       return named?.files[named.files.length - 1]?.path;
     }
-    // MEASURED on M2 Pro (llama.cpp Metal, q8 KV): 3B+0.5B draft = 1.01x,
-    // 7B+0.5B draft = 1.00x — speculation buys nothing here while costing the
-    // draft's RAM. Auto-pairing is therefore OFF; explicit maya.json
-    // draftModel remains for experimentation and for backends where it pays
-    // (CUDA batch-verify, future MLX). Plumbing (flags, budget reserve,
-    // no-draft fallback) stays.
+    // MEASURED on Apple Silicon (llama.cpp Metal build 9890, q8 KV, 7B+0.5B):
+    // draft-model speculation is a NET SLOWDOWN — best tuned config 0.83x
+    // (n-max=10, p-min=0.9, 93% acceptance); untuned 0.48x. The old 1.00x
+    // reading was worse than it looked: `--model-draft` alone never enabled
+    // speculation (silent no-op without --spec-type), so nothing ran at all.
+    // Root cause once it DOES run: Metal batch-verify of n+1 tokens costs ~n×
+    // a single forward (compute-bound at batch), so it reclaims none of the
+    // draft's sequential cost — acceptance is high but throughput still loses.
+    // Byte-identical greedy also isn't guaranteed (rare tie-break divergence in
+    // the batched q8-KV path). Auto-pairing is therefore OFF. Explicit maya.json
+    // draftModel stays for backends where batch-verify IS free (CUDA) and for
+    // EAGLE-3-via-MLX later (see docs/research/fast-low-resource-inference.md);
+    // the flags are now correct (--spec-type + tuned p-min) so that path works.
+    // Benchmark: packages/model-runtime/bench/spec-bench.mjs.
     return undefined;
   }
 
