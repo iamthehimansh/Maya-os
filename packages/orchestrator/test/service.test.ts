@@ -125,6 +125,10 @@ describe('orchestrator service', () => {
 
     const list = (await (await fetch(`${base}/api/teams`)).json()) as Array<{ id: string }>;
     expect(list.map((t) => t.id)).toContain(team.id);
+    // ?live=1 surfaces only standing (live) teams — what `maya team list` uses.
+    const liveList = (await (await fetch(`${base}/api/teams?live=1`)).json()) as Array<{ id: string; state: string }>;
+    expect(liveList.map((t) => t.id)).toContain(team.id);
+    expect(liveList.every((t) => t.state !== 'closed')).toBe(true);
 
     // A loop targeting the standing team is accepted (worker comes from it)
     // and settles (fails fast on the dead gateway) WITHOUT hanging.
