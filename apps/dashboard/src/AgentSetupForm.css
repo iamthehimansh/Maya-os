@@ -1,0 +1,39 @@
+/* Reusable agent-setup form (Solo, team lead, team members, add-agent). Leans on
+   the app's existing .field / .field-row tokens; adds only the per-agent card chrome. */
+.agent-setup {
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--surface-1, rgba(127, 127, 127, 0.05));
+}
+.agent-setup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.agent-setup .field.checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.agent-setup .field.checkbox input {
+  width: auto;
+}
+.linklike {
+  background: none;
+  border: none;
+  color: var(--accent, #4a7);
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: underline;
+  padding: 0;
+}
+
+/* TeamBuilder: the stack of lead + member setup cards + actions. */
+.team-builder { display: flex; flex-direction: column; gap: 12px; }
+.team-builder-actions { display: flex; gap: 10px; align-items: center; }
