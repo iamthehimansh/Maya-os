@@ -20,7 +20,7 @@
 import { createServer, type Server } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
-import { MayaDb, type LoopBody } from '@maya-ai/core';
+import { MayaDb, type AgentSpec, type LoopBody } from '@maya-ai/core';
 import { AgentBusBridge, AgentRuntime } from '@maya-ai/agent-runtime';
 import { BusClient } from '@maya-ai/bus-client';
 import { LlmClient } from './llm.js';
@@ -93,7 +93,39 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     return c.json(rows.map((t) => ({ ...t, inFlight: teams.statusSafe(t.id)?.inFlight ?? 0 })));
   });
   app.get('/api/teams/:id/tasks', (c) => c.json(db.tasks(c.req.param('id'))));
-  app.get('/api/teams/:id/agents', (c) => c.json(db.agents(c.req.param('id'))));
+  // Standing agents on a team (the persistent Lead + workers). This is the
+  // contract 02's MCP `list_agents`/`spawn_agent`/`stop_agent` call.
+  app.get('/api/teams/:id/agents', (c) => c.json(teams.listAgents(c.req.param('id'))));
+  // Historical task-worker records (per-task, transient) stay available for the
+  // Teams page's run history.
+  app.get('/api/teams/:id/workers', (c) => c.json(db.agents(c.req.param('id'))));
+
+  app.post('/api/teams/:id/agents', async (c) => {
+    const id = c.req.param('id');
+    if (!teams.isLive(id)) return c.json({ error: `team ${id} is not live — create it first` }, 400);
+    const raw = (await c.req.json().catch(() => null)) as { agent?: AgentSpec } | AgentSpec | null;
+    const agent = (raw && typeof raw === 'object' && 'agent' in raw ? raw.agent : raw) as AgentSpec | undefined;
+    if (!agent?.handle || !agent.type || !agent.model || !agent.cwd) {
+      return c.json({ error: 'agent { handle, type, model, cwd } required' }, 400);
+    }
+    try {
+      return c.json(await teams.spawnAgent(id, agent), 201);
+    } catch (err) {
+      return c.json({ error: String(err instanceof Error ? err.message : err) }, 400);
+    }
+  });
+
+  app.delete('/api/teams/:id/agents/:handle', async (c) => {
+    const id = c.req.param('id');
+    if (!teams.isLive(id)) return c.json({ error: `team ${id} is not live` }, 400);
+    const handle = decodeURIComponent(c.req.param('handle')); // @name may arrive %40-encoded
+    try {
+      await teams.stopAgent(id, handle);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: String(err instanceof Error ? err.message : err) }, 404);
+    }
+  });
 
   // Standing teams: create once (kept LIVE — joins its bus room), then run
   // many loops on it via POST /api/loop {teamId}. `maya team create/list`.
