@@ -19,6 +19,13 @@ Usage:
   maya models pull <source>      hf:owner/repo[/file.gguf] or URL   [--name <n>]
   maya models run <name>         load a model (guardrails apply)
   maya models stop <name>        unload a model
+  maya loop "<goal>"             run an AI team on a goal (lead plans, workers execute, gates verify)
+                                 [--worker <model>] [--lead <model>] [--cwd <dir>] [--tools Write,Edit] [--max-turns N]
+  maya runs                      recent loop runs with outcomes + tokens
+  maya team create <name>        standing team (run many loops on one fleet)
+                                 [--worker <model>] [--cwd <dir>] [--tools T,T] [--budget N]
+  maya team list                 live teams with budgets + token burn
+  maya team drain <id>           stop a standing team
   maya doctor                    check llama.cpp, RAM tier, ports
   maya --version
 
@@ -113,7 +120,11 @@ export async function main(argv: string[]): Promise<void> {
       console.error("        (gateway + dashboard continue; loop features off)");
     }
     // Dashboard SPA (same-origin proxy to the gateway — no CORS surface).
-    const dashDist = path.resolve(fileURLToPath(import.meta.url), "../../../dashboard/dist");
+    const dashCandidates = [
+      path.resolve(fileURLToPath(import.meta.url), "../../web"), // packaged: dist/../web
+      path.resolve(fileURLToPath(import.meta.url), "../../../dashboard/dist"), // monorepo
+    ];
+    const dashDist = dashCandidates.find((c) => fs.existsSync(path.join(c, "index.html"))) ?? dashCandidates[0]!;
     let dashServer: ReturnType<typeof serveDashboard> | null = null;
     if (fs.existsSync(path.join(dashDist, "index.html"))) {
       dashServer = serveDashboard(dashDist, cfg.dashboard.port, cfg.gateway.port, orch?.port, busInfo);
@@ -190,6 +201,192 @@ export async function main(argv: string[]): Promise<void> {
         process.exitCode = 1;
       }
       return;
+    }
+  }
+
+  if (cmd === "team") {
+    const cfg2 = loadConfig();
+    const base = `http://127.0.0.1:${cfg2.orchestrator.port}/api`;
+    const flag = (name: string): string | undefined => {
+      const i = argv.indexOf(`--${name}`);
+      return i !== -1 ? argv[i + 1] : undefined;
+    };
+    try {
+      if (sub === "create") {
+        const name = argv.slice(2).find((a) => !a.startsWith("--"));
+        if (!name) return void console.error("usage: maya team create <name> [--worker <model>] [--cwd <dir>] [--tools Write,Edit] [--budget N]");
+        let worker = flag("worker");
+        if (!worker) {
+          const catalog = (await (await fetch(`http://127.0.0.1:${cfg2.gateway.port}/api/models`)).json()) as Array<{ id: string; toolCalling?: boolean; quants?: Array<{ bytes: number }> }>;
+          worker = catalog.filter((m) => m.toolCalling === true).sort((a, b) => (b.quants?.[0]?.bytes ?? 0) - (a.quants?.[0]?.bytes ?? 0))[0]?.id;
+        }
+        if (!worker) return void console.error("no measured tool-caller available — pull an Instruct model first");
+        const body = {
+          name,
+          members: [{ adapter: "claude-code", model: worker, cwd: flag("cwd") ?? process.cwd(), allowedTools: (flag("tools") ?? "Write,Edit,Read").split(","), maxTurns: Number(flag("max-turns") ?? 4) }],
+          ...(flag("budget") ? { tokenBudget: Number(flag("budget")) } : {}),
+        };
+        const res = await fetch(`${base}/teams`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        const team = (await res.json()) as { id?: string; error?: string; channelId?: string };
+        if (!res.ok || !team.id) throw new Error(team.error ?? `HTTP ${res.status}`);
+        console.log(`team ${team.id} (${name}) — worker ${worker}`);
+        console.log(`run loops on it:  maya loop "<goal>" --team ${team.id}`);
+        return;
+      }
+      if (sub === "list" || sub === undefined) {
+        const all = (await (await fetch(`${base}/teams`)).json()) as Array<{ id: string; name: string; state: string; tokensUsed?: number; tokenBudget?: number | null }>;
+        // Standing teams only — per-run teams close on completion and are history.
+        const teams = all.filter((t) => t.state === "active");
+        if (!teams.length) return void console.log("no live teams — maya team create <name>");
+        for (const t of teams) console.log(`${t.id}  🟢 ${t.name}  ${t.tokensUsed ?? 0}${t.tokenBudget ? `/${t.tokenBudget}` : ""} tok`);
+        return;
+      }
+      if (sub === "drain") {
+        const id = argv[2];
+        if (!id) return void console.error("usage: maya team drain <id>");
+        const res = await fetch(`${base}/teams/${encodeURIComponent(id)}/drain`, { method: "POST" });
+        console.log(res.ok ? "drained" : `drain failed: HTTP ${res.status}`);
+        return;
+      }
+      console.error("usage: maya team create|list|drain");
+    } catch (err) {
+      console.error(`team command failed: ${err instanceof Error ? err.message : err} — is \`maya serve\` running?`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (cmd === "runs") {
+    const cfg2 = loadConfig();
+    try {
+      const runs = (await (await fetch(`http://127.0.0.1:${cfg2.orchestrator.port}/api/runs`)).json()) as Array<{ runId: string; goal: string; state: string; report?: { outcome?: string; team?: { tokensUsed?: number } } }>;
+      if (!runs.length) return void console.log("no loop runs yet — try: maya loop \"Create hello.txt containing exactly: hi\"");
+      for (const r of runs.slice(0, 15)) {
+        const rep = r.report ?? {};
+        console.log(`${r.runId}  ${r.state === "running" ? "⏳ running" : rep.outcome === "success" ? "✅ success" : `◐ ${rep.outcome ?? r.state}`}  ${rep.team?.tokensUsed ?? "–"} tok  ${r.goal.slice(0, 60)}`);
+      }
+    } catch {
+      console.error(`orchestrator not reachable on :${cfg2.orchestrator.port} — is \`maya serve\` running?`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (cmd === "loop") {
+    const cfg2 = loadConfig();
+    const goal = argv.slice(1).find((a) => !a.startsWith("--"));
+    if (!goal) return void console.error("usage: maya loop \"<goal>\" [--worker local/…] [--lead local/…] [--cwd dir] [--tools Write,Edit] [--max-turns N]");
+    const flag = (name: string): string | undefined => {
+      const i = argv.indexOf(`--${name}`);
+      return i !== -1 ? argv[i + 1] : undefined;
+    };
+    // Default models: prefer a measured tool-caller for the worker.
+    let worker = flag("worker");
+    let lead = flag("lead");
+    try {
+      const catalog = (await (await fetch(`http://127.0.0.1:${cfg2.gateway.port}/api/models`)).json()) as Array<{ id: string; toolCalling?: boolean; quants?: Array<{ bytes: number }> }>;
+      const toolCapable = catalog.filter((m) => m.toolCalling === true).sort((a, b) => (b.quants?.[0]?.bytes ?? 0) - (a.quants?.[0]?.bytes ?? 0));
+      worker ??= toolCapable[0]?.id;
+      lead ??= catalog.find((m) => m.id.includes("coder"))?.id ?? worker;
+    } catch {
+      // gateway down — error below
+    }
+    if (!worker || !lead) {
+      console.error("no usable models — pull one (maya models pull hf:…) and ensure `maya serve` is running");
+      process.exitCode = 1;
+      return;
+    }
+    const cwd = flag("cwd") ?? process.cwd();
+    const body = {
+      goal,
+      leadModel: lead,
+      workerModel: worker,
+      cwd,
+      allowedTools: (flag("tools") ?? "Write,Edit,Read").split(","),
+      maxTurns: Number(flag("max-turns") ?? 4),
+      ...(flag("team") ? { teamId: flag("team") } : {}),
+    };
+    console.log(`goal    ${goal}`);
+    console.log(`lead    ${lead}`);
+    console.log(`worker  ${worker}  (measured tool-caller)`);
+    console.log(`cwd     ${cwd}`);
+    let runId: string;
+    try {
+      const res = await fetch(`http://127.0.0.1:${cfg2.orchestrator.port}/api/loop`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const out = (await res.json()) as { runId?: string; error?: string };
+      if (!res.ok || !out.runId) throw new Error(out.error ?? `HTTP ${res.status}`);
+      runId = out.runId;
+    } catch (err) {
+      console.error(`loop start failed: ${err instanceof Error ? err.message : err} — is \`maya serve\` running?`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`run     ${runId}\n`);
+    // Follow live via the orchestrator's SSE run-events (replay + real-time,
+    // closes on the terminal report). Falls back to polling if SSE fails.
+    try {
+      const res2 = await fetch(`http://127.0.0.1:${cfg2.orchestrator.port}/api/runs/${runId}/events`);
+      if (res2.ok && res2.body) {
+        const reader = res2.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        let done = false;
+        while (!done) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buf += dec.decode(chunk.value, { stream: true });
+          const lines = buf.split("\n\n");
+          buf = lines.pop() ?? "";
+          for (const block of lines) {
+            const data = block.split("\n").find((l) => l.startsWith("data: "))?.slice(6);
+            if (!data) continue;
+            const e = JSON.parse(data) as { kind: string; detail?: string; outcome?: string; tokensUsed?: number };
+            if (e.kind === "report") {
+              console.log(`\n${e.outcome === "success" ? "✅ success" : `◐ ${e.outcome}`}  ·  ${e.tokensUsed ?? "?"} tokens`);
+              if (e.outcome !== "success") process.exitCode = 2;
+              done = true;
+              break;
+            }
+            console.log(`  ${e.kind}${e.detail ? ` — ${e.detail.slice(0, 100)}` : ""}`);
+          }
+        }
+        if (done) return;
+      }
+    } catch {
+      // fall through to polling
+    }
+    let lastPrinted = 0;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const runs = (await (await fetch(`http://127.0.0.1:${cfg2.orchestrator.port}/api/runs`)).json()) as Array<{ runId: string; state: string; report?: { outcome?: string; team?: { id?: string; channelId?: string; tokensUsed?: number }; tasks?: Array<{ state: string }> } }>;
+      const run = runs.find((r) => r.runId === runId);
+      if (!run) continue;
+      const chan = run.report?.team?.channelId;
+      if (chan) {
+        try {
+          const hist = (await (
+            await fetch(`http://127.0.0.1:${cfg2.dashboard.port}/api/channels/${encodeURIComponent(chan)}/history?after=${lastPrinted}&limit=50`)
+          ).json()) as { messages?: Array<{ seq: number; from: string; body?: { text?: string; maya?: { kind?: string; taskId?: string } } }> };
+          for (const m of hist.messages ?? []) {
+            lastPrinted = Math.max(lastPrinted, m.seq);
+            const maya = m.body?.maya;
+            const line = maya?.kind ? `[${m.from}] ${maya.kind}${maya.taskId ? ` (${maya.taskId.slice(-6)})` : ""}` : `[${m.from}] ${(m.body?.text ?? "").slice(0, 100)}`;
+            console.log(`  ${line}`);
+          }
+        } catch {
+          // channel viewer optional — keep polling the run
+        }
+      }
+      if (run.state !== "running") {
+        const rep = run.report ?? {};
+        console.log(`\n${rep.outcome === "success" ? "✅ success" : `◐ ${rep.outcome ?? run.state}`}  ·  ${rep.team?.tokensUsed ?? "?"} tokens`);
+        if (rep.outcome !== "success") process.exitCode = 2;
+        return;
+      }
     }
   }
 
