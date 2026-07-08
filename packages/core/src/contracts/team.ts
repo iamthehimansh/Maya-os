@@ -33,6 +33,11 @@ export interface AgentSpec {
   role?: "lead" | "worker"; // default "worker"; exactly one "lead" per team
   systemPrompt?: string; // persona/instructions
   allowedTools?: string[]; // tool scope; ["*"] or omitted = ALL tools (full freedom)
+  // cldz auth profile to run the agent on the user's REAL Claude/Codex auth
+  // (subscription/OAuth or API key) instead of the local gateway — the capability
+  // lever for hard work. Name from `listCldzProfiles()`; adapter resolves it via
+  // `agentEnvForProfile()`. Omitted → local gateway model (the `model` field).
+  profile?: string;
 }
 
 /** A team = one lead + N workers, all persistent + parallel, sharing a channel. */

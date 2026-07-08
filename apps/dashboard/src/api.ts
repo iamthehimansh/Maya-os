@@ -40,6 +40,16 @@ export type RuntimeEvent =
 export const getModels = (): Promise<CatalogEntry[]> => fetch("/api/models").then((r) => r.json());
 export const getHealth = (): Promise<Health> => fetch("/api/runtime/health").then((r) => r.json());
 
+/** A cldz auth profile (safe view — no secrets) for the "run as" agent picker. */
+export interface CldzProfile {
+  name: string;
+  type: "apiKey" | "oauth" | "gateway" | "bedrock" | "vertex";
+  isDefault: boolean;
+  auth: "subscription" | "api-key" | "gateway" | "cloud-vendor";
+}
+export const getCldzProfiles = (): Promise<{ available: boolean; profiles: CldzProfile[] }> =>
+  fetch("/api/cldz-profiles").then((r) => r.json());
+
 export const loadModel = (name: string, force = false): Promise<Response> =>
   fetch(`/api/models/${encodeURIComponent(name)}/load`, {
     method: "POST",

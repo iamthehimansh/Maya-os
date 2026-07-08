@@ -1,6 +1,6 @@
 import type { ModelCatalogEntry, ModelId, ProviderConfig, RuntimeEvent } from "@maya-ai/core";
 import { QUANT_QUALITY, type RuntimeManager, availableRam, detectLlamaCpp, pullModel, scanModels, writeModelMeta } from "@maya-ai/model-runtime";
-import { type PlatformConfig, defaultConfig, loadConfig, saveConfig } from "@maya-ai/core";
+import { type PlatformConfig, defaultConfig, loadConfig, saveConfig, listCldzProfiles, hasCldz } from "@maya-ai/core";
 import { TunnelManager } from "./tunnel.js";
 import { listDir, readTextPreview } from "./fsbrowse.js";
 import { serve, type ServerType } from "@hono/node-server";
@@ -276,6 +276,12 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
       liveInstances: deps.manager.instances().length,
     });
   });
+
+  // ── cldz auth profiles (run agents on the user's real Claude/Codex auth) ──
+  // SAFE list only: names + types, never secrets. The web spawn form shows this
+  // as a "run as" picker; the adapter resolves the chosen name to auth env via
+  // core's agentEnvForProfile (secrets stay server-side, never on the wire).
+  app.get("/api/cldz-profiles", (c) => c.json({ available: hasCldz(), profiles: listCldzProfiles() }));
 
   // ── Filesystem browse (read-only file explorer + dir picker) ─────────────
   app.get("/api/fs", (c) => {
