@@ -33,6 +33,10 @@ export interface AgentSpec {
   role?: "lead" | "worker"; // default "worker"; exactly one "lead" per team
   systemPrompt?: string; // persona/instructions
   allowedTools?: string[]; // tool scope; ["*"] or omitted = ALL tools (full freedom)
+  /** Run this agent on a cldz saved auth profile (owner's real Claude — cloud
+   * Opus/Sonnet) instead of the local gateway. The profile NAME only (e.g.
+   * "god"); credentials are resolved server-side and never leave the machine. */
+  cldzProfile?: string;
 }
 
 /** A team = one lead + N workers, all persistent + parallel, sharing a channel. */

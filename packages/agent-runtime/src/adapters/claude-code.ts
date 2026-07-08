@@ -68,6 +68,21 @@ function cldzProfileEnv(profileName?: string): Record<string, string> {
   return env;
 }
 
+/** List cldz profile NAMES + types (never secrets) so the web can offer a
+ * profile picker for a spawned agent. Empty if there's no cldz config. */
+export function listCldzProfiles(): Array<{ name: string; type: string; default: boolean }> {
+  try {
+    const home = process.env['CLDZ_HOME']?.trim() || join(homedir(), '.cldz');
+    const cfg = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')) as {
+      defaultProfile?: string;
+      profiles?: Record<string, { type: string }>;
+    };
+    return Object.entries(cfg.profiles ?? {}).map(([name, p]) => ({ name, type: p.type, default: name === cfg.defaultProfile }));
+  } catch {
+    return [];
+  }
+}
+
 export interface ClaudeCodeAdapterOptions {
   /** Maya gateway base (Anthropic-compatible), e.g. "http://127.0.0.1:4100". */
   gatewayBaseUrl: string;

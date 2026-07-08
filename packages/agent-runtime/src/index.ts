@@ -11,7 +11,7 @@ import { ClaudeCodeAdapter, type ClaudeCodeAdapterOptions } from './adapters/cla
 import { CodexAdapter, type CodexAdapterOptions } from './adapters/codex.js';
 import { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencode.js';
 
-export { ClaudeCodeAdapter, type ClaudeCodeAdapterOptions } from './adapters/claude-code.js';
+export { ClaudeCodeAdapter, type ClaudeCodeAdapterOptions, listCldzProfiles } from './adapters/claude-code.js';
 export { CodexAdapter, type CodexAdapterOptions } from './adapters/codex.js';
 export { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencode.js';
 export { AgentBusBridge, type BusBridgeOptions, type AttachOptions } from './bus-bridge.js';

@@ -280,6 +280,7 @@ export class TeamManager {
         options: {
           ...(spec.allowedTools !== undefined ? { allowedTools: spec.allowedTools } : {}),
           ...(spec.systemPrompt !== undefined ? { appendSystemPrompt: spec.systemPrompt } : {}),
+          ...(spec.cldzProfile !== undefined ? { cldzProfile: spec.cldzProfile } : {}),
         },
       };
       const agentHandle = await this.opts.runtime.spawn(spawnSpec);
