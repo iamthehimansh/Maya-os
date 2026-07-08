@@ -120,3 +120,9 @@ button.act:disabled { opacity: 0.5; cursor: default; }
 .health-item .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .health-label { font-weight: 600; }
 .health-detail { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.reco { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+.reco-label { font-size: 12px; color: var(--text-secondary); }
+.reco-chip { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-0); color: var(--text-primary); cursor: pointer; }
+.reco-chip:hover { border-color: var(--accent); }
+.reco-chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+.reco-size { color: var(--text-muted); }
