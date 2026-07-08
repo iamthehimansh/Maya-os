@@ -103,3 +103,41 @@ assert(found.files[0].path.includes("00001-of-00002"), "representative = part-1 
 assert.equal(found.files[0].bytes, 1500, "representative carries the SUMMED size");
 fs2.rmSync(tmp, { recursive: true, force: true });
 console.log("SPLIT GGUF PASS ✅");
+
+// maya tune search space — pure (quant × context × draft) enumeration, RAM-fit.
+import { buildSearchSpace } from "../dist/tune.js";
+const tuneFiles = [
+  { quant: "Q8_0", path: "/x/q8.gguf", bytes: 8 * GIB },
+  { quant: "Q4_K_M", path: "/x/q4.gguf", bytes: 4 * GIB },
+];
+
+// Plenty of RAM: full grid = 2 quants × 3 contexts (32k,16k,8k), no drafts.
+let space = buildSearchSpace(tuneFiles, { minCtx: 8192, targetCtx: 32768, budgetBytes: 40 * GIB });
+assert.equal(space.length, 6, "2 quants × 3 contexts");
+assert(space.every((c) => c.contextLength >= 8192), "never below minCtx");
+assert(space.every((c) => c.draft === undefined), "no drafts when none offered");
+// Bench order: best quality × largest context first.
+assert.equal(space[0].quant, "Q8_0");
+assert.equal(space[0].contextLength, 32768);
+
+// RAM-fit filter: a tight budget drops the big-quant / big-context corners.
+space = buildSearchSpace(tuneFiles, { minCtx: 8192, targetCtx: 32768, budgetBytes: 6 * GIB });
+assert(space.length > 0 && space.every((c) => c.estimateBytes <= 6 * GIB), "every candidate fits the budget");
+assert(space.every((c) => c.quant === "Q4_K_M"), "Q8 doesn't fit 6GB → only Q4 survives");
+
+// minCtx guard: a budget too small even for minCtx yields an empty space.
+assert.equal(buildSearchSpace(tuneFiles, { minCtx: 8192, targetCtx: 8192, budgetBytes: 1 * GIB }).length, 0, "nothing fits → empty");
+
+// quants filter restricts the axis.
+space = buildSearchSpace(tuneFiles, { minCtx: 8192, targetCtx: 8192, budgetBytes: 40 * GIB, quants: ["Q4_K_M"] });
+assert(space.every((c) => c.quant === "Q4_K_M"), "quants filter honored");
+
+// Drafts add a parallel candidate set, and their reserve counts against budget.
+const drafts = [{ name: "tiny", path: "/x/tiny.gguf", bytes: 0.4 * GIB }];
+space = buildSearchSpace(tuneFiles, { minCtx: 8192, targetCtx: 8192, budgetBytes: 40 * GIB, drafts });
+assert(space.some((c) => c.draft === "tiny"), "draft candidates present");
+assert(space.some((c) => c.draft === undefined), "no-draft baseline still present");
+const withDraft = space.find((c) => c.quant === "Q4_K_M" && c.draft === "tiny");
+const noDraft = space.find((c) => c.quant === "Q4_K_M" && c.draft === undefined);
+assert(withDraft.estimateBytes > noDraft.estimateBytes, "draft reserve raises the estimate");
+console.log("TUNE SEARCH SPACE PASS ✅");
