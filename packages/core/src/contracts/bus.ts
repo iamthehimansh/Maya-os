@@ -45,6 +45,10 @@ export interface BusMessageFrame {
     /** Loop protocol payload when present — see loop.ts (LoopBody). */
     maya?: unknown;
     attachments?: Array<{ id: string; filename: string }>;
+    /** True when the orchestrator relayed this on behalf of the human owner (the
+     * dashboard composer posts through the team manager, which would otherwise
+     * look like an agent) — lets the UI render it as the user, not "manager". */
+    human?: boolean;
   };
 }
 

@@ -231,7 +231,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
       const mentionsSomeone = /@[a-z0-9][a-z0-9-]/i.test(text);
       const wake = mentionsSomeone ? undefined : (agents.find((a) => a.role === "lead") ?? agents[0])?.handle;
       sentRef.current.add(text); // so the manager-relayed echo renders as "You"
-      void sendTeamMessage(openTeam.id, text, wake)
+      void sendTeamMessage(openTeam.id, text, wake, true)
         .catch((e) => setError(String(e instanceof Error ? e.message : e)))
         .finally(() => setSending(false));
       return; // the 2s channel poll reflects it + any replies
@@ -509,7 +509,7 @@ const SYSTEM_LINE = /^\s*[🧭➕➖🛑]/u;
 function channelToMsg(cm: ChannelMessage, sent: Set<string>): Msg {
   const text = cm.body?.text ?? "(structured frame)";
   const system = SYSTEM_LINE.test(text);
-  const human = !cm.fromTokenId || sent.has(text.trim());
+  const human = !cm.fromTokenId || cm.body?.human === true || sent.has(text.trim());
   return {
     id: cm.seq,
     who: system ? "system" : human ? "you" : "agent",

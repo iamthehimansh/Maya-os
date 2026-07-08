@@ -137,10 +137,10 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
   app.post('/api/teams/:id/messages', async (c) => {
     const id = c.req.param('id');
     if (!teams.isLive(id)) return c.json({ error: `team ${id} is not live` }, 400);
-    const body = (await c.req.json().catch(() => null)) as { text?: string; to?: string } | null;
+    const body = (await c.req.json().catch(() => null)) as { text?: string; to?: string; human?: boolean } | null;
     if (!body?.text) return c.json({ error: 'text required' }, 400);
     try {
-      teams.postMessage(id, body.text, body.to);
+      teams.postMessage(id, body.text, body.to, body.human === true);
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: String(err instanceof Error ? err.message : err) }, 400);
