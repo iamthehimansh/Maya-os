@@ -15,6 +15,14 @@ import {
 const GIB = 1024 ** 3;
 const gb = (n: number): string => `${(n / GIB).toFixed(1)} GB`;
 
+/** Curated, vetted GGUFs. `needBytes` ≈ Q4 weights + headroom; `tools` = measured native tool-calling. */
+const RECOMMENDED: Array<{ name: string; source: string; needBytes: number; note: string; tools: boolean }> = [
+  { name: "qwen2.5-0.5b-instruct", source: "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf", needBytes: 1 * GIB, note: "tiny, fast", tools: true },
+  { name: "qwen2.5-coder-3b", source: "hf:Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf", needBytes: 2.5 * GIB, note: "coder, lead", tools: false },
+  { name: "qwen2.5-3b-instruct", source: "hf:Qwen/Qwen2.5-3B-Instruct-GGUF/qwen2.5-3b-instruct-q4_k_m.gguf", needBytes: 2.5 * GIB, note: "snappy worker", tools: true },
+  { name: "qwen2.5-7b-instruct", source: "hf:Qwen/Qwen2.5-7B-Instruct-GGUF/qwen2.5-7b-instruct-q4_k_m.gguf", needBytes: 5.5 * GIB, note: "quality worker", tools: true },
+];
+
 /** Instance state → status role + label. Label always shown — color never carries meaning alone. */
 const STATE_STATUS: Record<string, { color: string; label: string }> = {
   ready: { color: "var(--status-good)", label: "running" },
@@ -144,6 +152,23 @@ export function ModelsView(): React.JSX.Element {
             Pull
           </button>
         </form>
+        <div className="reco">
+          <span className="reco-label">Recommended for your Mac:</span>
+          {RECOMMENDED.filter((r) => !models?.some((m) => m.id === `local/${r.name}`)).map((r) => {
+            const fits = health ? health.ramFreeBytes > r.needBytes : true;
+            return (
+              <button
+                key={r.name}
+                className="reco-chip"
+                title={`${r.note} · ~${gb(r.needBytes)} · ${r.tools ? "tool-capable worker" : "lead-only (no native tools)"}${fits ? "" : " · tight on current free RAM"}`}
+                onClick={() => void pullModel(r.source)}
+              >
+                <span className="dot" style={{ background: fits ? "var(--status-good)" : "var(--status-warning)" }} />
+                {r.name} <span className="reco-size">{gb(r.needBytes)}</span>
+              </button>
+            );
+          })}
+        </div>
         {pullPct && (
           <>
             <div className="progress" role="progressbar" aria-valuenow={pullPct.pct} aria-valuemin={0} aria-valuemax={100}>
