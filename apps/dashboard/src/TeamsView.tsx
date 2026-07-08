@@ -1,84 +1,145 @@
 import { useEffect, useState } from "react";
-import { getTeams, getTeamTasks, type Task, type Team } from "./orchestratorApi";
+import { getModels, type CatalogEntry } from "./api";
+import { createTeam, drainTeam, getTeams, startLoop, type Team } from "./orchestratorApi";
 
-/** Teams tab (lane 01): team list with live task boards. Poll-based (2s). */
+/**
+ * Teams: create a standing fleet, run loops on it, all from the web. Live
+ * teams up front; the pile of closed per-run teams is tucked behind a
+ * disclosure so the view stays clean.
+ */
 export function TeamsView(): React.JSX.Element {
-  const [teams, setTeams] = useState<Team[] | null>(null);
-  const [tasksByTeam, setTasksByTeam] = useState<Record<string, Task[]>>({});
+  const [models, setModels] = useState<CatalogEntry[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+
+  // create-team form
+  const [name, setName] = useState("");
+  const [worker, setWorker] = useState("");
+  const [cwd, setCwd] = useState("~/maya-demo");
 
   useEffect(() => {
-    let alive = true;
-    const tick = async (): Promise<void> => {
-      try {
-        const t = await getTeams();
-        if (!alive) return;
-        setTeams(t);
-        const boards = await Promise.all(t.slice(0, 10).map(async (team) => [team.id, await getTeamTasks(team.id)] as const));
-        if (!alive) return;
-        setTasksByTeam(Object.fromEntries(boards));
-        setError(null);
-      } catch {
-        if (alive) setError("Can't reach the orchestrator — is `maya serve` running with the agent plane?");
-      }
-    };
+    void getModels().then((m) => {
+      setModels(m);
+      const w = m.find((x) => x.capabilities?.toolCalling) ?? m.find((x) => x.kind === "local-gguf");
+      setWorker((prev) => prev || w?.id || "");
+    });
+    const tick = (): void => void getTeams().then(setTeams).catch(() => setError("Can't reach the orchestrator — is `maya serve` running?"));
     void tick();
-    const timer = setInterval(tick, 2000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
+    const t = setInterval(tick, 3000);
+    return () => clearInterval(t);
   }, []);
 
-  const STATES: Task["state"][] = ["queued", "assigned", "accepted", "working", "blocked", "done", "failed"];
+  const live = teams.filter((t) => t.state !== "closed");
+  const closed = teams.filter((t) => t.state === "closed");
+
+  async function create(): Promise<void> {
+    if (!name.trim() || !worker || !cwd.trim()) return;
+    setError(null);
+    try {
+      await createTeam({ name: name.trim(), workerModel: worker, cwd: cwd.trim(), allowedTools: ["Write", "Edit"] });
+      setName("");
+      void getTeams().then(setTeams);
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    }
+  }
+
+  async function runOn(team: Team): Promise<void> {
+    const goal = window.prompt(`Goal for "${team.name}":`, "Create a file named NOTE.md containing exactly: hello");
+    if (!goal) return;
+    const leadModel = models.find((m) => m.capabilities?.toolCalling)?.id ?? models[0]?.id ?? worker;
+    try {
+      await startLoop({ goal, cwd, leadModel, teamId: team.id });
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    }
+  }
 
   return (
-    <section className="models" aria-label="Teams">
+    <section className="run" aria-label="Teams">
       {error && (
         <div className="error-banner" role="alert">
           {error}
         </div>
       )}
-      {teams === null ? (
-        <p className="empty">loading…</p>
-      ) : teams.length === 0 ? (
-        <div className="panel">
-          <p className="empty">No teams yet — a loop run creates one, or use the orchestrator API.</p>
+
+      <div className="panel run-form">
+        <h2>Create a standing team</h2>
+        <div className="field-row">
+          <label className="field grow">
+            <span>Name</span>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="dev-fleet" />
+          </label>
+          <label className="field grow">
+            <span>Worker model</span>
+            <select value={worker} onChange={(e) => setWorker(e.target.value)}>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.id}
+                  {m.capabilities?.toolCalling ? " ✓tools" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field grow">
+            <span>Directory</span>
+            <input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="~/any/dir" />
+          </label>
         </div>
-      ) : (
-        teams.map((team) => {
-          const tasks = tasksByTeam[team.id] ?? [];
-          return (
-            <div className="panel" key={team.id}>
-              <h2>
-                {team.name} <span className={`chip state-${team.state}`}>{team.state}</span>
-              </h2>
-              <p className="empty">
-                topology {team.topology} · {team.inFlight} in flight · tokens {team.tokensUsed.toLocaleString()}
-                {team.tokenBudget !== null ? ` / ${team.tokenBudget.toLocaleString()}` : ""} · channel <code>{team.channelId}</code>
-              </p>
-              <div className="board">
-                {STATES.map((state) => {
-                  const col = tasks.filter((t) => t.state === state);
-                  if (col.length === 0) return null;
-                  return (
-                    <div className="board-col" key={state}>
-                      <h3>
-                        {state} ({col.length})
-                      </h3>
-                      {col.map((t) => (
-                        <div className="board-card" key={t.id} title={t.result ?? undefined}>
-                          <code>{t.id.slice(-6)}</code> {t.spec.slice(0, 70)}
-                          {t.attempts > 0 && <span className="chip">retry ×{t.attempts}</span>}
-                        </div>
-                      ))}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })
+        <button className="act primary" onClick={() => void create()} disabled={!name.trim() || !worker}>
+          + Create team
+        </button>
+      </div>
+
+      <div className="panel">
+        <h2>Live teams {live.length > 0 && <span className="chip">{live.length}</span>}</h2>
+        {live.length === 0 ? (
+          <p className="empty">No live teams — create one above, then run many loops on it.</p>
+        ) : (
+          <table>
+            <tbody>
+              {live.map((t) => (
+                <tr key={t.id}>
+                  <td>
+                    <strong>{t.name}</strong> <span className={`chip state-${t.state}`}>{t.state}</span>
+                  </td>
+                  <td>{t.tokensUsed.toLocaleString()} tok</td>
+                  <td>{t.inFlight > 0 ? `${t.inFlight} in flight` : "idle"}</td>
+                  <td className="row-actions">
+                    <button className="act" onClick={() => void runOn(t)}>
+                      ▶ Run
+                    </button>
+                    <button className="act" onClick={() => void drainTeam(t.id).then(() => getTeams().then(setTeams))}>
+                      Drain
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {closed.length > 0 && (
+        <div className="panel">
+          <button className="disclosure" onClick={() => setShowHistory((v) => !v)}>
+            {showHistory ? "▾" : "▸"} History ({closed.length} closed)
+          </button>
+          {showHistory && (
+            <table>
+              <tbody>
+                {closed.slice(0, 30).map((t) => (
+                  <tr key={t.id}>
+                    <td>{t.name}</td>
+                    <td>{t.tokensUsed.toLocaleString()} tok</td>
+                    <td className="muted">closed</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       )}
     </section>
   );

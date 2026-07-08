@@ -104,6 +104,41 @@ describe('orchestrator service', () => {
     expect(events.some((e) => e.kind === 'report')).toBe(true);
   }, 20_000);
 
+  it('replays a COMPLETED run over SSE without erroring (TDZ regression)', async () => {
+    // Connecting to a run that has ALREADY finished replays its buffered
+    // timeline, which includes the terminal `report`. That path used to throw
+    // (the `subs` set was referenced during replay but declared after the
+    // replay loop — a temporal dead zone), 500-ing the stream. The live test
+    // above only exercises the subscriber path, so it never caught this.
+    const base = await setup();
+    const res = await fetch(`${base}/api/loop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ goal: 'x', leadModel: 'local/x', workerModel: 'local/x', cwd: '/tmp' }),
+    });
+    const { runId } = (await res.json()) as { runId: string };
+
+    // Wait until the run is fully 'done' so the SSE connect below goes down the
+    // replay path, not the live-subscriber path.
+    let done = false;
+    for (let i = 0; i < 200 && !done; i++) {
+      const list = (await (await fetch(`${base}/api/runs`)).json()) as Array<{ runId: string; state: string }>;
+      done = list.some((r) => r.runId === runId && r.state === 'done');
+      if (!done) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(done).toBe(true);
+
+    const sse = await fetch(`${base}/api/runs/${runId}/events`);
+    expect(sse.status).toBe(200); // was 500 before the fix
+    expect(sse.headers.get('content-type')).toContain('text/event-stream');
+    const text = await sse.text();
+    const events = text
+      .split('\n\n')
+      .filter((b) => b.startsWith('data: '))
+      .map((b) => JSON.parse(b.slice(6)) as { kind: string });
+    expect(events.some((e) => e.kind === 'report')).toBe(true); // replayed, not dropped
+  }, 20_000);
+
   it('returns 404 SSE for an unknown run', async () => {
     const base = await setup();
     const res = await fetch(`${base}/api/runs/nope/events`);

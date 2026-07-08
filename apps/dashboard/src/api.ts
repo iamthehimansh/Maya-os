@@ -19,6 +19,8 @@ export interface CatalogEntry {
   contextLength?: number;
   quants?: Array<{ quant: string; quality: number; bytes: number }>;
   instance?: Instance;
+  /** Measured on first load — only tool-callers are valid loop WORKERS. */
+  capabilities?: { toolCalling?: boolean };
 }
 
 export interface Health {
@@ -67,3 +69,10 @@ export function onRuntimeEvents(handler: (ev: RuntimeEvent) => void): () => void
   };
   return () => es.close();
 }
+
+export const setModelProfile = (name: string, patch: { contextLength?: number; draftModel?: string | false }): Promise<Response> =>
+  fetch(`/api/models/${encodeURIComponent(name)}/profile`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });

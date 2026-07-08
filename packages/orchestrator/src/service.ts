@@ -142,10 +142,20 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         const enc = new TextEncoder();
+        // Register the subscriber set BEFORE replaying: replaying a completed
+        // run calls send() on its terminal `report`, which unsubscribes from
+        // `subs`. If `subs` were declared after the replay loop it'd be in the
+        // temporal dead zone during replay, throwing and 500-ing the whole
+        // stream — that was the bug where streaming a finished run errored.
+        const subs = runSubs.get(record.runId) ?? new Set<(e: LoopEvent) => void>();
+        runSubs.set(record.runId, subs);
+        let closed = false;
         const send = (e: LoopEvent): void => {
+          if (closed) return; // never enqueue past a terminal report
           controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
           if (e.kind === 'report') {
             subs.delete(listener);
+            closed = true;
             try {
               controller.close();
             } catch {
@@ -155,6 +165,7 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
         };
         const listener = (e: LoopEvent): void => send(e);
         for (const e of record.events) send(e); // replay timeline
+        if (closed) return; // replay already reached a terminal report
         if (record.state === 'done') {
           try {
             controller.close();
@@ -163,8 +174,6 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
           }
           return;
         }
-        const subs = runSubs.get(record.runId) ?? new Set();
-        runSubs.set(record.runId, subs);
         subs.add(listener);
       },
     });
