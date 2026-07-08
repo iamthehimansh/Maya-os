@@ -283,14 +283,14 @@ export class TeamManager {
         },
       };
       const agentHandle = await this.opts.runtime.spawn(spawnSpec);
-      const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, {
-        channelId: lt.team.channelId,
-        label: handle,
-        ignoreFrom: [lt.managerHandle], // don't wake on the manager's own "➕ @x joined" notice
-      });
+      const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, { channelId: lt.team.channelId, label: handle });
       const entry: PersistentAgent = { spec, agentId: agentHandle.id, busHandle, adapter, state: 'live' };
       lt.persistent.set(handle, entry);
-      lt.manager.sendMessage({ body: { text: `➕ **${handle}** joined the team (${spec.type} · ${spec.model})` } });
+      // Announce WITHOUT the leading @ so the join notice doesn't @mention (and
+      // thus wake) the agent that just joined — it'd greet its own arrival.
+      // Real pokes still @mention normally. (himansh's pokes come via the manager
+      // relay too, so skipping by sender would wrongly mute them — hence this.)
+      lt.manager.sendMessage({ body: { text: `➕ **${handle.replace(/^@/, '')}** joined the team (${spec.type} · ${spec.model})` } });
       return this.statusOf(handle, entry);
     } catch (err) {
       lt.persistent.delete(handle); // release the reserved handle on failure
