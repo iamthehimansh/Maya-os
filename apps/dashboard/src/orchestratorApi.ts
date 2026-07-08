@@ -56,6 +56,11 @@ export interface LoopEvent {
   outcome?: string;
   summary?: string;
   tokensUsed?: number;
+  /** question events only: id to answer with + the tap-able options */
+  qid?: string;
+  options?: Array<{ id: string; label: string }>;
+  /** started event only: the team channel this run speaks on */
+  channelId?: string;
 }
 
 export interface StartLoopInput {
@@ -109,6 +114,16 @@ export async function createTeam(input: CreateTeamInput): Promise<Team> {
 
 export const drainTeam = (teamId: string): Promise<Response> =>
   fetch(`/api/teams/${encodeURIComponent(teamId)}/drain`, { method: "POST" });
+
+/** Answer a loop that's waiting on a proactive question (routes over the bus). */
+export async function answerRun(runId: string, answer: { qid?: string; optionId?: string; text?: string }): Promise<void> {
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/answer`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(answer),
+  });
+  if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
+}
 
 /** Subscribe to a run's live milestones over SSE. Returns an unsubscribe. */
 export function streamRun(runId: string, onEvent: (e: LoopEvent) => void): () => void {

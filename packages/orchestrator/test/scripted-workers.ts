@@ -9,6 +9,8 @@ import { EventLog } from '@maya-ai/agent-runtime';
  *  - "HANG" → emits running then NEVER terminates (tests the watchdog);
  *    only kill() ends it
  *  - "STDERR:<msg>" → emits a stderr log line before the outcome
+ *  - "TOOL" → emits a "[tool] Write" stdout line (a real tool call) before the
+ *    result, so tests can tell a genuine actor from a 0-tool-call "parrot"
  */
 export class ScriptedWorkers implements AgentAdapter {
   readonly id = 'scripted';
@@ -40,6 +42,7 @@ export class ScriptedWorkers implements AgentAdapter {
     const tokens = /TOKENS:(\d+)/.exec(prompt);
     const stderr = /STDERR:([^\s]+)/.exec(prompt);
     const hang = prompt.includes('HANG');
+    const usesTool = prompt.includes('TOOL');
 
     setTimeout(() => {
       log.push({ kind: 'state', state: 'running', at: now() });
@@ -54,6 +57,7 @@ export class ScriptedWorkers implements AgentAdapter {
         log.push({ kind: 'error', message: 'scripted failure', at: now() });
         log.push({ kind: 'state', state: 'failed', at: now() });
       } else {
+        if (usesTool) log.push({ kind: 'log', stream: 'stdout', line: '[tool] Write', at: now() });
         log.push({ kind: 'log', stream: 'stdout', line: `result of: ${prompt.slice(0, 40)}`, at: now() });
         entry.handle = { ...entry.handle, state: 'exited', exitCode: 0 };
         log.push({ kind: 'state', state: 'exited', at: now() });
