@@ -147,7 +147,13 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // guardrails against tool-hallucination loops.
     const opts = spec.options ?? {};
     const allowedTools = opts['allowedTools'];
-    if (Array.isArray(allowedTools) && allowedTools.length > 0) {
+    // ["*"] means ALL tools → OMIT the flag. Claude Code IGNORES a literal "*"
+    // rule ("Wildcard tool name * is not supported"), which would leave the agent
+    // with NO usable tools (alive + tasked but unable to Write/Bash — the silent
+    // failure that blocked every all-tools agent). With --dangerously-skip-permissions,
+    // omitting --allowed-tools = all tools available. Only pass it for a real
+    // restricted list (worker scoping / tool-hallucination guardrails).
+    if (Array.isArray(allowedTools) && allowedTools.length > 0 && !allowedTools.includes('*')) {
       args.push('--allowed-tools', allowedTools.join(','));
       args.push('--tools', allowedTools.join(','));
     }
