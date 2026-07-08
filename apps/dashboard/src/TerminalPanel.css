@@ -1,0 +1,77 @@
+/* Live agent terminal — modal overlay opened from the agent list. */
+.term-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.term-modal {
+  width: min(980px, 96vw);
+  height: min(640px, 88vh);
+  background: #0b0e14;
+  border: 1px solid #1e2636;
+  border-radius: 10px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #11151f;
+  border-bottom: 1px solid #1e2636;
+  color: #c7d0e0;
+  font-size: 13px;
+}
+
+.term-title { font-weight: 600; }
+.term-sub { color: #6b7688; font-weight: 400; margin-left: 4px; }
+
+.term-status {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.term-status-connecting { background: #2a2f3a; color: #9aa4b5; }
+.term-status-live { background: #113a24; color: #4ade80; }
+.term-status-closed { background: #2a2f3a; color: #9aa4b5; }
+.term-status-error { background: #3a1414; color: #f87171; }
+
+.term-close {
+  background: none;
+  border: none;
+  color: #8b95a7;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.term-close:hover { background: #1e2636; color: #e5e9f0; }
+
+.term-host {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 8px;
+  background: #0b0e14;
+}
+.term-host .xterm { height: 100%; }
+
+.term-note {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #8b95a7;
+  border-top: 1px solid #1e2636;
+  background: #11151f;
+}
