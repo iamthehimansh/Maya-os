@@ -82,3 +82,16 @@
   border-top: 1px solid #1e2636;
   background: #11151f;
 }
+
+/* 🖥️ button in the agent rail (ChatView) that opens this panel. */
+.crail-term {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  margin-left: 4px;
+  opacity: 0.6;
+  line-height: 1;
+}
+.crail-term:hover { opacity: 1; }

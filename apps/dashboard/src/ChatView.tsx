@@ -3,6 +3,7 @@ import { getModels, getCldzProfiles, type CatalogEntry, type CldzProfile } from 
 import { renderMarkdown } from "./md";
 import { AgentSetupForm, newAgentDraft, toSpawnInput, draftReady, type AgentDraft } from "./AgentSetupForm";
 import { TeamBuilder } from "./TeamBuilder";
+import { TerminalPanel } from "./TerminalPanel";
 import {
   answerRun,
   createTeam,
@@ -64,6 +65,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   const [worker, setWorker] = useState("");
   const [cwd] = useState("~/maya-demo"); // front-door quick-loop cwd (team-builder sets its own)
   const [showSetup, setShowSetup] = useState(false);
+  const [termAgent, setTermAgent] = useState<string | null>(null); // agent whose live terminal is open
   const [draft, setDraft] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
@@ -463,6 +465,13 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
                   <strong>{a.handle}</strong>
                   <span className="chip">{a.type}</span>
                   <span className={`chip state-${a.state}`}>{a.state}</span>
+                  <button
+                    className="crail-term"
+                    onClick={() => setTermAgent(a.handle)}
+                    title="Open this agent's live terminal"
+                  >
+                    🖥️
+                  </button>
                 </div>
                 <code className="crail-model">{a.model}</code>
               </div>
@@ -481,6 +490,9 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
             </div>
           </div>
         </aside>
+      )}
+      {termAgent && openTeam && (
+        <TerminalPanel teamId={openTeam.id} handle={termAgent} onClose={() => setTermAgent(null)} />
       )}
     </section>
   );
