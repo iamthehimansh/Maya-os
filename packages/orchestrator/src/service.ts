@@ -203,7 +203,10 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
       const res = await fetch(`${httpBase}/api/tokens`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${opts.bus.adminToken}` },
-        body: JSON.stringify({ label: 'owner-answer', role: 'admin', caps: ['send'], scopes: [record.channelId] }),
+        // MUST include 'receive': the bus requires it to JOIN a channel (server.ts),
+        // and we can't post the answer without first joining. 'send' alone → join
+        // is rejected → the client never emits 'joined' → this used to time out.
+        body: JSON.stringify({ label: 'owner-answer', role: 'admin', caps: ['receive', 'send'], scopes: [record.channelId] }),
       });
       if (!res.ok) return c.json({ error: `token mint failed: HTTP ${res.status}` }, 502);
       const { token } = (await res.json()) as { token: string };
