@@ -235,6 +235,15 @@ export class LoopLead {
           check = await this.opts.goalCheck(goal);
           emit({ kind: 'goal_check', met: check.met, missing: check.missing, at: new Date().toISOString() });
         }
+        // Tail-race guard: a fix worker can finish writing JUST after the last
+        // in-loop check, leaving a correct artifact reported as partial. One
+        // final settle + re-check catches it (observed live: B.txt correct on
+        // disk, run reported partial). Cheap — settle returns fast when idle.
+        if (!check.met) {
+          await this.opts.teams.settle(team.id).catch(() => {});
+          check = await this.opts.goalCheck(goal);
+          emit({ kind: 'goal_check', met: check.met, missing: check.missing, at: new Date().toISOString() });
+        }
         goalMissing = check.met ? [] : check.missing;
       }
 
