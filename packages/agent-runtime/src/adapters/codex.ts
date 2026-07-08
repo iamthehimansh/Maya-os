@@ -99,12 +99,18 @@ export class CodexAdapter implements AgentAdapter {
     if (!detect.installed) throw new Error(`codex CLI not found — ${detect.installHint ?? ''}`);
 
     const id = 'ag_' + randomUUID().replaceAll('-', '').slice(0, 12);
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      ...spec.env,
+    // Deterministic env: strip the launcher's Claude Code / agent session
+    // identity so the worker never behaves as a nested child (see the
+    // claude-code adapter for the observed failure this prevents).
+    const env: NodeJS.ProcessEnv = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (/^CLAUDE_CODE_/.test(k) || k === 'CLAUDECODE' || k === 'AI_AGENT' || k === 'CLAUDE_EFFORT') continue;
+      env[k] = v;
+    }
+    Object.assign(env, spec.env, {
       // Dummy key satisfies the provider's env_key against the localhost gateway.
       MAYA_API_KEY: spec.env?.['MAYA_API_KEY'] ?? 'maya-gateway',
-    };
+    });
 
     const child = spawn(this.bin(), this.buildArgs(spec), {
       cwd: spec.cwd,

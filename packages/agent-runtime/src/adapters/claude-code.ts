@@ -104,14 +104,23 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const id = 'ag_' + randomUUID().replaceAll('-', '').slice(0, 12);
     const interactive = spec.prompt === undefined;
 
-    const env: Record<string, string | undefined> = {
-      ...process.env,
-      ...spec.env,
+    // A worker must run in a DETERMINISTIC env, independent of who launched
+    // the orchestrator. When Maya runs inside a Claude Code session (or its
+    // serve is nohup'd from one), process.env carries CLAUDE_CODE_* /
+    // CLAUDECODE / AI_AGENT session-identity vars — inheriting them makes the
+    // spawned worker behave as a NESTED child (observed: it silently declined
+    // to write the file). Strip that identity so behavior is reproducible.
+    const env: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (/^CLAUDE_CODE_/.test(k) || k === 'CLAUDECODE' || k === 'AI_AGENT' || k === 'CLAUDE_EFFORT') continue;
+      env[k] = v;
+    }
+    Object.assign(env, spec.env, {
       ANTHROPIC_BASE_URL: this.opts.gatewayBaseUrl,
       // Any non-empty value satisfies the CLI; the gateway ignores it locally.
       ANTHROPIC_API_KEY: spec.env?.['ANTHROPIC_API_KEY'] ?? 'maya-gateway',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    };
+    });
     // spec.bus wiring note: the bus token must already be present in env
     // under spec.bus.tokenEnv (minted by the orchestrator) — this adapter
     // never mints or logs credentials. Auto-join lands with the loop slice.
