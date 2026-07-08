@@ -22,6 +22,10 @@ Usage:
   maya loop "<goal>"             run an AI team on a goal (lead plans, workers execute, gates verify)
                                  [--worker <model>] [--lead <model>] [--cwd <dir>] [--tools Write,Edit] [--max-turns N]
   maya runs                      recent loop runs with outcomes + tokens
+  maya team create <name>        standing team (run many loops on one fleet)
+                                 [--worker <model>] [--cwd <dir>] [--tools T,T] [--budget N]
+  maya team list                 live teams with budgets + token burn
+  maya team drain <id>           stop a standing team
   maya doctor                    check llama.cpp, RAM tier, ports
   maya --version
 
@@ -200,6 +204,58 @@ export async function main(argv: string[]): Promise<void> {
     }
   }
 
+  if (cmd === "team") {
+    const cfg2 = loadConfig();
+    const base = `http://127.0.0.1:${cfg2.orchestrator.port}/api`;
+    const flag = (name: string): string | undefined => {
+      const i = argv.indexOf(`--${name}`);
+      return i !== -1 ? argv[i + 1] : undefined;
+    };
+    try {
+      if (sub === "create") {
+        const name = argv.slice(2).find((a) => !a.startsWith("--"));
+        if (!name) return void console.error("usage: maya team create <name> [--worker <model>] [--cwd <dir>] [--tools Write,Edit] [--budget N]");
+        let worker = flag("worker");
+        if (!worker) {
+          const catalog = (await (await fetch(`http://127.0.0.1:${cfg2.gateway.port}/api/models`)).json()) as Array<{ id: string; toolCalling?: boolean; quants?: Array<{ bytes: number }> }>;
+          worker = catalog.filter((m) => m.toolCalling === true).sort((a, b) => (b.quants?.[0]?.bytes ?? 0) - (a.quants?.[0]?.bytes ?? 0))[0]?.id;
+        }
+        if (!worker) return void console.error("no measured tool-caller available — pull an Instruct model first");
+        const body = {
+          name,
+          members: [{ adapter: "claude-code", model: worker, cwd: flag("cwd") ?? process.cwd(), allowedTools: (flag("tools") ?? "Write,Edit,Read").split(","), maxTurns: Number(flag("max-turns") ?? 4) }],
+          ...(flag("budget") ? { tokenBudget: Number(flag("budget")) } : {}),
+        };
+        const res = await fetch(`${base}/teams`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        const team = (await res.json()) as { id?: string; error?: string; channelId?: string };
+        if (!res.ok || !team.id) throw new Error(team.error ?? `HTTP ${res.status}`);
+        console.log(`team ${team.id} (${name}) — worker ${worker}`);
+        console.log(`run loops on it:  maya loop "<goal>" --team ${team.id}`);
+        return;
+      }
+      if (sub === "list" || sub === undefined) {
+        const all = (await (await fetch(`${base}/teams`)).json()) as Array<{ id: string; name: string; state: string; tokensUsed?: number; tokenBudget?: number | null }>;
+        // Standing teams only — per-run teams close on completion and are history.
+        const teams = all.filter((t) => t.state === "active");
+        if (!teams.length) return void console.log("no live teams — maya team create <name>");
+        for (const t of teams) console.log(`${t.id}  🟢 ${t.name}  ${t.tokensUsed ?? 0}${t.tokenBudget ? `/${t.tokenBudget}` : ""} tok`);
+        return;
+      }
+      if (sub === "drain") {
+        const id = argv[2];
+        if (!id) return void console.error("usage: maya team drain <id>");
+        const res = await fetch(`${base}/teams/${encodeURIComponent(id)}/drain`, { method: "POST" });
+        console.log(res.ok ? "drained" : `drain failed: HTTP ${res.status}`);
+        return;
+      }
+      console.error("usage: maya team create|list|drain");
+    } catch (err) {
+      console.error(`team command failed: ${err instanceof Error ? err.message : err} — is \`maya serve\` running?`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   if (cmd === "runs") {
     const cfg2 = loadConfig();
     try {
@@ -248,6 +304,7 @@ export async function main(argv: string[]): Promise<void> {
       cwd,
       allowedTools: (flag("tools") ?? "Write,Edit,Read").split(","),
       maxTurns: Number(flag("max-turns") ?? 4),
+      ...(flag("team") ? { teamId: flag("team") } : {}),
     };
     console.log(`goal    ${goal}`);
     console.log(`lead    ${lead}`);
