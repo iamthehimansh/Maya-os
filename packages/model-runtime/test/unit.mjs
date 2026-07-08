@@ -85,3 +85,21 @@ assert.equal(plan.contextLength, 32768);
 plan = planFit(files3, "Q6_K", 16384, 6.8 * GIB, quantLadderFrom);
 assert(plan.contextLength >= 8192, "agent floor: never sub-8k when 8k+ fits");
 console.log("2D PLANNER PASS ✅");
+
+// Split-GGUF registry: a 2-part split collapses to part-1 with SUMMED bytes.
+import { scanModels } from "../dist/registry.js";
+import fs2 from "node:fs";
+import os2 from "node:os";
+import path2 from "node:path";
+const tmp = fs2.mkdtempSync(path2.join(os2.tmpdir(), "maya-split-"));
+const md = path2.join(tmp, "big-model");
+fs2.mkdirSync(md, { recursive: true });
+fs2.writeFileSync(path2.join(md, "big-model-Q4_K_M-00001-of-00002.gguf"), Buffer.alloc(1000));
+fs2.writeFileSync(path2.join(md, "big-model-Q4_K_M-00002-of-00002.gguf"), Buffer.alloc(500));
+const found = scanModels(tmp).find((m) => m.name === "big-model");
+assert(found, "split model found");
+assert.equal(found.files.length, 1, "split collapses to ONE representative file");
+assert(found.files[0].path.includes("00001-of-00002"), "representative = part-1 (llama.cpp loads the set from it)");
+assert.equal(found.files[0].bytes, 1500, "representative carries the SUMMED size");
+fs2.rmSync(tmp, { recursive: true, force: true });
+console.log("SPLIT GGUF PASS ✅");

@@ -1,6 +1,8 @@
 import type { ModelCatalogEntry, ModelId, ProviderConfig, RuntimeEvent } from "@maya-ai/core";
 import { QUANT_QUALITY, type RuntimeManager, availableRam, detectLlamaCpp, pullModel, scanModels, writeModelMeta } from "@maya-ai/model-runtime";
 import { type PlatformConfig, defaultConfig, loadConfig, saveConfig } from "@maya-ai/core";
+import { TunnelManager } from "./tunnel.js";
+import { listDir, readTextPreview } from "./fsbrowse.js";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -29,6 +31,8 @@ interface EventSub {
  * providers arrive with M2), plus the admin control API. Local chat requests
  * are a zero-copy stream passthrough — the gateway never parses token deltas.
  */
+const tunnels = new TunnelManager();
+
 export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<EventSub> } {
   const app = new Hono();
   const subscribers = new Set<EventSub>();
@@ -242,7 +246,7 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
 
   app.post("/api/models/:name/load", async (c) => {
     const model = `local/${c.req.param("name")}` as ModelId;
-    const opts = await c.req.json<{ quant?: never; contextLength?: number }>().catch(() => ({}) as Record<string, never>);
+    const opts = await c.req.json<{ quant?: never; contextLength?: number; force?: boolean }>().catch(() => ({}) as Record<string, never>);
     try {
       const inst = await deps.manager.load(model, opts);
       return c.json(inst);
@@ -271,6 +275,40 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
       ports: { gateway: cfg.gateway.port, dashboard: cfg.dashboard.port, bus: cfg.bus.port, orchestrator: cfg.orchestrator.port },
       liveInstances: deps.manager.instances().length,
     });
+  });
+
+  // ── Filesystem browse (read-only file explorer + dir picker) ─────────────
+  app.get("/api/fs", (c) => {
+    try {
+      return c.json(listDir(c.req.query("path")));
+    } catch (err) {
+      return oaiError(err instanceof Error ? err.message : String(err), 400);
+    }
+  });
+  app.get("/api/fs/read", (c) => {
+    const p = c.req.query("path");
+    if (!p) return oaiError("path required", 400);
+    try {
+      return c.json(readTextPreview(p));
+    } catch (err) {
+      return oaiError(err instanceof Error ? err.message : String(err), 400);
+    }
+  });
+
+  // ── Cloudflare port-forward tunnels ──────────────────────────────────────
+  app.get("/api/tunnels", async (c) => c.json({ ...(await tunnels.detect()), tunnels: tunnels.list() }));
+  app.post("/api/tunnels", async (c) => {
+    const { port } = await c.req.json<{ port?: number }>().catch(() => ({}) as { port?: number });
+    if (!port) return oaiError("port required", 400);
+    try {
+      return c.json(await tunnels.open(Number(port)));
+    } catch (err) {
+      return oaiError(err instanceof Error ? err.message : String(err), 400);
+    }
+  });
+  app.delete("/api/tunnels/:id", async (c) => {
+    await tunnels.close(c.req.param("id"));
+    return c.json({ ok: true });
   });
 
   // ── Config (edit ALL platform settings from the web) ─────────────────────

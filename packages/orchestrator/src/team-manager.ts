@@ -327,6 +327,7 @@ export class TeamManager {
   ): Promise<void> {
     let lastOutput = '';
     let lastStderr = '';
+    let toolCalls = 0;
     let failed: string | null = null;
     let timedOut = false;
 
@@ -345,7 +346,12 @@ export class TeamManager {
           this.opts.db.setAgentState(agentId, ev.state);
           if (ev.state === 'running') this.safeTransition(taskId, 'working');
         } else if (ev.kind === 'log' && ev.stream === 'stdout' && ev.line.trim()) {
-          lastOutput = ev.line;
+          // The claude-code adapter surfaces each tool call as a stdout line
+          // prefixed "[tool] …". Counting them lets us catch a worker that
+          // exits cleanly having only NARRATED success without acting (the
+          // small-model "parrot"); keep lastOutput as the final prose line.
+          if (ev.line.startsWith('[tool]')) toolCalls++;
+          else lastOutput = ev.line;
         } else if (ev.kind === 'log' && ev.stream === 'stderr' && ev.line.trim()) {
           lastStderr = ev.line;
         } else if (ev.kind === 'error') {
@@ -370,11 +376,17 @@ export class TeamManager {
     if (timedOut) failed = `worker exceeded ${Math.round(this.workerTimeoutMs / 1000)}s without finishing${lastStderr ? ` (last stderr: ${lastStderr.slice(0, 160)})` : ''}`;
     const cleanExit = final?.state === 'exited' && failed === null;
     if (cleanExit) {
-      this.safeTransition(taskId, 'done', { result: lastOutput.slice(0, 2000) });
+      // A clean exit with ZERO tool calls is the tell-tale "parrot": the worker
+      // narrated success (often in Claude Code's own post-tool phrasing) without
+      // ever acting. Flag it in the result + done message so it's diagnosable
+      // instead of a silent success — the verifier still rules on the goal.
+      const noop = toolCalls === 0;
+      const result = `${noop ? '[⚠ 0 tool calls — may have narrated without acting] ' : `[${toolCalls} tool call(s)] `}${lastOutput}`.slice(0, 2000);
+      this.safeTransition(taskId, 'done', { result });
       lt.manager.sendMessage({
         body: {
-          text: `✅ ${taskId} done`,
-          maya: { kind: 'task_done', taskId, summary: lastOutput.slice(0, 300) } satisfies LoopBody,
+          text: `✅ ${taskId} done${noop ? ' (⚠ 0 tool calls)' : ''}`,
+          maya: { kind: 'task_done', taskId, summary: result.slice(0, 300) } satisfies LoopBody,
         },
       });
     } else {

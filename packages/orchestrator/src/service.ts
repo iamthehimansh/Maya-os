@@ -20,8 +20,9 @@
 import { createServer, type Server } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
-import { MayaDb } from '@maya-ai/core';
+import { MayaDb, type LoopBody } from '@maya-ai/core';
 import { AgentBusBridge, AgentRuntime } from '@maya-ai/agent-runtime';
+import { BusClient } from '@maya-ai/bus-client';
 import { LlmClient } from './llm.js';
 import { makeGoalCheck, makePlanner, makeVerifier } from './judgment.js';
 import { LoopLead, type LoopEvent, type LoopReport } from './loop-lead.js';
@@ -44,6 +45,9 @@ export interface RunRecord {
   state: 'running' | 'done';
   startedAt: string;
   report?: LoopReport;
+  /** The team channel this run speaks on — set from the `started` event, used
+   * to route an owner's answer back to a loop waiting on a question. */
+  channelId?: string;
   /** Buffered live events, so a late SSE subscriber gets the full timeline. */
   events: LoopEvent[];
 }
@@ -182,6 +186,55 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     });
   });
 
+  // Route an owner's answer to a loop waiting on a question. The loop's ask()
+  // listens on the team channel for an `answer` frame with the matching qid;
+  // we post one there via a short-lived admin bus client. This is what makes
+  // the chat's tap-able questions two-way.
+  app.post('/api/runs/:id/answer', async (c) => {
+    const record = runs.get(c.req.param('id'));
+    if (!record) return c.json({ error: 'unknown run' }, 404);
+    const body = (await c.req.json().catch(() => null)) as { qid?: string; optionId?: string; text?: string } | null;
+    if (!body?.qid || (body.optionId === undefined && !body.text)) {
+      return c.json({ error: 'qid + (optionId or text) required' }, 400);
+    }
+    if (!record.channelId) return c.json({ error: 'run has no channel yet' }, 409);
+    try {
+      const httpBase = opts.bus.wsBase.replace(/^ws/, 'http').replace(/\/$/, '');
+      const res = await fetch(`${httpBase}/api/tokens`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${opts.bus.adminToken}` },
+        // MUST include 'receive': the bus requires it to JOIN a channel (server.ts),
+        // and we can't post the answer without first joining. 'send' alone → join
+        // is rejected → the client never emits 'joined' → this used to time out.
+        body: JSON.stringify({ label: 'owner-answer', role: 'admin', caps: ['receive', 'send'], scopes: [record.channelId] }),
+      });
+      if (!res.ok) return c.json({ error: `token mint failed: HTTP ${res.status}` }, 502);
+      const { token } = (await res.json()) as { token: string };
+      const client = new BusClient({ wsBase: opts.bus.wsBase, channelId: record.channelId, token });
+      const joined = new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('bus join timed out')), 5000);
+        client.on('joined', () => {
+          clearTimeout(t);
+          resolve();
+        });
+      });
+      client.connect();
+      await joined;
+      const answer: LoopBody = {
+        kind: 'answer',
+        qid: body.qid,
+        ...(body.optionId !== undefined ? { optionId: body.optionId } : {}),
+        ...(body.text ? { text: body.text } : {}),
+      };
+      client.sendMessage({ body: { text: body.text ?? `answer: option ${body.optionId}`, maya: answer } });
+      await new Promise((r) => setTimeout(r, 150)); // let the frame flush before closing
+      client.close();
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: `answer failed: ${String(err).slice(0, 200)}` }, 502);
+    }
+  });
+
   app.post('/api/loop', async (c) => {
     const body = (await c.req.json().catch(() => null)) as {
       goal?: string;
@@ -211,6 +264,7 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     runs.set(runId, record);
     const onEvent = (e: LoopEvent): void => {
       record.events.push(e);
+      if (e.kind === 'started') record.channelId = e.channelId; // remember where to route answers
       for (const sub of runSubs.get(runId) ?? []) {
         try {
           sub(e);

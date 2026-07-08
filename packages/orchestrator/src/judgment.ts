@@ -10,13 +10,17 @@ import type { LlmClient } from './llm.js';
 import type { Plan, Planner, Verifier } from './loop-lead.js';
 
 const PLANNER_SYSTEM = `You are the planning head of a software team lead. Decompose the user's goal into 1–5 SELF-CONTAINED tasks for one-shot worker agents (each worker sees ONLY its task text, no other context — write complete instructions).
-Reply with ONLY JSON:
-{"tasks":[{"spec":"complete instruction for one worker","deps":[indexes of tasks that must finish first],"scope":["files/dirs this task may touch"],"acceptance":"how to check it worked"}]}
+Reply with ONLY JSON in this exact shape (angle-bracket text is a PLACEHOLDER — replace it with real content, never output it literally):
+{"tasks":[{"spec":"<the actual complete instruction for THIS goal — restate its exact filenames and exact contents VERBATIM>","deps":[indexes of prerequisite tasks],"scope":["files/dirs this task may touch"],"acceptance":"how to check it worked"}]}
 HARD RULES:
+- The "spec" MUST be the real task for THIS goal. NEVER copy the schema's placeholder words ("<...>", "complete instruction", "one worker") into your output — they are hints, not a task. If your spec mentions "worker" or "instruction" as its subject, you have failed.
 - If the goal is SIMPLE (create/write one or a few files), emit EXACTLY ONE task whose spec RESTATES THE GOAL, preserving every exact filename and exact-content requirement VERBATIM (copy "containing exactly: …" strings word for word). Do NOT paraphrase requirements away.
 - NEVER invent files, directories, memory notes, projects, or steps the goal did not ask for. Touch only what the goal names.
 - Prefer FEWER, meatier tasks; split only for genuinely independent work with disjoint scopes.
-- Only if the goal is genuinely undecidable without the owner (two contradictory readings), reply instead: {"clarification":{"prompt":"the question","options":["option A","option B"]}} — at most ONE, never for preferences you can default sensibly.`;
+- Only if the goal is genuinely undecidable without the owner (two contradictory readings), reply instead: {"clarification":{"prompt":"the question","options":["option A","option B"]}} — at most ONE, never for preferences you can default sensibly.
+WORKED EXAMPLE (a DIFFERENT goal — copy the SHAPE, not the names; use YOUR goal's real filename and content):
+Goal: Create a file named greeting.txt containing exactly: hi there
+Output: {"tasks":[{"spec":"Create a file named greeting.txt whose entire content is exactly: hi there","scope":["greeting.txt"],"acceptance":"greeting.txt exists and its content is exactly: hi there"}]}`;
 
 const VERIFIER_SYSTEM = `You are the verification head of a software team lead. Judge whether a worker's task is ACTUALLY complete.
 CRITICAL: workers sometimes claim success without doing the work. When a WORKSPACE section is provided, it is the ground truth — judge ONLY against it (do files with the exact required names exist? does content match the task?), and ignore the worker's own claims. Without a workspace section, judge the reported result pragmatically.

@@ -1,21 +1,23 @@
 import { useState } from "react";
+import { ChatView } from "./ChatView";
 import { ConversationsView } from "./ConversationsView";
 import { ModelsView } from "./ModelsView";
 import { RunPanel } from "./RunPanel";
+import { FilesView } from "./FilesView";
 import { SettingsView } from "./SettingsView";
 import { TeamsView } from "./TeamsView";
 
 /**
- * Action-first shell: Run is the home tab (describe a goal + dir → go). Models,
- * Teams, and Settings are the other doers; Conversations is the live channel
- * viewer. (The old read-only Agents dump is gone — agents show per run/team.)
- * Lane split: Run / Teams / Conversations = 01; Models / Settings = 02.
+ * Chat is the front door — talk to the Loop Agent in plain language. Run is the
+ * form-driven version; Models / Teams / Settings are the doers; Conversations
+ * is the raw channel viewer. Lane split: Chat / Run / Teams / Conversations =
+ * 01; Models / Settings = 02.
  */
-const TABS = ["Run", "Models", "Teams", "Settings", "Conversations"] as const;
+const TABS = ["Chat", "Run", "Models", "Teams", "Files", "Settings", "Conversations"] as const;
 type Tab = (typeof TABS)[number];
 
 export function App(): React.JSX.Element {
-  const [active, setActive] = useState<Tab>("Run");
+  const [active, setActive] = useState<Tab>("Chat");
   return (
     <div className="shell">
       <header className="topbar">
@@ -29,9 +31,11 @@ export function App(): React.JSX.Element {
         </nav>
       </header>
       <main>
+        {active === "Chat" && <ChatView />}
         {active === "Run" && <RunPanel />}
         {active === "Models" && <ModelsView />}
         {active === "Teams" && <TeamsView />}
+        {active === "Files" && <FilesView />}
         {active === "Settings" && <SettingsView />}
         {active === "Conversations" && <ConversationsView />}
       </main>

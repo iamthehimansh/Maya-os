@@ -172,4 +172,23 @@ describe('TeamManager', () => {
     expect(final.result).toContain('without finishing');
     expect(final.result).toContain('cwd-not-trusted'); // captured stderr surfaced
   }, 30_000);
+
+  it('flags a clean exit with zero tool calls (the small-model "parrot")', async () => {
+    // A 3B worker under the full agentic prompt can NARRATE success (in Claude
+    // Code's own post-tool phrasing) and exit 0 without ever calling a tool.
+    // The verifier still rules on the goal, but the no-op must be diagnosable
+    // instead of a silent `done` — this is the observability capture.
+    const { db, tm, team } = await setup();
+    const parrot = tm.addTask(team.id, 'narrate success without acting'); // no TOOL marker → 0 tool calls
+    const actor = tm.addTask(team.id, 'actually write it TOOL'); // TOOL marker → a real tool call
+    await tm.settle(team.id);
+
+    const p = db.task(parrot.id)!;
+    const a = db.task(actor.id)!;
+    expect(p.state).toBe('done');
+    expect(p.result).toContain('0 tool calls'); // parrot is flagged
+    expect(a.state).toBe('done');
+    expect(a.result).toMatch(/1 tool call/); // real actor counted
+    expect(a.result).not.toContain('0 tool calls');
+  }, 30_000);
 });

@@ -37,71 +37,82 @@ export async function pullModel(
   const model: ModelId = `local/${name}`;
   const dir = path.join(modelsDir, name);
   fs.mkdirSync(dir, { recursive: true });
-  const dest = path.join(dir, resolved.filename);
-  if (fs.existsSync(dest)) return model; // already pulled
 
-  if (resolved.size) {
+  // Total-size disk preflight across every part.
+  const totalBytes = resolved.parts.reduce((n, p) => n + (p.size ?? 0), 0);
+  if (totalBytes > 0) {
     const { bavail, bsize } = fs.statfsSync(modelsDir);
     const free = bavail * bsize;
-    if (resolved.size * 1.05 > free) {
-      throw new Error(
-        `not enough disk: need ~${gb(resolved.size)}, have ${gb(free)} free`,
-      );
+    if (totalBytes * 1.05 > free) {
+      throw new Error(`not enough disk: need ~${gb(totalBytes)}, have ${gb(free)} free`);
     }
   }
 
-  const part = dest + ".part";
-  const have = fs.existsSync(part) ? fs.statSync(part).size : 0;
-  const headers: Record<string, string> = have > 0 ? { range: `bytes=${have}-` } : {};
-  const res = await fetch(resolved.url, { headers, redirect: "follow" });
-  if (!res.ok && res.status !== 206) throw new Error(`download failed: HTTP ${res.status}`);
-  if (!res.body) throw new Error("download failed: empty body");
+  // Download each part (resumable, checksum-verified), reporting cumulative %.
+  let doneBytes = 0;
+  for (const partSpec of resolved.parts) {
+    const dest = path.join(dir, partSpec.filename);
+    if (fs.existsSync(dest)) {
+      doneBytes += partSpec.size ?? fs.statSync(dest).size;
+      continue; // this part already pulled
+    }
+    const part = dest + ".part";
+    const have = fs.existsSync(part) ? fs.statSync(part).size : 0;
+    const headers: Record<string, string> = have > 0 ? { range: `bytes=${have}-` } : {};
+    const res = await fetch(partSpec.url, { headers, redirect: "follow" });
+    if (!res.ok && res.status !== 206) throw new Error(`download failed: HTTP ${res.status} (${partSpec.filename})`);
+    if (!res.body) throw new Error(`download failed: empty body (${partSpec.filename})`);
 
-  const total = resolved.size ?? have + Number(res.headers.get("content-length") ?? 0);
-  let done = have;
-  let lastPct = -1;
-  const counter = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      done += chunk.byteLength;
-      const pct = total ? Math.floor((done / total) * 100) : 0;
-      if (pct !== lastPct) {
-        lastPct = pct;
-        onProgress?.({ type: "pull_progress", model, pct });
+    const base = doneBytes;
+    let lastPct = -1;
+    const counter = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        doneBytes += chunk.byteLength;
+        const pct = totalBytes ? Math.floor((doneBytes / totalBytes) * 100) : 0;
+        if (pct !== lastPct) {
+          lastPct = pct;
+          onProgress?.({ type: "pull_progress", model, pct });
+        }
+        controller.enqueue(chunk);
+      },
+    });
+    doneBytes = base + have;
+    await pipeline(
+      res.body.pipeThrough(counter) as unknown as NodeJS.ReadableStream,
+      fs.createWriteStream(part, { flags: have > 0 && res.status === 206 ? "a" : "w" }),
+    );
+    if (partSpec.sha256) {
+      const actual = await sha256File(part);
+      if (actual !== partSpec.sha256) {
+        fs.rmSync(part, { force: true });
+        throw new Error(`checksum mismatch for ${partSpec.filename} — removed; re-pull`);
       }
-      controller.enqueue(chunk);
-    },
-  });
-
-  await pipeline(
-    res.body.pipeThrough(counter) as unknown as NodeJS.ReadableStream,
-    fs.createWriteStream(part, { flags: have > 0 && res.status === 206 ? "a" : "w" }),
-  );
-
-  if (resolved.sha256) {
-    const actual = await sha256File(part);
-    if (actual !== resolved.sha256) {
-      fs.rmSync(part, { force: true });
-      throw new Error(`checksum mismatch for ${resolved.filename} — removed; re-pull`);
     }
+    fs.renameSync(part, dest);
   }
-  fs.renameSync(part, dest);
   writeModelMeta(modelsDir, name, { source: req.source, contextLength: 8192 });
   onProgress?.({ type: "pull_progress", model, pct: 100 });
   return model;
 }
 
-interface ResolvedSource {
+interface DownloadPart {
   url: string;
   filename: string;
-  suggestedName: string;
   size?: number;
   sha256?: string;
 }
+interface ResolvedSource {
+  parts: DownloadPart[]; // >1 for split/multi-part GGUFs (llama.cpp loads via part-1)
+  suggestedName: string;
+}
+
+/** llama.cpp split-GGUF naming: name-00001-of-00003.gguf */
+const SPLIT_RE = /-(\d{5})-of-(\d{5})\.gguf$/i;
 
 async function resolveSource(source: string): Promise<ResolvedSource> {
   if (source.startsWith("http://") || source.startsWith("https://")) {
     const filename = decodeURIComponent(source.split("/").pop() ?? "model.gguf");
-    return { url: source, filename, suggestedName: baseName(filename) };
+    return { parts: [{ url: source, filename }], suggestedName: baseName(filename) };
   }
   if (!source.startsWith("hf:")) throw new Error(`unsupported source: ${source} (use hf:owner/repo[/file.gguf] or a URL)`);
 
@@ -127,12 +138,23 @@ async function resolveSource(source: string): Promise<ResolvedSource> {
   const meta = ggufs.find((g) => g.rfilename === file);
   if (!meta) throw new Error(`${file} not found in ${repo}`);
 
+  // Split GGUF? Gather every sibling part so the whole set downloads.
+  const m = SPLIT_RE.exec(file);
+  const partFiles = m
+    ? ggufs
+        .filter((g) => g.rfilename.replace(SPLIT_RE, "") === file.replace(SPLIT_RE, ""))
+        .sort((a, b) => a.rfilename.localeCompare(b.rfilename))
+    : [meta];
+  const toUrl = (f: string): string => `https://huggingface.co/${repo}/resolve/main/${f}`;
   return {
-    url: `https://huggingface.co/${repo}/resolve/main/${file}`,
-    filename: path.basename(file),
-    suggestedName: baseName(path.basename(file)),
-    ...(meta.size ? { size: meta.size } : {}),
-    ...(meta.lfs?.sha256 ? { sha256: meta.lfs.sha256 } : {}),
+    parts: partFiles.map((g) => ({
+      url: toUrl(g.rfilename),
+      filename: path.basename(g.rfilename),
+      ...(g.size ? { size: g.size } : {}),
+      ...(g.lfs?.sha256 ? { sha256: g.lfs.sha256 } : {}),
+    })),
+    // name from the base (drop the -NNNNN-of-NNNNN suffix for the dir name)
+    suggestedName: baseName(path.basename(file).replace(SPLIT_RE, ".gguf")),
   };
 }
 

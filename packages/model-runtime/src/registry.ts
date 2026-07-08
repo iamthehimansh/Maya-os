@@ -38,10 +38,28 @@ export function scanModels(modelsDir: string): LocalModel[] {
     if (!entry.isDirectory()) continue;
     const dir = path.join(modelsDir, entry.name);
     const files: LocalModel["files"] = [];
+    // Split GGUFs (name-00001-of-00003.gguf): llama.cpp loads the whole set
+    // from part-1, so collapse a split to its first part with the SUMMED size.
+    const SPLIT = /-(\d{5})-of-(\d{5})\.gguf$/i;
+    const splitTotals = new Map<string, number>(); // base name -> total bytes
     for (const f of fs.readdirSync(dir)) {
       if (!f.endsWith(".gguf")) continue;
+      const full = path.join(dir, f);
+      const bytes = fs.statSync(full).size;
+      const sm = SPLIT.exec(f);
+      if (sm) {
+        const key = f.replace(SPLIT, "");
+        splitTotals.set(key, (splitTotals.get(key) ?? 0) + bytes);
+        if (sm[1] !== "00001") continue; // only part-1 represents the set
+      }
       const quant = quantFromFilename(f) ?? "Q4_K_M";
-      files.push({ quant, path: path.join(dir, f), bytes: fs.statSync(path.join(dir, f)).size });
+      files.push({ quant, path: full, bytes });
+    }
+    // Fix up split representatives to carry the whole set's size.
+    for (const fEntry of files) {
+      const bn = path.basename(fEntry.path);
+      const sm = SPLIT.exec(bn);
+      if (sm) fEntry.bytes = splitTotals.get(bn.replace(SPLIT, "")) ?? fEntry.bytes;
     }
     if (!files.length) continue;
     let meta: ModelMeta = {};
