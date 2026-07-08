@@ -80,14 +80,14 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
 
   app.get('/api/orchestrator/health', (c) => c.json({ ok: true }));
 
-  app.get('/api/teams', (c) =>
-    c.json(
-      db.teams().map((t) => ({
-        ...t,
-        inFlight: teams.statusSafe(t.id)?.inFlight ?? 0,
-      })),
-    ),
-  );
+  // `?live=1` → only teams currently live in the manager (standing teams not
+  // yet drained) — what `maya team list` wants. Default returns ALL teams,
+  // including closed per-run ones, for the dashboard's history view.
+  app.get('/api/teams', (c) => {
+    const liveOnly = c.req.query('live') === '1';
+    const rows = db.teams().filter((t) => !liveOnly || teams.isLive(t.id));
+    return c.json(rows.map((t) => ({ ...t, inFlight: teams.statusSafe(t.id)?.inFlight ?? 0 })));
+  });
   app.get('/api/teams/:id/tasks', (c) => c.json(db.tasks(c.req.param('id'))));
   app.get('/api/teams/:id/agents', (c) => c.json(db.agents(c.req.param('id'))));
 

@@ -125,16 +125,29 @@ describe('orchestrator service', () => {
 
     const list = (await (await fetch(`${base}/api/teams`)).json()) as Array<{ id: string }>;
     expect(list.map((t) => t.id)).toContain(team.id);
+    // ?live=1 surfaces only standing (live) teams — what `maya team list` uses.
+    const liveList = (await (await fetch(`${base}/api/teams?live=1`)).json()) as Array<{ id: string; state: string }>;
+    expect(liveList.map((t) => t.id)).toContain(team.id);
+    expect(liveList.every((t) => t.state !== 'closed')).toBe(true);
 
-    // A loop targeting the standing team is accepted (worker comes from it).
+    // A loop targeting the standing team is accepted (worker comes from it)
+    // and settles (fails fast on the dead gateway) WITHOUT hanging.
     const loop = await fetch(`${base}/api/loop`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ goal: 'x', leadModel: 'local/x', cwd: '/tmp', teamId: team.id }),
     });
     expect(loop.status).toBe(202);
+    const { runId } = (await loop.json()) as { runId: string };
+    const deadline = Date.now() + 12_000;
+    for (;;) {
+      const list = (await (await fetch(`${base}/api/runs`)).json()) as Array<{ runId: string; state: string }>;
+      if (list.find((r) => r.runId === runId)?.state === 'done') break;
+      if (Date.now() > deadline) throw new Error('standing-team run never settled');
+      await new Promise((r) => setTimeout(r, 200));
+    }
 
-    // Unknown team is rejected; drain works.
+    // Unknown team is rejected; the standing team is still live and drains.
     const badLoop = await fetch(`${base}/api/loop`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

@@ -171,7 +171,7 @@ describe('LoopLead', () => {
 
     expect(report.outcome).toBe('partial');
     expect(report.summary).toContain('Maya M3 demo complete');
-    expect(round).toBe(3); // initial check + 2 fix-round re-checks
+    expect(round).toBe(4); // initial + 2 fix-round re-checks + 1 tail-race guard check
   }, 30_000);
 
   it('report re-reads the team so tokensUsed is fresh, not the creation snapshot (02 metering bug)', async () => {
