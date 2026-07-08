@@ -19,7 +19,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node test/unit.mjs",
     "test:smoke": "node test/smoke.mjs",
-    "test:chaos": "node test/chaos.mjs"
+    "test:chaos": "node test/chaos.mjs",
+    "bench:spec": "node bench/spec-bench.mjs"
   },
   "dependencies": {
     "@maya-ai/core": "workspace:*"

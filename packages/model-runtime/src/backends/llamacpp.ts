@@ -80,7 +80,22 @@ export function llamaServerArgs(a: LlamaServerArgs): string[] {
     "--cache-type-v", "q8_0",
     ...(a.chatTemplateFile ? ["--chat-template-file", a.chatTemplateFile] : []),
     ...(a.draftPath
-      ? ["--model-draft", a.draftPath, "--gpu-layers-draft", "999", "--cache-type-k-draft", "q8_0", "--cache-type-v-draft", "q8_0"]
+      ? [
+          // `--model-draft` ALONE is a silent no-op on llama.cpp build 9890+:
+          // the draft model is never loaded unless `--spec-type` selects an
+          // algorithm. `draft-simple` = classic draft-model speculation.
+          "--spec-type", "draft-simple",
+          "--model-draft", a.draftPath,
+          "--gpu-layers-draft", "999",
+          "--cache-type-k-draft", "q8_0",
+          "--cache-type-v-draft", "q8_0",
+          // Greedy speculation tuned for a small draft: stop drafting the moment
+          // the draft's confidence drops (p-min) so we don't spend sequential
+          // draft steps that the target's verify will only reject. MEASURED best
+          // config on Metal — see packages/model-runtime/bench/spec-bench.mjs.
+          "--spec-draft-n-max", "8",
+          "--spec-draft-p-min", "0.8",
+        ]
       : []),
     "--no-webui",
     "--metrics",
