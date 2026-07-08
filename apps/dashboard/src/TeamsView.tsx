@@ -17,6 +17,9 @@ export function TeamsView(): React.JSX.Element {
   const [name, setName] = useState("");
   const [worker, setWorker] = useState("");
   const [cwd, setCwd] = useState("~/maya-demo");
+  // Watch a team's live conversation inline (the agents talking on its bus channel).
+  const [watch, setWatch] = useState<{ name: string; channelId: string } | null>(null);
+  const [convo, setConvo] = useState<Array<{ seq: number; from: string; fromRole?: string; body: { text?: string } }>>([]);
 
   useEffect(() => {
     void getModels().then((m) => {
@@ -29,6 +32,26 @@ export function TeamsView(): React.JSX.Element {
     const t = setInterval(tick, 3000);
     return () => clearInterval(t);
   }, []);
+
+  // Poll the watched team's channel history so you see the agents converse live.
+  useEffect(() => {
+    if (!watch) return;
+    let alive = true;
+    const tick = (): void => {
+      void fetch(`/api/channels/${encodeURIComponent(watch.channelId)}/history?limit=200`)
+        .then((r) => r.json())
+        .then((h: { messages?: typeof convo }) => {
+          if (alive) setConvo(h.messages ?? []);
+        })
+        .catch(() => {});
+    };
+    tick();
+    const t = setInterval(tick, 2000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [watch]);
 
   const live = teams.filter((t) => t.state !== "closed");
   const closed = teams.filter((t) => t.state === "closed");
@@ -107,6 +130,9 @@ export function TeamsView(): React.JSX.Element {
                   <td>{t.tokensUsed.toLocaleString()} tok</td>
                   <td>{t.inFlight > 0 ? `${t.inFlight} in flight` : "idle"}</td>
                   <td className="row-actions">
+                    <button className="act" onClick={() => setWatch({ name: t.name, channelId: t.channelId })}>
+                      👁 Watch
+                    </button>
                     <button className="act" onClick={() => void runOn(t)}>
                       ▶ Run
                     </button>
@@ -120,6 +146,40 @@ export function TeamsView(): React.JSX.Element {
           </table>
         )}
       </div>
+
+      {watch && (
+        <div className="panel">
+          <div className="cchat-head">
+            <div>
+              <strong>👁 {watch.name}</strong> <span className="muted">· live conversation ({convo.length})</span>
+            </div>
+            <button
+              className="disclosure"
+              onClick={() => {
+                setWatch(null);
+                setConvo([]);
+              }}
+            >
+              close
+            </button>
+          </div>
+          {convo.length === 0 ? (
+            <p className="empty">No messages yet — the team is spinning up (Opus agents think for a bit before they speak).</p>
+          ) : (
+            <div className="convo">
+              {convo.map((m) => (
+                <div className="convo-msg" key={m.seq}>
+                  <span className="convo-meta">
+                    <code>#{m.seq}</code> <strong>{m.from}</strong>
+                    {m.fromRole && <span className="chip">{m.fromRole}</span>}
+                  </span>
+                  <span className="convo-text">{m.body.text ?? "(structured frame)"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {closed.length > 0 && (
         <div className="panel">
