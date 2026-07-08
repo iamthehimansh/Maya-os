@@ -335,6 +335,17 @@ export class TeamManager {
     lt.manager.sendMessage({ body: { text: `➖ **${handle}** left the team` } });
   }
 
+  /** Live adapter + agentId for one standing agent, so callers can stream its
+   * output (`adapter.events(agentId)`) or snapshot its logs — the seam the
+   * per-agent "watch the terminal" endpoint needs. Undefined if unknown/not live. */
+  agentLiveHandle(
+    teamId: string,
+    handle: string,
+  ): { adapter: ReturnType<AgentRuntime['adapter']>; agentId: string } | undefined {
+    const a = this.live.get(teamId)?.persistent.get(handle);
+    return a?.agentId ? { adapter: a.adapter, agentId: a.agentId } : undefined;
+  }
+
   private statusOf(handle: string, a: PersistentAgent): AgentStatus {
     return {
       handle,

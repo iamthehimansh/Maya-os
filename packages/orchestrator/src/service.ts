@@ -131,6 +131,53 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     }
   });
 
+  // Live per-agent output stream (SSE) — powers the dashboard "watch the agent's
+  // terminal" panel (himansh's right-rail live view). Streams the agent's
+  // structured events (log lines, say, error, state, tokens) as they arrive via
+  // the adapter's event iterator, which replays a backlog then tails live and
+  // returns when the agent exits. Frame: `data: <AgentEvent JSON>\n\n`.
+  app.get('/api/teams/:id/agents/:handle/output', (c) => {
+    const id = c.req.param('id');
+    if (!teams.isLive(id)) return c.json({ error: `team ${id} is not live` }, 400);
+    const handle = decodeURIComponent(c.req.param('handle')); // @name may arrive %40-encoded
+    const live = teams.agentLiveHandle(id, handle);
+    if (!live) return c.json({ error: `no live agent ${handle} on team ${id}` }, 404);
+    let closed = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const enc = new TextEncoder();
+        const close = (): void => {
+          if (closed) return;
+          closed = true;
+          try {
+            controller.close();
+          } catch {
+            /* already closed */
+          }
+        };
+        void (async () => {
+          try {
+            // events() replays buffered events then blocks for live ones; the
+            // enqueue throws once the client disconnects, which ends the loop.
+            for await (const ev of live.adapter.events(live.agentId)) {
+              if (closed) break;
+              controller.enqueue(enc.encode(`data: ${JSON.stringify(ev)}\n\n`));
+            }
+          } catch {
+            /* client gone or agent iterator errored */
+          }
+          close();
+        })();
+      },
+      cancel() {
+        closed = true; // client disconnected
+      },
+    });
+    return new Response(stream, {
+      headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' },
+    });
+  });
+
   // Post a message into the team channel. Powers 02's MCP `send_to` (directed to
   // an @handle), the human chat composer, and @wake (a directed message wakes
   // the addressed agent via the bridge).
