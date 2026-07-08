@@ -236,7 +236,13 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         this.pushEvent(live, { kind: 'tokens', input, output, at: now() });
       }
       const ok = msg['subtype'] === 'success';
-      if (typeof msg['result'] === 'string') this.pushLog(live, 'stdout', msg['result']);
+      if (typeof msg['result'] === 'string' && msg['result'].trim()) {
+        this.pushLog(live, 'stdout', msg['result']); // keep for lastOutput + tool-call counting
+        // The completed turn is the agent's reply — a first-class 'say' so the
+        // bridge posts it to the channel (one clean message per turn, not the
+        // intermediate blocks, so a busy worker doesn't flood the room).
+        this.pushEvent(live, { kind: 'say', text: msg['result'], at: now() });
+      }
       if (!ok) this.pushEvent(live, { kind: 'error', message: String(msg['subtype'] ?? 'error'), at: now() });
       // One-shot runs end after result; conversational agents await more turns.
       if (!live.interactive) this.setState(live, ok ? 'exited' : 'failed');

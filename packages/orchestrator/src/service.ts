@@ -374,6 +374,9 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     port,
     db,
     async close() {
+      // Reap spawned agents before exiting so a restart doesn't orphan them
+      // (kills each by its tracked child pid — never a grep of `claude`).
+      await teams.drainAll('serve shutdown').catch(() => {});
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
       db.close();
     },

@@ -333,6 +333,16 @@ export class TeamManager {
     lt.manager.sendMessage({ ...(to ? { to } : {}), body: { text } });
   }
 
+  /**
+   * Drain EVERY live team — called on serve shutdown so spawned agents don't
+   * orphan across a restart. drain() kills each agent by the child pid the
+   * adapter tracks (SIGTERM→SIGKILL), scoped to Maya's own processes — never a
+   * grep, so human Claude Code sessions are never touched.
+   */
+  async drainAll(reason = 'serve shutdown'): Promise<void> {
+    await Promise.all([...this.live.keys()].map((id) => this.drain(id, reason).catch(() => {})));
+  }
+
   // ── internals ─────────────────────────────────────────────────────────
 
   private mustLive(teamId: string): LiveTeam {
