@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getModels, type CatalogEntry } from "./api";
+import { renderMarkdown } from "./md";
 import {
   answerRun,
   getChannelHistory,
@@ -170,13 +171,18 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     const text = draft.trim();
     if (!text) return;
 
-    // Team mode: post to the team's channel (the agents wake on @mentions).
+    // Team mode: post to the team's channel. Agents wake on an @mention or a
+    // message directed at them — so if the user didn't @mention anyone, DIRECT
+    // the message to the lead (or the first agent) so a plain "hello" gets a
+    // reply instead of silence. Explicit @mentions still route themselves.
     if (openTeam) {
       if (!openTeam.live || sending) return;
       setDraft("");
       setError(null);
       setSending(true);
-      void sendTeamMessage(openTeam.id, text)
+      const mentionsSomeone = /@[a-z0-9][a-z0-9-]/i.test(text);
+      const wake = mentionsSomeone ? undefined : (agents.find((a) => a.role === "lead") ?? agents[0])?.handle;
+      void sendTeamMessage(openTeam.id, text, wake)
         .catch((e) => setError(String(e instanceof Error ? e.message : e)))
         .finally(() => setSending(false));
       return; // the 2s channel poll reflects it + any replies
@@ -343,7 +349,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
                     <span className="cmsg-head">
                       <span className="cavatar you">You</span>
                     </span>
-                    <div className="cmsg-text">{m.text}</div>
+                    <div className="cmsg-text md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }} />
                   </div>
                 </div>
               ) : (
@@ -354,7 +360,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
                       <span className={`chandle h-${hashColor(m.handle)}`}>{m.handle}</span>
                       {m.kind && <span className="ckind">{ICON[m.kind]}</span>}
                     </span>
-                    <div className="cmsg-text">{m.text}</div>
+                    <div className="cmsg-text md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }} />
                     {m.kind === "question" && (m.event?.options?.length ?? 0) > 0 && (
                       <div className="q-options">
                         {m.event!.options!.map((o) => (
