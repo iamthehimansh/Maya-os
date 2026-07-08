@@ -1,0 +1,21 @@
+{
+  "name": "@maya-ai/mcp",
+  "version": "0.0.1",
+  "description": "Maya's MCP server — tools the loop Lead calls to spawn/manage agents in its team",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22.5.0" },
+  "bin": { "maya-mcp": "./bin/maya-mcp.js" },
+  "exports": { ".": "./dist/index.js" },
+  "files": ["dist", "bin"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node test/unit.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": { "@types/node": "^22", "typescript": "^5.7.0" }
+}
