@@ -11,7 +11,7 @@ import type {
   RuntimeEvent,
 } from "@maya-ai/core";
 import { detectLlamaCpp, llamaServerArgs } from "./backends/llamacpp.js";
-import { planFit } from "./estimate.js";
+import { estimateLoadBytes, planFit } from "./estimate.js";
 import { availableRam, processRss } from "./ram.js";
 import { findModel, quantLadderFrom, scanModels, writeModelMeta } from "./registry.js";
 import { fileURLToPath } from "node:url";
@@ -38,6 +38,9 @@ import { InstanceSupervisor, type SupervisorEvent } from "./supervisor.js";
 export interface LoadOpts {
   quant?: Quant;
   contextLength?: number;
+  /** Skip the RAM-fit refusal — load even if it exceeds free RAM (macOS swaps
+   *  to SSD). Owner-authorized overcommit; degrade ladder still applies. */
+  force?: boolean;
 }
 
 interface Managed {
@@ -112,12 +115,26 @@ export class RuntimeManager extends EventEmitter {
       if (evicted > 0) plan = await this.planWithinBudget(local, opts.quant, contextLength);
     }
     if (!plan) {
-      const ram = await availableRam();
-      this.emitEvent({ type: "ram_pressure", freeBytes: ram.availableBytes, action: "none" });
-      throw new Error(
-        `${model} cannot fit: ~${fmtGb(ram.availableBytes)} available after guardrail floor; ` +
-          `smallest option needs more. Try a smaller model or close apps.`,
-      );
+      if (opts.force) {
+        // Owner-authorized overcommit: load anyway (macOS swaps to SSD). Use the
+        // requested/best quant at the requested context; expect slow, not crash.
+        const file0 = local.files.find((f) => f.quant === (opts.quant ?? local.files[0]?.quant)) ?? local.files[0]!;
+        plan = {
+          quant: file0.quant,
+          fileBytes: file0.bytes,
+          contextLength,
+          estimateBytes: estimateLoadBytes(file0.bytes, contextLength),
+          degraded: { quant: false, context: false },
+        };
+        this.emitEvent({ type: "ram_pressure", freeBytes: (await availableRam()).availableBytes, action: "none" });
+      } else {
+        const ram = await availableRam();
+        this.emitEvent({ type: "ram_pressure", freeBytes: ram.availableBytes, action: "none" });
+        throw new Error(
+          `${model} cannot fit: ~${fmtGb(ram.availableBytes)} available after guardrail floor; ` +
+            `smallest option needs more. Try a smaller model, close apps, or force-load (uses SSD as RAM).`,
+        );
+      }
     }
 
     if (plan.degraded.quant && opts.quant) {

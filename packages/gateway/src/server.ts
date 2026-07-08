@@ -242,7 +242,7 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
 
   app.post("/api/models/:name/load", async (c) => {
     const model = `local/${c.req.param("name")}` as ModelId;
-    const opts = await c.req.json<{ quant?: never; contextLength?: number }>().catch(() => ({}) as Record<string, never>);
+    const opts = await c.req.json<{ quant?: never; contextLength?: number; force?: boolean }>().catch(() => ({}) as Record<string, never>);
     try {
       const inst = await deps.manager.load(model, opts);
       return c.json(inst);
