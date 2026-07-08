@@ -25,7 +25,7 @@ import { AgentBusBridge, AgentRuntime } from '@maya-ai/agent-runtime';
 import { LlmClient } from './llm.js';
 import { makeGoalCheck, makePlanner, makeVerifier } from './judgment.js';
 import { LoopLead, type LoopEvent, type LoopReport } from './loop-lead.js';
-import { TeamManager } from './team-manager.js';
+import { TeamManager, type CreateTeamInput } from './team-manager.js';
 
 export interface OrchestratorServiceOptions {
   /** SQLite path for the platform db; ':memory:' for tests. */
@@ -90,6 +90,44 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
   );
   app.get('/api/teams/:id/tasks', (c) => c.json(db.tasks(c.req.param('id'))));
   app.get('/api/teams/:id/agents', (c) => c.json(db.agents(c.req.param('id'))));
+
+  // Standing teams: create once (kept LIVE — joins its bus room), then run
+  // many loops on it via POST /api/loop {teamId}. `maya team create/list`.
+  app.post('/api/teams', async (c) => {
+    const b = (await c.req.json().catch(() => null)) as {
+      name?: string;
+      topology?: string;
+      members?: Array<{ adapter?: string; model?: string; cwd?: string; allowedTools?: string[]; maxTurns?: number }>;
+      tokenBudget?: number;
+    } | null;
+    if (!b?.name || !Array.isArray(b.members) || b.members.length === 0) {
+      return c.json({ error: 'name + members[] (each with model + cwd) required' }, 400);
+    }
+    for (const m of b.members) if (!m.model || !m.cwd) return c.json({ error: 'each member needs model + cwd' }, 400);
+    try {
+      const team = await teams.createTeam({
+        name: b.name,
+        topology: (b.topology as CreateTeamInput['topology']) ?? 'manager-tree',
+        members: b.members.map((m) => ({
+          adapter: m.adapter ?? 'claude-code',
+          model: m.model!,
+          cwd: m.cwd!,
+          ...(m.allowedTools !== undefined ? { allowedTools: m.allowedTools } : {}),
+          ...(m.maxTurns !== undefined ? { maxTurns: m.maxTurns } : {}),
+        })),
+        ...(b.tokenBudget !== undefined ? { tokenBudget: b.tokenBudget } : {}),
+      });
+      return c.json(team, 201);
+    } catch (err) {
+      return c.json({ error: String(err).slice(0, 300) }, 400);
+    }
+  });
+
+  app.post('/api/teams/:id/drain', async (c) => {
+    if (!teams.isLive(c.req.param('id'))) return c.json({ error: 'unknown or already-drained team' }, 404);
+    await teams.drain(c.req.param('id'), 'drained via API');
+    return c.json({ ok: true });
+  });
   app.get('/api/agents', (c) => c.json(db.agentsAll()));
   app.get('/api/runs', (c) =>
     c.json([...runs.values()].map(({ events: _events, ...r }) => r).sort((a, b) => b.startedAt.localeCompare(a.startedAt))),
@@ -145,9 +183,19 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
       allowedTools?: string[];
       maxTurns?: number;
       tokenBudget?: number;
+      /** Run on a pre-created standing team instead of a fresh per-run team. */
+      teamId?: string;
     } | null;
-    if (!body?.goal || !body.leadModel || !body.workerModel || !body.cwd) {
-      return c.json({ error: 'goal, leadModel, workerModel, cwd required' }, 400);
+    // Two shapes: a fresh per-run team (needs workerModel), or a run on an
+    // existing standing team (needs teamId; worker comes from the team). Both
+    // need a cwd — the workspace the goal is verified against.
+    if (!body?.goal || !body.leadModel || !body.cwd) {
+      return c.json({ error: 'goal, leadModel, cwd required' }, 400);
+    }
+    if (body.teamId) {
+      if (!teams.isLive(body.teamId)) return c.json({ error: `team ${body.teamId} is not live — create it first` }, 400);
+    } else if (!body.workerModel) {
+      return c.json({ error: 'workerModel required (or pass teamId to run on a standing team)' }, 400);
     }
     const runId = 'run_' + Date.now().toString(36);
     const record: RunRecord = { runId, goal: body.goal, state: 'running', startedAt: new Date().toISOString(), events: [] };
@@ -167,12 +215,13 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
       db,
       teams,
       onEvent,
+      // Fresh-team template (ignored when running on a standing team).
       team: {
         topology: 'manager-tree',
         members: [
           {
             adapter: body.workerAdapter ?? 'claude-code',
-            model: body.workerModel,
+            model: body.workerModel ?? 'local/unused',
             cwd: body.cwd,
             ...(body.allowedTools !== undefined ? { allowedTools: body.allowedTools } : {}),
             ...(body.maxTurns !== undefined ? { maxTurns: body.maxTurns } : {}),
@@ -186,7 +235,7 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
       bus: opts.bus,
     });
     void lead
-      .run(body.goal, { name: runId })
+      .run(body.goal, { name: runId, ...(body.teamId !== undefined ? { existingTeamId: body.teamId } : {}) })
       .then((report) => {
         record.state = 'done';
         record.report = report;

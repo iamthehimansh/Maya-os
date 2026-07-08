@@ -209,6 +209,18 @@ export class TeamManager {
     }
   }
 
+  /** The live TeamRow, or throw — used to run a loop on a standing team. */
+  requireTeam(teamId: string): TeamRow {
+    const lt = this.live.get(teamId);
+    if (!lt) throw new Error(`team ${teamId} is not live — create it through this manager first`);
+    return lt.team;
+  }
+
+  /** Is this team currently live (created through this manager, not drained)? */
+  isLive(teamId: string): boolean {
+    return this.live.has(teamId);
+  }
+
   // ── internals ─────────────────────────────────────────────────────────
 
   private mustLive(teamId: string): LiveTeam {

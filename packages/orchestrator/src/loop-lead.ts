@@ -98,12 +98,15 @@ export interface LoopReport {
 export class LoopLead {
   constructor(private readonly opts: LoopLeadOptions) {}
 
-  async run(goal: string, opts?: { name?: string }): Promise<LoopReport> {
+  async run(goal: string, opts?: { name?: string; existingTeamId?: string }): Promise<LoopReport> {
     const runId = 'run_' + Date.now().toString(36);
-    const team = await this.opts.teams.createTeam({
-      name: opts?.name ?? `loop-${runId}`,
-      ...this.opts.team,
-    });
+    // Standing-team mode: run on a pre-created live team (create once, run
+    // many loops on it) and DON'T drain it afterward. Otherwise create a
+    // fresh team per run and tear it down at the end (the default).
+    const useExisting = opts?.existingTeamId !== undefined;
+    const team = useExisting
+      ? this.opts.teams.requireTeam(opts.existingTeamId!)
+      : await this.opts.teams.createTeam({ name: opts?.name ?? `loop-${runId}`, ...this.opts.team });
     let questionsAsked = 0;
     const emit = (e: LoopEvent): void => {
       try {
@@ -250,8 +253,8 @@ export class LoopLead {
     } catch (err) {
       return await finish('failed', `lead error: ${String(err).slice(0, 300)}`, new Set());
     } finally {
-      // Team teardown: drain if anything is still live (idempotent).
-      await this.opts.teams.drain(team.id, 'loop run complete').catch(() => {});
+      // Standing teams outlive the run — only tear down teams we created.
+      if (!useExisting) await this.opts.teams.drain(team.id, 'loop run complete').catch(() => {});
     }
   }
 

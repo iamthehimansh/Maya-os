@@ -110,6 +110,41 @@ describe('orchestrator service', () => {
     expect(res.status).toBe(404);
   });
 
+  it('creates a standing team, lists it, and accepts loops targeting it', async () => {
+    const base = await setup();
+    const bad = await fetch(`${base}/api/teams`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    expect(bad.status).toBe(400);
+
+    const created = await fetch(`${base}/api/teams`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'standing', members: [{ model: 'local/x', cwd: '/tmp' }] }),
+    });
+    expect(created.status).toBe(201);
+    const team = (await created.json()) as { id: string };
+
+    const list = (await (await fetch(`${base}/api/teams`)).json()) as Array<{ id: string }>;
+    expect(list.map((t) => t.id)).toContain(team.id);
+
+    // A loop targeting the standing team is accepted (worker comes from it).
+    const loop = await fetch(`${base}/api/loop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ goal: 'x', leadModel: 'local/x', cwd: '/tmp', teamId: team.id }),
+    });
+    expect(loop.status).toBe(202);
+
+    // Unknown team is rejected; drain works.
+    const badLoop = await fetch(`${base}/api/loop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ goal: 'x', leadModel: 'local/x', cwd: '/tmp', teamId: 'team_nope' }),
+    });
+    expect(badLoop.status).toBe(400);
+    const drained = await fetch(`${base}/api/teams/${team.id}/drain`, { method: 'POST' });
+    expect(drained.status).toBe(200);
+  }, 20_000);
+
   it('gates mutating routes behind the admin bearer when configured', async () => {
     const base = await setup('secret-admin');
     const unauthed = await fetch(`${base}/api/loop`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
