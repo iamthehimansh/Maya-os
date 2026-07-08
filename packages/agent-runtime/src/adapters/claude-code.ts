@@ -21,6 +21,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { resolveCwd } from '../cwd.js';
 import { join } from 'node:path';
 import type {
   AgentAdapter,
@@ -189,8 +190,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // under spec.bus.tokenEnv (minted by the orchestrator) — this adapter
     // never mints or logs credentials. Auto-join lands with the loop slice.
 
+    const cwd = resolveCwd(spec.cwd); // expand ~ + ensure the dir exists (else spawn ENOENTs)
     const child = spawn(this.bin(), this.buildArgs(spec), {
-      cwd: spec.cwd,
+      cwd,
       env: env as NodeJS.ProcessEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -200,7 +202,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       adapter: this.id,
       state: 'spawning',
       model: spec.model,
-      cwd: spec.cwd,
+      cwd: cwd ?? spec.cwd,
       ...(child.pid !== undefined ? { pid: child.pid } : {}),
       spawnedAt: new Date().toISOString(),
     };
