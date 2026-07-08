@@ -162,9 +162,11 @@ export class AgentBusBridge {
             break;
           case 'say':
             // The agent completed a turn — post its reply to the channel. This
-            // is what makes a spawned agent actually converse (closes the loop:
-            // @mention → send → turn → result → say → channel).
-            if (ev.text.trim()) client.sendMessage({ body: { text: ev.text } });
+            // is what makes a non-outbox agent converse (@mention → send → turn →
+            // result → say → channel). In outbox mode the OUTBOX file is the
+            // agent's channel, so suppress `say` there or every reply double-posts
+            // (once via say, once via the line it wrote to its outbox).
+            if (!opts.outboxPath && ev.text.trim()) client.sendMessage({ body: { text: ev.text } });
             break;
           default:
             break; // logs/tokens stay local — the channel is for signal, not noise
