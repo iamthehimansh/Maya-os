@@ -91,6 +91,34 @@ export function buildServer(client: MayaClient): McpServer {
     },
   );
 
+  server.tool(
+    "send_message",
+    "Post a message to your team channel NOW — everyone (including the human) sees it. Use this to talk to the human on your own initiative, report progress, or send several messages in a row (sleep between them with your Bash tool for timed sends, e.g. 'hello' every 5s).",
+    { text: z.string() },
+    async ({ text: msg }) => {
+      try {
+        await client.sendMessage(msg);
+        return text("posted to the channel");
+      } catch (e) {
+        return text(`post failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  server.tool(
+    "schedule_message",
+    "Schedule a message to post to your team channel AFTER a delay (seconds). Use this to ping the human PROACTIVELY later or set a reminder — the orchestrator holds the timer, so it fires even after your current turn ends. `to` optionally directs it at a handle.",
+    { delaySeconds: z.number().min(1).max(86400), text: z.string(), to: z.string().optional() },
+    async ({ delaySeconds, text: msg, to }) => {
+      try {
+        await client.scheduleMessage(delaySeconds, msg, to);
+        return text(`scheduled in ${delaySeconds}s`);
+      } catch (e) {
+        return text(`schedule unavailable (${e instanceof Error ? e.message : e}) — post now with send_message instead.`);
+      }
+    },
+  );
+
   return server;
 }
 

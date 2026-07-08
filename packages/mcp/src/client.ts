@@ -64,6 +64,27 @@ export class MayaClient {
     });
   }
 
+  /** Post a message to the team channel now (no `to` = everyone sees it — how an
+   *  agent proactively talks to the human, or sends N messages in a loop). */
+  sendMessage(text: string): Promise<unknown> {
+    return this.json(`${this.cfg.orchestratorUrl}/api/teams/${encodeURIComponent(this.cfg.teamId)}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  }
+
+  /** Schedule a message to post to the channel after a delay — the orchestrator
+   *  holds the timer (survives this MCP process ending), so an agent can ping
+   *  the human PROACTIVELY later. `to` optional (directs it at a handle). */
+  scheduleMessage(delaySeconds: number, text: string, to?: string): Promise<unknown> {
+    return this.json(`${this.cfg.orchestratorUrl}/api/teams/${encodeURIComponent(this.cfg.teamId)}/schedule`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ delaySeconds, text, ...(to ? { to } : {}) }),
+    });
+  }
+
   async listModels(): Promise<Array<{ id: string; toolCalling?: boolean }>> {
     const body = (await this.json(`${this.cfg.gatewayUrl}/api/models`)) as Array<{ id: string; toolCalling?: boolean }>;
     return Array.isArray(body) ? body : [];
