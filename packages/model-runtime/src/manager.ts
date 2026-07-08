@@ -27,7 +27,10 @@ import path2 from "node:path";
 const TEMPLATE_QUIRKS: Array<{ match: RegExp; templateFile: string }> = [
   {
     match: /^qwen2[.-]5-coder/i,
-    templateFile: path2.resolve(fileURLToPath(import.meta.url), "../../templates/qwen2.5-tools.jinja"),
+    templateFile: [
+      path2.resolve(fileURLToPath(import.meta.url), "../../templates/qwen2.5-tools.jinja"), // monorepo dist
+      path2.resolve(fileURLToPath(import.meta.url), "../templates/qwen2.5-tools.jinja"), // bundled: dist/../templates
+    ].find((p) => fs2.existsSync(p)) ?? path2.resolve(fileURLToPath(import.meta.url), "../../templates/qwen2.5-tools.jinja"),
   },
 ];
 import { InstanceSupervisor, type SupervisorEvent } from "./supervisor.js";

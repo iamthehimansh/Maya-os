@@ -16,22 +16,23 @@
   },
   "files": [
     "dist",
-    "bin"
+    "bin",
+    "web",
+    "templates"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json --noEmit && tsup && node scripts/copy-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "dependencies": {
-    "@maya-ai/core": "workspace:*",
-    "@maya-ai/model-runtime": "workspace:*",
-    "@maya-ai/gateway": "workspace:*",
-    "@maya-ai/bus": "workspace:*",
-    "@maya-ai/orchestrator": "workspace:*"
-  },
   "devDependencies": {
+    "@types/node": "^22",
+    "tsup": "^8.5.1",
     "typescript": "^5.7.0",
-    "@types/node": "^22"
+    "@maya-ai/bus": "workspace:*",
+    "@maya-ai/core": "workspace:*",
+    "@maya-ai/gateway": "workspace:*",
+    "@maya-ai/model-runtime": "workspace:*",
+    "@maya-ai/orchestrator": "workspace:*"
   },
   "keywords": [
     "ai",

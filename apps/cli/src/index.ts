@@ -116,7 +116,11 @@ export async function main(argv: string[]): Promise<void> {
       console.error("        (gateway + dashboard continue; loop features off)");
     }
     // Dashboard SPA (same-origin proxy to the gateway — no CORS surface).
-    const dashDist = path.resolve(fileURLToPath(import.meta.url), "../../../dashboard/dist");
+    const dashCandidates = [
+      path.resolve(fileURLToPath(import.meta.url), "../../web"), // packaged: dist/../web
+      path.resolve(fileURLToPath(import.meta.url), "../../../dashboard/dist"), // monorepo
+    ];
+    const dashDist = dashCandidates.find((c) => fs.existsSync(path.join(c, "index.html"))) ?? dashCandidates[0]!;
     let dashServer: ReturnType<typeof serveDashboard> | null = null;
     if (fs.existsSync(path.join(dashDist, "index.html"))) {
       dashServer = serveDashboard(dashDist, cfg.dashboard.port, cfg.gateway.port, orch?.port, busInfo);
