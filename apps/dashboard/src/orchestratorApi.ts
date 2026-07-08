@@ -12,6 +12,19 @@ export interface Team {
   inFlight: number;
 }
 
+/**
+ * A team handed off from the Teams page to the Chat page: which bus channel to
+ * load into the stream, and whether the team is still live (composer active) or
+ * closed (read-only history). This is the seam himansh asked for — click a team,
+ * land in Chat connected to it.
+ */
+export interface OpenTeam {
+  id: string;
+  channelId: string;
+  name: string;
+  live: boolean;
+}
+
 export interface Task {
   id: string;
   teamId: string;

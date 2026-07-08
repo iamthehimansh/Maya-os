@@ -1,17 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getModels, type CatalogEntry } from "./api";
-import { answerRun, getTeamAgents, startLoop, streamRun, type AgentStatus, type LoopEvent } from "./orchestratorApi";
+import {
+  answerRun,
+  getChannelHistory,
+  getTeamAgents,
+  getTeams,
+  sendTeamMessage,
+  startLoop,
+  streamRun,
+  type AgentStatus,
+  type ChannelMessage,
+  type LoopEvent,
+  type OpenTeam,
+  type Team,
+} from "./orchestratorApi";
 
 /**
- * Chat — Maya's front door, in the team-channel layout: a center message stream,
- * a right rail of the agents (Lead + workers) with their models/state + who's
- * online, and a composer. You message the team; the Loop Agent plans, spawns
- * real Claude Code workers, and streams the work back as a group conversation,
- * asking you tap-able questions when it's stuck.
+ * Chat — Maya's front door AND the place you watch/talk to any team.
  *
- * This is the visible container for the persistent multi-agent team: today the
- * stream is loop-driven (each message runs the loop); the right rail already
- * shows the live team, and the persistent bus agents + @wake land underneath it.
+ * Two modes, one view:
+ *  • Front door (no team open): message the Loop Agent — it plans, spawns real
+ *    Claude Code workers, verifies against the files, and streams the work back.
+ *  • Team open (from the Teams page's 💬 Chat button, or the switcher up top):
+ *    the center stream mirrors that team's bus channel live; the right rail shows
+ *    its agents. A LIVE team you can talk to (your message posts to the channel,
+ *    the agents wake on @mentions); a finished team opens read-only so you can
+ *    review exactly what the agents did.
  */
 
 interface Msg {
@@ -26,8 +40,15 @@ interface Msg {
 
 const LEAD = "@lead";
 
-export function ChatView(): React.JSX.Element {
+interface ChatViewProps {
+  openTeam: OpenTeam | null;
+  onOpenChat: (t: OpenTeam) => void;
+  onNewChat: () => void;
+}
+
+export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): React.JSX.Element {
   const [models, setModels] = useState<CatalogEntry[]>([]);
+  const [teamList, setTeamList] = useState<Team[]>([]);
   const [lead, setLead] = useState("");
   const [worker, setWorker] = useState("");
   const [cwd, setCwd] = useState("~/maya-demo");
@@ -35,15 +56,18 @@ export function ChatView(): React.JSX.Element {
   const [draft, setDraft] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(false); // front-door: a loop is running
+  const [sending, setSending] = useState(false); // team mode: posting a message
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("All");
   const [showRail, setShowRail] = useState(true);
   const nextId = useRef(1);
   const unsub = useRef<() => void>(() => {});
   const agentPoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chanPoll = useRef<ReturnType<typeof setInterval> | null>(null);
   const stream = useRef<HTMLDivElement>(null);
 
+  // Mount: model catalog (for the front-door setup) + the team list (for the switcher).
   useEffect(() => {
     void getModels().then((m) => {
       setModels(m);
@@ -52,11 +76,52 @@ export function ChatView(): React.JSX.Element {
       setLead((p) => p || caller?.id || "");
       setWorker((p) => p || caller?.id || "");
     });
+    const loadTeams = (): void => void getTeams().then(setTeamList).catch(() => {});
+    loadTeams();
+    const t = setInterval(loadTeams, 5000);
     return () => {
+      clearInterval(t);
       unsub.current();
       if (agentPoll.current) clearInterval(agentPoll.current);
+      if (chanPoll.current) clearInterval(chanPoll.current);
     };
   }, []);
+
+  // Switching between front door and a team (or between teams): tear down the old
+  // context and, in team mode, start mirroring that channel + watching its agents.
+  useEffect(() => {
+    unsub.current(); // stop any front-door loop stream
+    setMsgs([]);
+    setBusy(false);
+    setError(null);
+    if (chanPoll.current) {
+      clearInterval(chanPoll.current);
+      chanPoll.current = null;
+    }
+    if (!openTeam) {
+      setAgents([]);
+      if (agentPoll.current) clearInterval(agentPoll.current);
+      return;
+    }
+    watchAgents(openTeam.id);
+    let alive = true;
+    const tick = (): void =>
+      void getChannelHistory(openTeam.channelId, 200)
+        .then(({ messages }) => {
+          if (alive) setMsgs(messages.map(channelToMsg));
+        })
+        .catch(() => {});
+    tick();
+    chanPoll.current = setInterval(tick, 2000);
+    return () => {
+      alive = false;
+      if (chanPoll.current) {
+        clearInterval(chanPoll.current);
+        chanPoll.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openTeam?.channelId]);
 
   useEffect(() => {
     stream.current?.scrollTo({ top: stream.current.scrollHeight, behavior: "smooth" });
@@ -64,7 +129,7 @@ export function ChatView(): React.JSX.Element {
 
   const workerOptions = useMemo(() => models.filter((m) => m.capabilities?.toolCalling !== false), [models]);
 
-  // Distinct handles seen in the stream drive the filter chips (like @001/@002).
+  // Distinct handles seen in the stream drive the filter chips (like @lead/@builder).
   const handles = useMemo(() => {
     const set = new Set<string>();
     for (const m of msgs) if (m.who === "agent") set.add(m.handle);
@@ -78,6 +143,8 @@ export function ChatView(): React.JSX.Element {
   });
 
   const online = 1 + agents.filter((a) => a.state === "live" || a.state === "working").length;
+  const liveTeams = teamList.filter((t) => t.state !== "closed");
+  const closedTeams = teamList.filter((t) => t.state === "closed");
 
   function push(m: Omit<Msg, "id">): void {
     setMsgs((prev) => [...prev, { ...m, id: nextId.current++ }]);
@@ -90,9 +157,33 @@ export function ChatView(): React.JSX.Element {
     agentPoll.current = setInterval(tick, 3000);
   }
 
+  function switchTeam(id: string): void {
+    if (!id) {
+      onNewChat();
+      return;
+    }
+    const t = teamList.find((x) => x.id === id);
+    if (t) onOpenChat({ id: t.id, channelId: t.channelId, name: t.name, live: t.state !== "closed" });
+  }
+
   function send(): void {
     const text = draft.trim();
-    if (!text || busy || !cwd.trim()) return;
+    if (!text) return;
+
+    // Team mode: post to the team's channel (the agents wake on @mentions).
+    if (openTeam) {
+      if (!openTeam.live || sending) return;
+      setDraft("");
+      setError(null);
+      setSending(true);
+      void sendTeamMessage(openTeam.id, text)
+        .catch((e) => setError(String(e instanceof Error ? e.message : e)))
+        .finally(() => setSending(false));
+      return; // the 2s channel poll reflects it + any replies
+    }
+
+    // Front-door mode: each message runs a fresh loop.
+    if (busy || !cwd.trim()) return;
     setDraft("");
     setError(null);
     setBusy(true);
@@ -121,13 +212,56 @@ export function ChatView(): React.JSX.Element {
     void answerRun(runId, { ...(qid ? { qid } : {}), optionId }).catch((e) => setError(String(e instanceof Error ? e.message : e)));
   }
 
+  const composerDisabled = openTeam ? !openTeam.live : false;
+  const sendDisabled = !draft.trim() || (openTeam ? !openTeam.live || sending : busy || !cwd.trim());
+  const placeholder = openTeam
+    ? openTeam.live
+      ? `Message ${openTeam.name}… (type @handle to wake an agent)`
+      : "This team is finished — read-only"
+    : "Message the channel…";
+
   return (
     <section className="cchat" aria-label="Team chat">
       <div className="cchat-main">
         <header className="cchat-head">
           <div className="cchat-title">
-            <span className="cchat-back">‹ Channels /</span> <strong>Maya</strong>
-            <span className="cchat-live">● LIVE</span>
+            <select
+              className="cchat-switch"
+              value={openTeam?.id ?? ""}
+              onChange={(e) => switchTeam(e.target.value)}
+              title="Switch between the front door and any team"
+            >
+              <option value="">＋ New chat (front door)</option>
+              {liveTeams.length > 0 && (
+                <optgroup label="Live teams">
+                  {liveTeams.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {closedTeams.length > 0 && (
+                <optgroup label="Finished teams">
+                  {closedTeams.slice(0, 40).map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+            {openTeam ? (
+              <>
+                <strong>{openTeam.name}</strong>
+                {openTeam.live ? <span className="cchat-live">● LIVE</span> : <span className="chip">read-only</span>}
+              </>
+            ) : (
+              <>
+                <strong>Maya</strong>
+                <span className="cchat-live">● front door</span>
+              </>
+            )}
             <span className="muted">
               · {agents.length || "no"} agent{agents.length === 1 ? "" : "s"} · {online} online
             </span>
@@ -143,12 +277,14 @@ export function ChatView(): React.JSX.Element {
               {f}
             </button>
           ))}
-          <button className="cchat-setup disclosure" onClick={() => setShowSetup((v) => !v)}>
-            {showSetup ? "hide setup" : "setup"}
-          </button>
+          {!openTeam && (
+            <button className="cchat-setup disclosure" onClick={() => setShowSetup((v) => !v)}>
+              {showSetup ? "hide setup" : "setup"}
+            </button>
+          )}
         </div>
 
-        {showSetup && (
+        {showSetup && !openTeam && (
           <div className="cchat-setup-row">
             <label className="field grow">
               <span>Directory</span>
@@ -187,8 +323,17 @@ export function ChatView(): React.JSX.Element {
         <div className="cchat-stream" ref={stream}>
           {shown.length === 0 ? (
             <div className="cchat-empty">
-              <p>👋 Message the team. The Loop Agent plans, spawns real Claude Code workers, verifies against the real files, and reports back — asking you if it gets stuck.</p>
-              <p className="muted">Try: "Create a file named NOTES.md containing exactly: hello from Maya"</p>
+              {openTeam ? (
+                <>
+                  <p>👀 Watching <strong>{openTeam.name}</strong> — loading its conversation…</p>
+                  <p className="muted">{openTeam.live ? "Send a message below to talk to the team." : "This team has finished — read-only."}</p>
+                </>
+              ) : (
+                <>
+                  <p>👋 Message the team. The Loop Agent plans, spawns real Claude Code workers, verifies against the real files, and reports back — asking you if it gets stuck.</p>
+                  <p className="muted">Try: "Create a file named NOTES.md containing exactly: hello from Maya"</p>
+                </>
+              )}
             </div>
           ) : (
             shown.map((m) =>
@@ -224,11 +369,11 @@ export function ChatView(): React.JSX.Element {
               ),
             )
           )}
-          {busy && (
+          {(busy || sending) && (
             <div className="cmsg agent">
               <span className="cavatar h-2">✷</span>
               <div className="cmsg-body">
-                <div className="cmsg-text typing">the team is working…</div>
+                <div className="cmsg-text typing">{sending ? "sending…" : "the team is working…"}</div>
               </div>
             </div>
           )}
@@ -238,7 +383,8 @@ export function ChatView(): React.JSX.Element {
           <textarea
             rows={1}
             value={draft}
-            placeholder="Message the channel…"
+            disabled={composerDisabled}
+            placeholder={placeholder}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -248,8 +394,8 @@ export function ChatView(): React.JSX.Element {
             }}
           />
           <div className="cchat-composer-foot">
-            <span className="muted">📎 Tip: type @ to tag, or attach a file</span>
-            <button className="csend" onClick={send} disabled={busy || !draft.trim() || !cwd.trim()} aria-label="Send">
+            <span className="muted">📎 Tip: type @ to tag an agent, or attach a file</span>
+            <button className="csend" onClick={send} disabled={sendDisabled} aria-label="Send">
               ↑
             </button>
           </div>
@@ -269,7 +415,7 @@ export function ChatView(): React.JSX.Element {
           </div>
 
           {agents.length === 0 ? (
-            <p className="empty">No agents yet — send a message and the Lead spins up the team.</p>
+            <p className="empty">{openTeam ? "No agents on this team." : "No agents yet — send a message and the Lead spins up the team."}</p>
           ) : (
             agents.map((a) => (
               <div className="crail-agent" key={a.handle}>
@@ -310,6 +456,17 @@ const ICON: Record<LoopEvent["kind"], string> = {
   goal_check: "🎯",
   report: "🏁",
 };
+
+/** A bus channel message → a stream bubble. No fromTokenId ⇒ a human (you). */
+function channelToMsg(cm: ChannelMessage): Msg {
+  const human = !cm.fromTokenId;
+  return {
+    id: cm.seq,
+    who: human ? "you" : "agent",
+    handle: human ? "You" : cm.from,
+    text: cm.body?.text ?? "(structured frame)",
+  };
+}
 
 function renderEvent(e: LoopEvent): string {
   switch (e.kind) {
