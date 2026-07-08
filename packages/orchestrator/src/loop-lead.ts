@@ -40,9 +40,9 @@ export type Verifier = (task: TaskRow) => Promise<{ ok: boolean; feedback?: stri
 
 /** Live run milestones (SSE payloads). `at` is an ISO timestamp. */
 export type LoopEvent =
-  | { kind: 'started'; runId: string; goal: string; at: string }
+  | { kind: 'started'; runId: string; goal: string; channelId: string; at: string }
   | { kind: 'planned'; tasks: number; at: string }
-  | { kind: 'question'; prompt: string; at: string }
+  | { kind: 'question'; prompt: string; qid: string; options: Array<{ id: string; label: string }>; at: string }
   | { kind: 'verified'; taskId: string; ok: boolean; feedback?: string; at: string }
   | { kind: 'rework'; taskId: string; round: number; feedback?: string; at: string }
   | { kind: 'goal_check'; met: boolean; missing: string[]; at: string }
@@ -115,7 +115,7 @@ export class LoopLead {
         /* a listener must never break the run */
       }
     };
-    emit({ kind: 'started', runId, goal, at: new Date().toISOString() });
+    emit({ kind: 'started', runId, goal, channelId: team.channelId, at: new Date().toISOString() });
 
     // The lead speaks on the team channel with its own identity.
     const lead = await this.joinChannel(team);
@@ -144,8 +144,10 @@ export class LoopLead {
       let plan = await this.opts.planner(goal, {});
       if (plan.clarification) {
         questionsAsked += 1;
-        emit({ kind: 'question', prompt: plan.clarification.prompt, at: new Date().toISOString() });
-        const answer = await this.ask(lead, plan.clarification);
+        const qid = 'q_' + Date.now().toString(36);
+        const options = plan.clarification.options.map((label, i) => ({ id: String(i), label }));
+        emit({ kind: 'question', prompt: plan.clarification.prompt, qid, options, at: new Date().toISOString() });
+        const answer = await this.ask(lead, plan.clarification, qid);
         plan = await this.opts.planner(goal, { answer });
         if (plan.clarification) {
           // Never nag: proceed with the first option instead of asking again.
@@ -290,8 +292,7 @@ export class LoopLead {
    * the loop protocol); resolve on the first `answer` with our qid, or fall
    * back to the first option at the deadline — a stuck run helps nobody.
    */
-  private async ask(lead: BusClient, q: { prompt: string; options: string[] }): Promise<string> {
-    const qid = 'q_' + Date.now().toString(36);
+  private async ask(lead: BusClient, q: { prompt: string; options: string[] }, qid: string): Promise<string> {
     const body: LoopBody = {
       kind: 'question',
       qid,

@@ -145,6 +145,31 @@ describe('orchestrator service', () => {
     expect(res.status).toBe(404);
   });
 
+  it('answer endpoint validates the run and payload (powers the chat questions)', async () => {
+    const base = await setup();
+    // unknown run → 404
+    const noRun = await fetch(`${base}/api/runs/nope/answer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ qid: 'q_1', optionId: '0' }),
+    });
+    expect(noRun.status).toBe(404);
+
+    // real run but no qid → 400 (validated before channel-state, so this is deterministic)
+    const started = await fetch(`${base}/api/loop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ goal: 'x', leadModel: 'local/x', workerModel: 'local/x', cwd: '/tmp' }),
+    });
+    const { runId } = (await started.json()) as { runId: string };
+    const badBody = await fetch(`${base}/api/runs/${runId}/answer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ optionId: '0' }),
+    });
+    expect(badBody.status).toBe(400);
+  }, 20_000);
+
   it('creates a standing team, lists it, and accepts loops targeting it', async () => {
     const base = await setup();
     const bad = await fetch(`${base}/api/teams`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
