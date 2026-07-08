@@ -19,7 +19,7 @@ const MIME: Record<string, string> = {
  * exists at all. SSE streams straight through the pipe. Binds 127.0.0.1 only.
  */
 /** Same-origin routes served by the AGENT PLANE's orchestrator service (:4400). */
-const ORCHESTRATOR_PREFIXES = ["/api/teams", "/api/agents", "/api/runs", "/api/loop", "/api/orchestrator"];
+const ORCHESTRATOR_PREFIXES = ["/api/teams", "/api/agents", "/api/runs", "/api/loop", "/api/orchestrator", "/api/cldz"];
 /** Bus REST routes exposed to the dashboard — READ-ONLY, bearer injected server-side. */
 const BUS_PREFIX = "/api/channels";
 

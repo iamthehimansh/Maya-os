@@ -21,7 +21,7 @@ import { createServer, type Server } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
 import { MayaDb, type AgentSpec, type LoopBody } from '@maya-ai/core';
-import { AgentBusBridge, AgentRuntime } from '@maya-ai/agent-runtime';
+import { AgentBusBridge, AgentRuntime, listCldzProfiles } from '@maya-ai/agent-runtime';
 import { BusClient } from '@maya-ai/bus-client';
 import { LlmClient } from './llm.js';
 import { makeGoalCheck, makePlanner, makeVerifier } from './judgment.js';
@@ -93,6 +93,10 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     return c.json(rows.map((t) => ({ ...t, inFlight: teams.statusSafe(t.id)?.inFlight ?? 0 })));
   });
   app.get('/api/teams/:id/tasks', (c) => c.json(db.tasks(c.req.param('id'))));
+  // cldz auth profiles available to spawn agents on (names + types ONLY, never
+  // secrets) — powers the web "run this agent on <profile>" picker.
+  app.get('/api/cldz/profiles', (c) => c.json(listCldzProfiles()));
+
   // Standing agents on a team (the persistent Lead + workers). This is the
   // contract 02's MCP `list_agents`/`spawn_agent`/`stop_agent` call.
   app.get('/api/teams/:id/agents', (c) => c.json(teams.listAgents(c.req.param('id'))));

@@ -128,7 +128,7 @@ export interface SpawnAgentInput {
   role?: "lead" | "worker";
   systemPrompt?: string;
   allowedTools?: string[]; // omitted or ["*"] = all tools (full freedom)
-  profile?: string; // cldz auth profile — run on real Claude/Codex (see api.getCldzProfiles)
+  cldzProfile?: string; // cldz auth profile — run on real Claude/Codex (see api.getCldzProfiles)
 }
 
 export interface AgentStatus {

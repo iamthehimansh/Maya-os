@@ -40,15 +40,17 @@ export type RuntimeEvent =
 export const getModels = (): Promise<CatalogEntry[]> => fetch("/api/models").then((r) => r.json());
 export const getHealth = (): Promise<Health> => fetch("/api/runtime/health").then((r) => r.json());
 
-/** A cldz auth profile (safe view — no secrets) for the "run as" agent picker. */
+/** A cldz auth profile (safe view — no secrets) for the "run as" agent picker.
+ * Served by the orchestrator (`GET /api/cldz/profiles`, 01's adapter reader). */
 export interface CldzProfile {
   name: string;
-  type: "apiKey" | "oauth" | "gateway" | "bedrock" | "vertex";
-  isDefault: boolean;
-  auth: "subscription" | "api-key" | "gateway" | "cloud-vendor";
+  type: string; // "oauth" (subscription) | "apiKey" | "gateway" | …
+  default: boolean;
 }
-export const getCldzProfiles = (): Promise<{ available: boolean; profiles: CldzProfile[] }> =>
-  fetch("/api/cldz-profiles").then((r) => r.json());
+export const getCldzProfiles = (): Promise<CldzProfile[]> =>
+  fetch("/api/cldz/profiles")
+    .then((r) => (r.ok ? (r.json() as Promise<CldzProfile[]>) : []))
+    .catch(() => []);
 
 export const loadModel = (name: string, force = false): Promise<Response> =>
   fetch(`/api/models/${encodeURIComponent(name)}/load`, {

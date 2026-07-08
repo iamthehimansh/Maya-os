@@ -19,6 +19,9 @@
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type {
   AgentAdapter,
   AgentEvent,
@@ -28,6 +31,57 @@ import type {
   AgentState,
 } from '@maya-ai/core';
 import { EventLog } from '../events.js';
+
+/**
+ * Resolve a cldz saved profile (~/.cldz/config.json) to the auth env vars Claude
+ * Code needs, so a Maya agent can run on the OWNER's real Claude auth (cloud
+ * Opus/Sonnet) instead of the local gateway — needed for hard work a small local
+ * model can't do. Reads secrets and returns them for the child ENV only; NEVER
+ * logs or returns them anywhere they'd be printed. (Same seam cldz itself uses.)
+ */
+function cldzProfileEnv(profileName?: string): Record<string, string> {
+  const home = process.env['CLDZ_HOME']?.trim() || join(homedir(), '.cldz');
+  const cfgPath = join(home, 'config.json');
+  const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as {
+    defaultProfile?: string;
+    profiles?: Record<string, { type: string; apiKey?: string; oauthToken?: string; baseUrl?: string; authToken?: string }>;
+  };
+  const name = profileName && profileName !== 'default' ? profileName : cfg.defaultProfile;
+  const p = name ? cfg.profiles?.[name] : undefined;
+  if (!p) throw new Error(`cldz profile "${name ?? '(default)'}" not found in ${cfgPath}`);
+  const env: Record<string, string> = {};
+  switch (p.type) {
+    case 'apiKey':
+      if (p.apiKey) env['ANTHROPIC_API_KEY'] = p.apiKey;
+      break;
+    case 'oauth':
+      if (p.oauthToken) env['CLAUDE_CODE_OAUTH_TOKEN'] = p.oauthToken;
+      break;
+    case 'gateway':
+      if (p.baseUrl) env['ANTHROPIC_BASE_URL'] = p.baseUrl;
+      if (p.authToken) env['ANTHROPIC_AUTH_TOKEN'] = p.authToken;
+      break;
+    default:
+      throw new Error(`cldz profile type "${p.type}" not yet supported by the adapter`);
+  }
+  if (Object.keys(env).length === 0) throw new Error(`cldz profile "${name}" has no usable credential`);
+  return env;
+}
+
+/** List cldz profile NAMES + types (never secrets) so the web can offer a
+ * profile picker for a spawned agent. Empty if there's no cldz config. */
+export function listCldzProfiles(): Array<{ name: string; type: string; default: boolean }> {
+  try {
+    const home = process.env['CLDZ_HOME']?.trim() || join(homedir(), '.cldz');
+    const cfg = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')) as {
+      defaultProfile?: string;
+      profiles?: Record<string, { type: string }>;
+    };
+    return Object.entries(cfg.profiles ?? {}).map(([name, p]) => ({ name, type: p.type, default: name === cfg.defaultProfile }));
+  } catch {
+    return [];
+  }
+}
 
 export interface ClaudeCodeAdapterOptions {
   /** Maya gateway base (Anthropic-compatible), e.g. "http://127.0.0.1:4100". */
@@ -115,12 +169,22 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       if (/^CLAUDE_CODE_/.test(k) || k === 'CLAUDECODE' || k === 'AI_AGENT' || k === 'CLAUDE_EFFORT') continue;
       env[k] = v;
     }
-    Object.assign(env, spec.env, {
-      ANTHROPIC_BASE_URL: this.opts.gatewayBaseUrl,
-      // Any non-empty value satisfies the CLI; the gateway ignores it locally.
-      ANTHROPIC_API_KEY: spec.env?.['ANTHROPIC_API_KEY'] ?? 'maya-gateway',
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    });
+    // Auth (set AFTER the strip loop so a profile's CLAUDE_CODE_OAUTH_TOKEN
+    // survives): a cldz saved profile → the OWNER's real Claude (cloud
+    // Opus/Sonnet for work a local model can't do), else Maya's local gateway.
+    const cldzProfile = spec.options?.['cldzProfile'];
+    if (cldzProfile !== undefined && cldzProfile !== false) {
+      Object.assign(env, spec.env, cldzProfileEnv(typeof cldzProfile === 'string' ? cldzProfile : undefined), {
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      });
+    } else {
+      Object.assign(env, spec.env, {
+        ANTHROPIC_BASE_URL: this.opts.gatewayBaseUrl,
+        // Any non-empty value satisfies the CLI; the gateway ignores it locally.
+        ANTHROPIC_API_KEY: spec.env?.['ANTHROPIC_API_KEY'] ?? 'maya-gateway',
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      });
+    }
     // spec.bus wiring note: the bus token must already be present in env
     // under spec.bus.tokenEnv (minted by the orchestrator) — this adapter
     // never mints or logs credentials. Auto-join lands with the loop slice.

@@ -55,9 +55,7 @@ export function SoloView(): React.JSX.Element {
       const w = m.find((x) => x.capabilities?.toolCalling) ?? m.find((x) => x.kind === "local-gguf");
       setModel((prev) => prev || w?.id || "");
     });
-    void getCldzProfiles()
-      .then((p) => setProfiles(p.available ? p.profiles : []))
-      .catch(() => {});
+    void getCldzProfiles().then(setProfiles).catch(() => {});
   }, []);
 
   const cloud = runAs !== "";
@@ -99,7 +97,7 @@ export function SoloView(): React.JSX.Element {
         type,
         model: engineModel,
         cwd: cwd.trim(),
-        ...(cloud ? { profile: runAs } : {}),
+        ...(cloud ? { cldzProfile: runAs } : {}),
         // Essential tools by default (small request, ~fast). "All tools" is the
         // opt-in freedom toggle — heavier request, wants a bigger context.
         allowedTools: allTools ? ["*"] : ["Read", "Write", "Edit", "Bash"],
@@ -168,8 +166,8 @@ export function SoloView(): React.JSX.Element {
                   <option value="">Local model (gateway)</option>
                   {profiles.map((p) => (
                     <option key={p.name} value={p.name}>
-                      {p.name} · {p.auth}
-                      {p.isDefault ? " (default)" : ""}
+                      {p.name} · {p.type === "oauth" ? "subscription" : p.type}
+                      {p.default ? " (default)" : ""}
                     </option>
                   ))}
                 </select>
