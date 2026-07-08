@@ -115,3 +115,8 @@ button.act:disabled { opacity: 0.5; cursor: default; }
 .act.primary:disabled { opacity: 0.45; }
 .save-note { background: var(--surface-1); border: 1px solid var(--status-good); color: var(--text-primary); border-radius: 8px; padding: 8px 14px; margin: 12px 0; font-size: 13px; }
 .models input.ctx-edit { width: 84px; padding: 4px 6px; border-radius: 5px; border: 1px solid var(--border); background: var(--surface-0); color: var(--text-primary); font-size: 12px; }
+.health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.health-item { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.health-item .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.health-label { font-weight: 600; }
+.health-detail { color: var(--text-secondary); font-variant-numeric: tabular-nums; }

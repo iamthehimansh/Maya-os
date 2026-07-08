@@ -1,5 +1,5 @@
 import type { ModelCatalogEntry, ModelId, ProviderConfig, RuntimeEvent } from "@maya-ai/core";
-import { QUANT_QUALITY, type RuntimeManager, availableRam, pullModel, scanModels, writeModelMeta } from "@maya-ai/model-runtime";
+import { QUANT_QUALITY, type RuntimeManager, availableRam, detectLlamaCpp, pullModel, scanModels, writeModelMeta } from "@maya-ai/model-runtime";
 import { type PlatformConfig, defaultConfig, loadConfig, saveConfig } from "@maya-ai/core";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
@@ -254,6 +254,23 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
   app.post("/api/models/:name/unload", async (c) => {
     await deps.manager.unload(`local/${c.req.param("name")}` as ModelId);
     return c.json({ ok: true });
+  });
+
+  // ── System health (maya doctor, in the browser) ─────────────────────────
+  app.get("/api/system", async (c) => {
+    const cfg = loadConfig();
+    const [ram, llama] = await Promise.all([availableRam(), detectLlamaCpp()]);
+    const sidecarPort = deps.anthropicSidecarPort?.();
+    return c.json({
+      node: process.version,
+      platform: process.platform,
+      llamaCpp: { installed: llama.installed, version: llama.version ?? null, path: llama.binPath ?? null, hint: llama.installHint ?? null },
+      switchyard: { running: Boolean(sidecarPort), port: sidecarPort ?? null },
+      ram: { availableBytes: ram.availableBytes, totalBytes: ram.totalBytes, guardrailFloorBytes: cfg.guardrails.minFreeRamBytes },
+      models: { installed: scanModels(deps.modelsDir).length, dir: deps.modelsDir },
+      ports: { gateway: cfg.gateway.port, dashboard: cfg.dashboard.port, bus: cfg.bus.port, orchestrator: cfg.orchestrator.port },
+      liveInstances: deps.manager.instances().length,
+    });
   });
 
   // ── Config (edit ALL platform settings from the web) ─────────────────────

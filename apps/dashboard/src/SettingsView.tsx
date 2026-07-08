@@ -28,6 +28,47 @@ interface WebConfig {
 }
 
 const GIB = 1024 ** 3;
+const gb = (n: number): string => `${(n / GIB).toFixed(1)} GB`;
+
+interface SystemInfo {
+  node: string;
+  llamaCpp: { installed: boolean; version: string | null; hint: string | null };
+  switchyard: { running: boolean; port: number | null };
+  ram: { availableBytes: number; totalBytes: number; guardrailFloorBytes: number };
+  models: { installed: number; dir: string };
+  liveInstances: number;
+}
+
+function HealthPanel(): React.JSX.Element {
+  const [sys, setSys] = useState<SystemInfo | null>(null);
+  useEffect(() => {
+    const load = (): void => void fetch("/api/system").then((r) => r.json()).then(setSys).catch(() => setSys(null));
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
+  if (!sys) return <section className="panel"><h2>System</h2><div className="empty">Loading…</div></section>;
+  const item = (ok: boolean, label: string, detail: string): React.JSX.Element => (
+    <div className="health-item">
+      <span className="dot" style={{ background: ok ? "var(--status-good)" : "var(--status-critical)" }} />
+      <span className="health-label">{label}</span>
+      <span className="health-detail">{detail}</span>
+    </div>
+  );
+  return (
+    <section className="panel">
+      <h2>System health <span className="hint">— maya doctor, live</span></h2>
+      <div className="health-grid">
+        {item(true, "Node", sys.node)}
+        {item(sys.llamaCpp.installed, "llama.cpp", sys.llamaCpp.installed ? (sys.llamaCpp.version ?? "installed") : "not installed")}
+        {item(sys.switchyard.running, "Switchyard", sys.switchyard.running ? `:${sys.switchyard.port}` : "off")}
+        {item(sys.ram.availableBytes > sys.ram.guardrailFloorBytes, "RAM", `${gb(sys.ram.availableBytes)} free of ${gb(sys.ram.totalBytes)}`)}
+        {item(true, "Models", `${sys.models.installed} installed`)}
+        {item(true, "Instances", `${sys.liveInstances} live`)}
+      </div>
+    </section>
+  );
+}
 
 export function SettingsView(): React.JSX.Element {
   const [cfg, setCfg] = useState<WebConfig | null>(null);
@@ -82,6 +123,7 @@ export function SettingsView(): React.JSX.Element {
 
   return (
     <>
+      <HealthPanel />
       {error && <div className="error-banner" role="alert">{error}</div>}
       {note && <div className="save-note">{note}</div>}
 
