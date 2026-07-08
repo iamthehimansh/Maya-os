@@ -355,7 +355,6 @@ export class TeamManager {
           ...(spec.allowedTools !== undefined ? { allowedTools: spec.allowedTools } : {}),
           ...(systemPrompt ? { appendSystemPrompt: systemPrompt } : {}),
           ...(spec.cldzProfile !== undefined ? { cldzProfile: spec.cldzProfile } : {}),
-          ...(spec.pty ? { pty: true } : {}), // interactive PTY (real Claude TUI, watchable) vs headless
         },
       };
       const agentHandle = await this.opts.runtime.spawn(spawnSpec);

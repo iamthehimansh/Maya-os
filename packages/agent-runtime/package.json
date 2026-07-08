@@ -20,9 +20,8 @@
     "test:smoke": "node test/smoke.mjs"
   },
   "dependencies": {
-    "@maya-ai/bus-client": "workspace:*",
     "@maya-ai/core": "workspace:*",
-    "node-pty": "^1.1.0"
+    "@maya-ai/bus-client": "workspace:*"
   },
   "devDependencies": {
     "@maya-ai/bus": "workspace:*",

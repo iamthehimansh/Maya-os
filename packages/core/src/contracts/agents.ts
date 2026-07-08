@@ -73,7 +73,6 @@ export type AgentEvent =
   | { kind: 'artifact'; path: string; note?: string; at: string }
   | { kind: 'tokens'; input: number; output: number; at: string }
   | { kind: 'say'; text: string; at: string } // the agent's reply for the channel (a completed turn)
-  | { kind: 'pty'; data: string; at: string } // raw terminal bytes (utf8) from an interactive-pty agent — streamed to the dashboard's live terminal panel
   | { kind: 'error'; message: string; at: string };
 
 /**

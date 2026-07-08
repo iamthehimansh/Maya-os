@@ -17,11 +17,10 @@
  * CLI against the localhost gateway; never logged.
  */
 
-import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { spawn as ptySpawn, type IPty } from 'node-pty';
 import { resolveCwd } from '../cwd.js';
 import { join } from 'node:path';
 import type {
@@ -94,11 +93,7 @@ export interface ClaudeCodeAdapterOptions {
 
 interface LiveAgent {
   handle: AgentHandle;
-  /** Headless mode: piped child running `--print --output-format stream-json`. */
-  child?: ChildProcess;
-  /** PTY mode: interactive `claude` in a real pseudo-terminal (himansh's "watch
-   * the real Claude UI"). Exactly one of child/pty is set. */
-  pty?: IPty;
+  child: ChildProcess;
   log: EventLog;
   logs: AgentLogEvent[];
   interactive: boolean;
@@ -121,31 +116,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   private bin(): string {
     return this.opts.claudeBin ?? 'claude';
-  }
-
-  private _ptyBin?: string;
-  /** Absolute path to claude — node-pty's posix_spawnp needs it (a bare "claude"
-   * doesn't PATH-resolve there like child_process does). Cached. */
-  private ptyBin(): string {
-    if (this._ptyBin) return this._ptyBin;
-    const b = this.bin();
-    if (b.includes('/')) return (this._ptyBin = b);
-    try {
-      this._ptyBin = execFileSync('which', [b], { encoding: 'utf8' }).trim() || b;
-    } catch {
-      this._ptyBin = b;
-    }
-    return this._ptyBin;
-  }
-
-  /** Args for INTERACTIVE claude in a pty — the real TUI, NOT headless
-   * `--print`/stream-json (that would show JSON, not a terminal). */
-  private buildPtyArgs(spec: AgentSpawnSpec): string[] {
-    const args = ['--model', spec.model];
-    if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--dangerously-skip-permissions');
-    const sp = spec.options?.['appendSystemPrompt'];
-    if (typeof sp === 'string' && sp) args.push('--append-system-prompt', sp);
-    return args;
   }
 
   async detect(): Promise<{ installed: boolean; version?: string; installHint?: string }> {
@@ -231,14 +201,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // never mints or logs credentials. Auto-join lands with the loop slice.
 
     const cwd = resolveCwd(spec.cwd); // expand ~ + ensure the dir exists (else spawn ENOENTs)
-
-    // PTY mode (opt-in via options.pty): run the REAL interactive claude in a
-    // pseudo-terminal so the dashboard can stream its actual TUI. Distinct from
-    // the headless stream-json path below (which stays the default).
-    if (interactive && spec.options?.['pty'] === true) {
-      return this.spawnPty(id, spec, cwd, env);
-    }
-
     const child = spawn(this.bin(), this.buildArgs(spec), {
       cwd,
       env: env as NodeJS.ProcessEnv,
@@ -296,72 +258,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       }
       live.log.close();
     });
-
-    this.setState(live, 'running');
-    return live.handle;
-  }
-
-  /** Spawn interactive claude in a real PTY and stream its raw terminal bytes as
-   * `pty` events (the dashboard renders them in xterm). Messages are delivered by
-   * TYPING into the pty (send()); chat output flows via the agent's outbox file. */
-  private spawnPty(
-    id: string,
-    spec: AgentSpawnSpec,
-    cwd: string | undefined,
-    env: Record<string, string | undefined>,
-  ): AgentHandle {
-    const p = ptySpawn(this.ptyBin(), this.buildPtyArgs(spec), {
-      name: 'xterm-256color',
-      cols: 120,
-      rows: 34,
-      cwd: cwd ?? spec.cwd,
-      env: env as Record<string, string>,
-    });
-    const handle: AgentHandle = {
-      id,
-      adapter: this.id,
-      state: 'spawning',
-      model: spec.model,
-      cwd: cwd ?? spec.cwd,
-      ...(p.pid !== undefined ? { pid: p.pid } : {}),
-      spawnedAt: new Date().toISOString(),
-    };
-    const live: LiveAgent = { handle, pty: p, log: new EventLog(), logs: [], interactive: true, stdoutBuf: '', outTail: '' };
-    this.agents.set(id, live);
-
-    const killPty = (): void => {
-      try {
-        p.kill();
-      } catch {
-        /* already gone */
-      }
-    };
-    process.once('exit', killPty);
-    p.onData((data: string) => {
-      live.outTail = (live.outTail + data).slice(-2000);
-      this.pushEvent(live, { kind: 'pty', data, at: now() });
-    });
-    p.onExit(({ exitCode }: { exitCode: number }) => {
-      process.removeListener('exit', killPty);
-      if (!TERMINAL.has(live.handle.state)) {
-        live.handle = { ...live.handle, exitCode };
-        if (exitCode !== 0) {
-          const tail = live.outTail.trim().slice(-400);
-          this.pushEvent(live, { kind: 'error', message: `agent pty exited (code ${exitCode})${tail ? ': ' + tail : ''}`, at: now() });
-        }
-        this.setState(live, exitCode === 0 ? 'exited' : 'failed');
-      }
-      live.log.close();
-    });
-    // Dismiss the one-time folder-trust prompt if it shows (Enter accepts the
-    // default "Yes, I trust"; a no-op empty submit otherwise). Trust then persists.
-    setTimeout(() => {
-      try {
-        p.write('\r');
-      } catch {
-        /* gone */
-      }
-    }, 2500);
 
     this.setState(live, 'running');
     return live.handle;
@@ -453,16 +349,14 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (live.handle.state !== 'running' && live.handle.state !== 'waiting_input') {
       throw new Error(`cannot pause from state ${live.handle.state}`);
     }
-    if (live.pty) process.kill(live.pty.pid, 'SIGSTOP');
-    else live.child?.kill('SIGSTOP');
+    live.child.kill('SIGSTOP');
     this.setState(live, 'paused');
   }
 
   async resume(id: string): Promise<void> {
     const live = this.mustGet(id);
     if (live.handle.state !== 'paused') throw new Error(`cannot resume from state ${live.handle.state}`);
-    if (live.pty) process.kill(live.pty.pid, 'SIGCONT');
-    else live.child?.kill('SIGCONT');
+    live.child.kill('SIGCONT');
     this.setState(live, 'running');
   }
 
@@ -470,27 +364,17 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const live = this.mustGet(id);
     if (TERMINAL.has(live.handle.state)) return;
     this.setState(live, 'killed');
-    if (live.pty) {
-      try {
-        live.pty.kill();
-      } catch {
-        /* already gone */
-      }
-      return;
-    }
-    const child = live.child;
-    if (!child) return;
-    child.kill('SIGTERM');
+    live.child.kill('SIGTERM');
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         try {
-          child.kill('SIGKILL');
+          live.child.kill('SIGKILL');
         } catch {
           /* gone */
         }
         resolve();
       }, graceMs);
-      child.once('exit', () => {
+      live.child.once('exit', () => {
         clearTimeout(timer);
         resolve();
       });
@@ -501,26 +385,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const live = this.mustGet(id);
     if (!live.interactive) throw new Error('one-shot agent (spawned with a prompt) cannot receive input');
     if (TERMINAL.has(live.handle.state)) throw new Error(`agent is ${live.handle.state}`);
-    if (live.pty) {
-      // Type into the TUI, then submit with Enter a beat later — the input box
-      // needs the text to register before the newline submits it. Flatten
-      // newlines to spaces so a multi-line message doesn't submit early.
-      live.pty.write(text.replace(/\r?\n/g, ' '));
-      const p = live.pty;
-      setTimeout(() => {
-        try {
-          p.write('\r');
-        } catch {
-          /* gone */
-        }
-      }, 400);
-    } else {
-      const turn = {
-        type: 'user',
-        message: { role: 'user', content: [{ type: 'text', text }] },
-      };
-      live.child?.stdin?.write(JSON.stringify(turn) + '\n');
-    }
+    const turn = {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text }] },
+    };
+    live.child.stdin?.write(JSON.stringify(turn) + '\n');
     if (live.handle.state === 'waiting_input') this.setState(live, 'running');
   }
 
