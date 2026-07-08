@@ -24,6 +24,7 @@ import type {
   AgentState,
 } from '@maya-ai/core';
 import { EventLog } from '../events.js';
+import { resolveCwd } from '../cwd.js';
 
 export interface CodexAdapterOptions {
   /** Maya gateway base, e.g. "http://127.0.0.1:4100" ("/v1" is appended). */
@@ -112,8 +113,9 @@ export class CodexAdapter implements AgentAdapter {
       MAYA_API_KEY: spec.env?.['MAYA_API_KEY'] ?? 'maya-gateway',
     });
 
+    const cwd = resolveCwd(spec.cwd); // expand ~ + ensure the dir exists (else spawn ENOENTs)
     const child = spawn(this.bin(), this.buildArgs(spec), {
-      cwd: spec.cwd,
+      cwd,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -123,7 +125,7 @@ export class CodexAdapter implements AgentAdapter {
       adapter: this.id,
       state: 'spawning',
       model: spec.model,
-      cwd: spec.cwd,
+      cwd: cwd ?? spec.cwd,
       ...(child.pid !== undefined ? { pid: child.pid } : {}),
       spawnedAt: new Date().toISOString(),
     };

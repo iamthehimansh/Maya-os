@@ -27,6 +27,7 @@ import type {
   AgentState,
 } from '@maya-ai/core';
 import { EventLog } from '../events.js';
+import { resolveCwd } from '../cwd.js';
 
 export interface OpenCodeAdapterOptions {
   /** Maya gateway base, e.g. "http://127.0.0.1:4100" ("/v1" appended). */
@@ -118,14 +119,15 @@ export class OpenCodeAdapter implements AgentAdapter {
     }
     Object.assign(env, spec.env, { OPENCODE_CONFIG: spec.env?.['OPENCODE_CONFIG'] ?? this.writeGatewayConfig() });
 
-    const child = spawn(this.bin(), this.buildArgs(spec), { cwd: spec.cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const cwd = resolveCwd(spec.cwd); // expand ~ + ensure the dir exists (else spawn ENOENTs)
+    const child = spawn(this.bin(), this.buildArgs(spec), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
 
     const handle: AgentHandle = {
       id,
       adapter: this.id,
       state: 'spawning',
       model: spec.model,
-      cwd: spec.cwd,
+      cwd: cwd ?? spec.cwd,
       ...(child.pid !== undefined ? { pid: child.pid } : {}),
       spawnedAt: new Date().toISOString(),
     };
