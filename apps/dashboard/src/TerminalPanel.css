@@ -36,6 +36,13 @@
 .term-title { font-weight: 600; }
 .term-sub { color: #6b7688; font-weight: 400; margin-left: 4px; }
 
+.term-tokens {
+  margin-left: auto;
+  font-size: 11px;
+  color: #6b7688;
+  font-variant-numeric: tabular-nums;
+}
+
 .term-status {
   margin-left: auto;
   font-size: 11px;
