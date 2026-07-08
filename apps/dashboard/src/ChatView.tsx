@@ -1,32 +1,48 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getModels, type CatalogEntry } from "./api";
-import { answerRun, startLoop, streamRun, type LoopEvent } from "./orchestratorApi";
+import { answerRun, getTeamAgents, startLoop, streamRun, type LoopEvent, type TeamAgent } from "./orchestratorApi";
 
 /**
- * Chat — Maya's front door. You talk to the Loop Agent in plain language; it
- * plans, spawns worker agents, streams its progress back as chat, and when it
- * hits a genuinely ambiguous fork it asks YOU a tap-able question and waits.
- * Each of your messages is a goal the lead runs to completion (or an honest
- * "partial"). Built on the same loop + SSE as the Run tab, presented as a
- * conversation. (Layout is intentionally simple pending the reference design.)
+ * Chat — Maya's front door, in the team-channel layout: a center message stream,
+ * a right rail of the agents (Lead + workers) with their models/state + who's
+ * online, and a composer. You message the team; the Loop Agent plans, spawns
+ * real Claude Code workers, and streams the work back as a group conversation,
+ * asking you tap-able questions when it's stuck.
+ *
+ * This is the visible container for the persistent multi-agent team: today the
+ * stream is loop-driven (each message runs the loop); the right rail already
+ * shows the live team, and the persistent bus agents + @wake land underneath it.
  */
 
-type Bubble =
-  | { who: "you"; text: string }
-  | { who: "lead"; kind: LoopEvent["kind"]; text: string; runId: string; event: LoopEvent };
+interface Msg {
+  id: number;
+  who: "you" | "agent" | "system";
+  handle: string;
+  text: string;
+  kind?: LoopEvent["kind"];
+  runId?: string;
+  event?: LoopEvent;
+}
+
+const LEAD = "@lead";
 
 export function ChatView(): React.JSX.Element {
   const [models, setModels] = useState<CatalogEntry[]>([]);
   const [lead, setLead] = useState("");
   const [worker, setWorker] = useState("");
   const [cwd, setCwd] = useState("~/maya-demo");
-  const [showConfig, setShowConfig] = useState(false);
+  const [showSetup, setShowSetup] = useState(false);
   const [draft, setDraft] = useState("");
-  const [bubbles, setBubbles] = useState<Bubble[]>([]);
+  const [msgs, setMsgs] = useState<Msg[]>([]);
+  const [agents, setAgents] = useState<TeamAgent[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<string>("All");
+  const [showRail, setShowRail] = useState(true);
+  const nextId = useRef(1);
   const unsub = useRef<() => void>(() => {});
-  const scroller = useRef<HTMLDivElement>(null);
+  const agentPoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stream = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void getModels().then((m) => {
@@ -36,15 +52,43 @@ export function ChatView(): React.JSX.Element {
       setLead((p) => p || caller?.id || "");
       setWorker((p) => p || caller?.id || "");
     });
-    return () => unsub.current();
+    return () => {
+      unsub.current();
+      if (agentPoll.current) clearInterval(agentPoll.current);
+    };
   }, []);
 
-  // Keep the newest message in view.
   useEffect(() => {
-    scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
-  }, [bubbles]);
+    stream.current?.scrollTo({ top: stream.current.scrollHeight, behavior: "smooth" });
+  }, [msgs]);
 
-  const workers = useMemo(() => models.filter((m) => m.capabilities?.toolCalling !== false), [models]);
+  const workerOptions = useMemo(() => models.filter((m) => m.capabilities?.toolCalling !== false), [models]);
+
+  // Distinct handles seen in the stream drive the filter chips (like @001/@002).
+  const handles = useMemo(() => {
+    const set = new Set<string>();
+    for (const m of msgs) if (m.who === "agent") set.add(m.handle);
+    return [...set];
+  }, [msgs]);
+
+  const shown = msgs.filter((m) => {
+    if (filter === "All") return true;
+    if (filter === "@Me") return m.who === "you";
+    return m.handle === filter;
+  });
+
+  const online = 1 + agents.filter((a) => a.state === "running" || a.state === "working").length;
+
+  function push(m: Omit<Msg, "id">): void {
+    setMsgs((prev) => [...prev, { ...m, id: nextId.current++ }]);
+  }
+
+  function watchAgents(teamId: string): void {
+    const tick = (): void => void getTeamAgents(teamId).then(setAgents).catch(() => {});
+    void tick();
+    if (agentPoll.current) clearInterval(agentPoll.current);
+    agentPoll.current = setInterval(tick, 3000);
+  }
 
   function send(): void {
     const text = draft.trim();
@@ -52,12 +96,16 @@ export function ChatView(): React.JSX.Element {
     setDraft("");
     setError(null);
     setBusy(true);
-    setBubbles((b) => [...b, { who: "you", text }]);
+    push({ who: "you", handle: "You", text });
     unsub.current();
     void startLoop({ goal: text, cwd: cwd.trim(), leadModel: lead, workerModel: worker, allowedTools: ["Write", "Edit"] })
       .then(({ runId }) => {
         unsub.current = streamRun(runId, (e) => {
-          setBubbles((b) => [...b, { who: "lead", kind: e.kind, text: renderEvent(e), runId, event: e }]);
+          if (e.kind === "started" && e.channelId) {
+            const teamId = e.channelId.replace(/^maya\/team\//, "");
+            watchAgents(teamId);
+          }
+          push({ who: "agent", handle: LEAD, text: renderEvent(e), kind: e.kind, runId, event: e });
           if (e.kind === "report") setBusy(false);
         });
       })
@@ -67,114 +115,187 @@ export function ChatView(): React.JSX.Element {
       });
   }
 
-  function answer(runId: string, qid: string | undefined, optionId: string, label: string): void {
-    // Optimistically show the owner's choice, then route it to the waiting loop.
-    setBubbles((b) => [...b, { who: "you", text: label }]);
+  function answer(runId: string | undefined, qid: string | undefined, optionId: string, label: string): void {
+    if (!runId) return;
+    push({ who: "you", handle: "You", text: label });
     void answerRun(runId, { ...(qid ? { qid } : {}), optionId }).catch((e) => setError(String(e instanceof Error ? e.message : e)));
   }
 
   return (
-    <section className="chat" aria-label="Chat with the Loop Agent">
-      <div className="chat-head">
-        <div>
-          <strong>Loop Agent</strong>
-          <span className="muted"> · runs in {cwd || "(set a directory)"}</span>
-        </div>
-        <button className="disclosure" onClick={() => setShowConfig((v) => !v)}>
-          {showConfig ? "hide setup" : "setup"}
-        </button>
-      </div>
-      {showConfig && (
-        <div className="chat-config">
-          <label className="field grow">
-            <span>Directory</span>
-            <input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="~/any/dir" />
-          </label>
-          <label className="field">
-            <span>Lead</span>
-            <select value={lead} onChange={(e) => setLead(e.target.value)}>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.id}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>Worker</span>
-            <select value={worker} onChange={(e) => setWorker(e.target.value)}>
-              {workers.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.id}
-                  {m.capabilities?.toolCalling ? " ✓tools" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      )}
-
-      {error && (
-        <div className="error-banner" role="alert">
-          {error}
-        </div>
-      )}
-
-      <div className="chat-log" ref={scroller}>
-        {bubbles.length === 0 ? (
-          <div className="chat-empty">
-            <p>👋 Tell the Loop Agent what to build. It plans, spawns worker agents, verifies against the real files, and reports back — asking you if it gets stuck.</p>
-            <p className="muted">Try: "Create a file named NOTES.md containing exactly: hello from Maya"</p>
+    <section className="cchat" aria-label="Team chat">
+      <div className="cchat-main">
+        <header className="cchat-head">
+          <div className="cchat-title">
+            <span className="cchat-back">‹ Channels /</span> <strong>Maya</strong>
+            <span className="cchat-live">● LIVE</span>
+            <span className="muted">
+              · {agents.length || "no"} agent{agents.length === 1 ? "" : "s"} · {online} online
+            </span>
           </div>
-        ) : (
-          bubbles.map((b, i) =>
-            b.who === "you" ? (
-              <div className="msg you" key={i}>
-                <div className="bubble">{b.text}</div>
-              </div>
-            ) : (
-              <div className={`msg lead ${b.kind}`} key={i}>
-                <div className="bubble">
-                  <span className="bubble-icon">{ICON[b.kind]}</span>
-                  <span>{b.text}</span>
-                  {b.kind === "question" && (b.event.options?.length ?? 0) > 0 && (
-                    <div className="q-options">
-                      {b.event.options!.map((o) => (
-                        <button key={o.id} className="act" onClick={() => answer(b.runId, b.event.qid, o.id, o.label)}>
-                          {o.label}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+          <button className="cchat-railtoggle" onClick={() => setShowRail((v) => !v)} title="Toggle panel" aria-label="Toggle side panel">
+            ▧
+          </button>
+        </header>
+
+        <div className="cchat-filters" role="tablist">
+          {["All", "@Me", ...handles].map((f) => (
+            <button key={f} className={`cchip ${filter === f ? "active" : ""}`} onClick={() => setFilter(f)} role="tab" aria-selected={filter === f}>
+              {f}
+            </button>
+          ))}
+          <button className="cchat-setup disclosure" onClick={() => setShowSetup((v) => !v)}>
+            {showSetup ? "hide setup" : "setup"}
+          </button>
+        </div>
+
+        {showSetup && (
+          <div className="cchat-setup-row">
+            <label className="field grow">
+              <span>Directory</span>
+              <input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="~/any/dir" />
+            </label>
+            <label className="field">
+              <span>Lead</span>
+              <select value={lead} onChange={(e) => setLead(e.target.value)}>
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Worker</span>
+              <select value={worker} onChange={(e) => setWorker(e.target.value)}>
+                {workerOptions.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.id}
+                    {m.capabilities?.toolCalling ? " ✓tools" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+
+        {error && (
+          <div className="error-banner" role="alert">
+            {error}
+          </div>
+        )}
+
+        <div className="cchat-stream" ref={stream}>
+          {shown.length === 0 ? (
+            <div className="cchat-empty">
+              <p>👋 Message the team. The Loop Agent plans, spawns real Claude Code workers, verifies against the real files, and reports back — asking you if it gets stuck.</p>
+              <p className="muted">Try: "Create a file named NOTES.md containing exactly: hello from Maya"</p>
+            </div>
+          ) : (
+            shown.map((m) =>
+              m.who === "you" ? (
+                <div className="cmsg you" key={m.id}>
+                  <div className="cmsg-body">
+                    <span className="cmsg-head">
+                      <span className="cavatar you">You</span>
+                    </span>
+                    <div className="cmsg-text">{m.text}</div>
+                  </div>
                 </div>
+              ) : (
+                <div className={`cmsg agent ${m.kind ?? ""}`} key={m.id}>
+                  <span className={`cavatar h-${hashColor(m.handle)}`}>{initials(m.handle)}</span>
+                  <div className="cmsg-body">
+                    <span className="cmsg-head">
+                      <span className={`chandle h-${hashColor(m.handle)}`}>{m.handle}</span>
+                      {m.kind && <span className="ckind">{ICON[m.kind]}</span>}
+                    </span>
+                    <div className="cmsg-text">{m.text}</div>
+                    {m.kind === "question" && (m.event?.options?.length ?? 0) > 0 && (
+                      <div className="q-options">
+                        {m.event!.options!.map((o) => (
+                          <button key={o.id} className="act" onClick={() => answer(m.runId, m.event?.qid, o.id, o.label)}>
+                            {o.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ),
+            )
+          )}
+          {busy && (
+            <div className="cmsg agent">
+              <span className="cavatar h-2">✷</span>
+              <div className="cmsg-body">
+                <div className="cmsg-text typing">the team is working…</div>
               </div>
-            ),
-          )
-        )}
-        {busy && (
-          <div className="msg lead">
-            <div className="bubble typing">Loop Agent is working…</div>
+            </div>
+          )}
+        </div>
+
+        <div className="cchat-composer">
+          <textarea
+            rows={1}
+            value={draft}
+            placeholder="Message the channel…"
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+          />
+          <div className="cchat-composer-foot">
+            <span className="muted">📎 Tip: type @ to tag, or attach a file</span>
+            <button className="csend" onClick={send} disabled={busy || !draft.trim() || !cwd.trim()} aria-label="Send">
+              ↑
+            </button>
           </div>
-        )}
+        </div>
       </div>
 
-      <div className="chat-input">
-        <textarea
-          rows={1}
-          value={draft}
-          placeholder="Message the Loop Agent…"
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-          }}
-        />
-        <button className="act primary" onClick={send} disabled={busy || !draft.trim() || !cwd.trim()}>
-          Send
-        </button>
-      </div>
+      {showRail && (
+        <aside className="cchat-rail">
+          <div className="crail-tabs">
+            <span className="crail-tab active">Agents ({agents.length})</span>
+            <span className="crail-tab muted">Queue</span>
+          </div>
+
+          <div className="crail-card crail-dm">
+            <span>🔒 Private agent DMs</span>
+            <span className="muted">Let your agents DM each other on this channel.</span>
+          </div>
+
+          {agents.length === 0 ? (
+            <p className="empty">No agents yet — send a message and the Lead spins up the team.</p>
+          ) : (
+            agents.map((a) => (
+              <div className="crail-agent" key={a.id}>
+                <div className="crail-agent-head">
+                  <span className={`cavatar h-${hashColor(a.adapter)}`}>{initials(a.adapter)}</span>
+                  <strong>{a.adapter}</strong>
+                  <span className={`chip state-${a.state}`}>{a.state}</span>
+                </div>
+                <code className="crail-model">{a.model}</code>
+              </div>
+            ))
+          )}
+
+          <div className="crail-section">
+            <h4>People online (1)</h4>
+            <div className="crail-person">👤 you (owner)</div>
+          </div>
+
+          <div className="crail-section">
+            <h4>Members (1)</h4>
+            <div className="crail-person">
+              you <span className="chip owner">OWNER</span>
+            </div>
+          </div>
+        </aside>
+      )}
     </section>
   );
 }
@@ -208,4 +329,15 @@ function renderEvent(e: LoopEvent): string {
         ? `Done ✅ — ${e.summary ?? "goal met"}${e.tokensUsed ? ` (${e.tokensUsed.toLocaleString()} tokens)` : ""}.`
         : `${e.outcome === "partial" ? "Partial" : "Failed"} — ${e.summary ?? ""}. I won't claim success I can't verify.`;
   }
+}
+
+function initials(handle: string): string {
+  const s = handle.replace(/^@/, "").replace(/^claude-code$/, "cc").replace(/^opencode$/, "oc");
+  return s.slice(0, 2).toUpperCase();
+}
+// Stable 0-5 bucket per handle → a color class, so each agent keeps its color.
+function hashColor(handle: string): number {
+  let h = 0;
+  for (let i = 0; i < handle.length; i++) h = (h * 31 + handle.charCodeAt(i)) & 0xffff;
+  return h % 6;
 }

@@ -30,6 +30,10 @@ export interface AttachOptions {
   channelId: string;
   /** Bus handle label; defaults to the agent id. */
   label?: string;
+  /** Sender handles whose messages NEVER wake this agent (e.g. the team
+   * manager's system announcements — "➕ @x joined" mentions @x but must not
+   * make @x act on its own join notice). */
+  ignoreFrom?: string[];
 }
 
 interface Attachment {
@@ -86,8 +90,10 @@ export class AgentBusBridge {
     // matching @qa-2. Other channel traffic is context the agent doesn't act on.
     const tag = `@${(opts.label ?? handle.id).replace(/^@/, '')}`;
     const mentionRe = new RegExp(tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![a-z0-9-])', 'i');
+    const ignoreFrom = new Set(opts.ignoreFrom ?? []);
     client.on('message', (m) => {
       if (m.from === busHandle) return; // our own bridge traffic
+      if (ignoreFrom.has(m.from)) return; // system/manager announcements never wake us
       const maya = m.body.maya as LoopBody | undefined;
       const text = typeof m.body.text === 'string' ? m.body.text : '';
       const directed = m.to === busHandle || mentionRe.test(text);

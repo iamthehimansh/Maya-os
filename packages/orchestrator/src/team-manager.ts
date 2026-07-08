@@ -91,6 +91,8 @@ interface LiveTeam {
   team: TeamRow;
   templates: MemberTemplate[];
   manager: BusClient;
+  /** The manager's bus handle — its system announcements must not wake agents. */
+  managerHandle: string;
   /** taskId → live worker (one worker per in-flight task). */
   inFlight: Map<string, InFlightWorker>;
   /** @handle → standing agent (the persistent Lead + workers). */
@@ -133,14 +135,15 @@ export class TeamManager {
     if (!res.ok) throw new Error(`manager token mint failed: HTTP ${res.status}`);
     const minted = (await res.json()) as { token: string };
     const manager = new BusClient({ wsBase: this.opts.bus.wsBase, channelId: team.channelId, token: minted.token });
-    const joined = new Promise<void>((r) => manager.on('joined', () => r()));
+    const joined = new Promise<string>((r) => manager.on('joined', (j: { handle: string }) => r(j.handle)));
     manager.connect();
-    await joined;
+    const managerHandle = await joined;
 
     this.live.set(team.id, {
       team,
       templates: input.members,
       manager,
+      managerHandle,
       inFlight: new Map<string, InFlightWorker>(),
       persistent: new Map<string, PersistentAgent>(),
       nextTemplate: 0,
@@ -283,7 +286,11 @@ export class TeamManager {
       const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, { channelId: lt.team.channelId, label: handle });
       const entry: PersistentAgent = { spec, agentId: agentHandle.id, busHandle, adapter, state: 'live' };
       lt.persistent.set(handle, entry);
-      lt.manager.sendMessage({ body: { text: `➕ **${handle}** joined the team (${spec.type} · ${spec.model})` } });
+      // Announce WITHOUT the leading @ so the join notice doesn't @mention (and
+      // thus wake) the agent that just joined — it'd greet its own arrival.
+      // Real pokes still @mention normally. (himansh's pokes come via the manager
+      // relay too, so skipping by sender would wrongly mute them — hence this.)
+      lt.manager.sendMessage({ body: { text: `➕ **${handle.replace(/^@/, '')}** joined the team (${spec.type} · ${spec.model})` } });
       return this.statusOf(handle, entry);
     } catch (err) {
       lt.persistent.delete(handle); // release the reserved handle on failure

@@ -86,6 +86,7 @@ const get = <T>(url: string): Promise<T> => fetch(url).then((r) => r.json() as P
 export const getTeams = (liveOnly = false): Promise<Team[]> => get(`/api/teams${liveOnly ? "?live=1" : ""}`);
 export const getTeamTasks = (teamId: string): Promise<Task[]> => get(`/api/teams/${encodeURIComponent(teamId)}/tasks`);
 export const getAgents = (): Promise<TeamAgent[]> => get("/api/agents");
+export const getTeamAgents = (teamId: string): Promise<TeamAgent[]> => get(`/api/teams/${encodeURIComponent(teamId)}/agents`);
 export const getRuns = (): Promise<Run[]> => get("/api/runs");
 
 export async function startLoop(input: StartLoopInput): Promise<{ runId: string }> {
