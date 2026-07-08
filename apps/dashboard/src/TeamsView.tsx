@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { getModels, type CatalogEntry } from "./api";
-import { createTeam, drainTeam, getTeams, startLoop, type OpenTeam, type Team } from "./orchestratorApi";
+import { getModels, getCldzProfiles, type CatalogEntry, type CldzProfile } from "./api";
+import { createTeam, drainTeam, getTeams, spawnTeamAgent, startLoop, type OpenTeam, type SpawnAgentInput, type Team } from "./orchestratorApi";
+import { TeamBuilder } from "./TeamBuilder";
 
 /**
  * Teams: create a standing fleet, run loops on it, all from the web. Each team —
@@ -15,10 +16,11 @@ export function TeamsView({ onOpenChat }: { onOpenChat: (t: OpenTeam) => void })
   const [error, setError] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
 
-  // create-team form
-  const [name, setName] = useState("");
+  // defaults for the quick "▶ Run" loop; full team creation uses <TeamBuilder>.
   const [worker, setWorker] = useState("");
-  const [cwd, setCwd] = useState("~/maya-demo");
+  const [cwd] = useState("~/maya-demo");
+  const [profiles, setProfiles] = useState<CldzProfile[]>([]);
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     void getModels().then((m) => {
@@ -26,6 +28,7 @@ export function TeamsView({ onOpenChat }: { onOpenChat: (t: OpenTeam) => void })
       const w = m.find((x) => x.capabilities?.toolCalling) ?? m.find((x) => x.kind === "local-gguf");
       setWorker((prev) => prev || w?.id || "");
     });
+    void getCldzProfiles().then(setProfiles).catch(() => {});
     const tick = (): void => void getTeams().then(setTeams).catch(() => setError("Can't reach the orchestrator — is `maya serve` running?"));
     void tick();
     const t = setInterval(tick, 3000);
@@ -38,15 +41,20 @@ export function TeamsView({ onOpenChat }: { onOpenChat: (t: OpenTeam) => void })
   // Hand a team to the Chat page: live → talk to it, closed → read-only history.
   const open = (t: Team): void => onOpenChat({ id: t.id, channelId: t.channelId, name: t.name, live: t.state !== "closed" });
 
-  async function create(): Promise<void> {
-    if (!name.trim() || !worker || !cwd.trim()) return;
+  // Rich create: team + lead + N members (each fully configured), then open it.
+  async function createFullTeam(name: string, lead: SpawnAgentInput, members: SpawnAgentInput[]): Promise<void> {
+    setCreating(true);
     setError(null);
     try {
-      await createTeam({ name: name.trim(), workerModel: worker, cwd: cwd.trim(), allowedTools: ["Write", "Edit"] });
-      setName("");
+      const team = await createTeam({ name, workerModel: lead.model, cwd: lead.cwd });
+      await spawnTeamAgent(team.id, lead);
+      for (const m of members) await spawnTeamAgent(team.id, m);
       void getTeams().then(setTeams);
+      onOpenChat({ id: team.id, channelId: team.channelId, name: team.name, live: true });
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -71,30 +79,8 @@ export function TeamsView({ onOpenChat }: { onOpenChat: (t: OpenTeam) => void })
 
       <div className="panel run-form">
         <h2>Create a standing team</h2>
-        <div className="field-row">
-          <label className="field grow">
-            <span>Name</span>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="dev-fleet" />
-          </label>
-          <label className="field grow">
-            <span>Worker model</span>
-            <select value={worker} onChange={(e) => setWorker(e.target.value)}>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.id}
-                  {m.capabilities?.toolCalling ? " ✓tools" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field grow">
-            <span>Directory</span>
-            <input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="~/any/dir" />
-          </label>
-        </div>
-        <button className="act primary" onClick={() => void create()} disabled={!name.trim() || !worker}>
-          + Create team
-        </button>
+        <p className="empty">A team lead plus any number of members — each fully configured (type, model, cldz profile, directory, tools). Creates the team and opens its chat.</p>
+        <TeamBuilder models={models} profiles={profiles} busy={creating} onSubmit={createFullTeam} defaultModel={worker} />
       </div>
 
       <div className="panel">

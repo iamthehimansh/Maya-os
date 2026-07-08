@@ -1,18 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getModels, type CatalogEntry } from "./api";
+import { getModels, getCldzProfiles, type CatalogEntry, type CldzProfile } from "./api";
 import { renderMarkdown } from "./md";
+import { AgentSetupForm, newAgentDraft, toSpawnInput, draftReady, type AgentDraft } from "./AgentSetupForm";
+import { TeamBuilder } from "./TeamBuilder";
 import {
   answerRun,
+  createTeam,
   getChannelHistory,
   getTeamAgents,
   getTeams,
   sendTeamMessage,
+  spawnTeamAgent,
   startLoop,
   streamRun,
   type AgentStatus,
   type ChannelMessage,
   type LoopEvent,
   type OpenTeam,
+  type SpawnAgentInput,
   type Team,
 } from "./orchestratorApi";
 
@@ -50,9 +55,14 @@ interface ChatViewProps {
 export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): React.JSX.Element {
   const [models, setModels] = useState<CatalogEntry[]>([]);
   const [teamList, setTeamList] = useState<Team[]>([]);
+  const [profiles, setProfiles] = useState<CldzProfile[]>([]);
+  // Rich "add an agent to this team" draft (when a team is connected).
+  const [addDraft, setAddDraft] = useState<AgentDraft>(() => newAgentDraft("@member"));
+  const [creating, setCreating] = useState(false); // building a whole team
+  const [adding, setAdding] = useState(false); // spawning one agent into a team
   const [lead, setLead] = useState("");
   const [worker, setWorker] = useState("");
-  const [cwd, setCwd] = useState("~/maya-demo");
+  const [cwd] = useState("~/maya-demo"); // front-door quick-loop cwd (team-builder sets its own)
   const [showSetup, setShowSetup] = useState(false);
   const [draft, setDraft] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
@@ -66,6 +76,9 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   const unsub = useRef<() => void>(() => {});
   const agentPoll = useRef<ReturnType<typeof setInterval> | null>(null);
   const chanPoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Texts the user sent this session — so their own messages (which relay through
+  // the manager, losing the human sender identity) render as "You", not "manager".
+  const sentRef = useRef<Set<string>>(new Set());
   const stream = useRef<HTMLDivElement>(null);
 
   // Mount: model catalog (for the front-door setup) + the team list (for the switcher).
@@ -77,6 +90,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
       setLead((p) => p || caller?.id || "");
       setWorker((p) => p || caller?.id || "");
     });
+    void getCldzProfiles().then(setProfiles).catch(() => {});
     const loadTeams = (): void => void getTeams().then(setTeamList).catch(() => {});
     loadTeams();
     const t = setInterval(loadTeams, 5000);
@@ -109,7 +123,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     const tick = (): void =>
       void getChannelHistory(openTeam.channelId, 200)
         .then(({ messages }) => {
-          if (alive) setMsgs(messages.map(channelToMsg));
+          if (alive) setMsgs(messages.map((cm) => channelToMsg(cm, sentRef.current)));
         })
         .catch(() => {});
     tick();
@@ -128,7 +142,6 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     stream.current?.scrollTo({ top: stream.current.scrollHeight, behavior: "smooth" });
   }, [msgs]);
 
-  const workerOptions = useMemo(() => models.filter((m) => m.capabilities?.toolCalling !== false), [models]);
 
   // Distinct handles seen in the stream drive the filter chips (like @lead/@builder).
   const handles = useMemo(() => {
@@ -138,6 +151,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   }, [msgs]);
 
   const shown = msgs.filter((m) => {
+    if (m.who === "system") return false; // manager housekeeping — not part of the conversation
     if (filter === "All") return true;
     if (filter === "@Me") return m.who === "you";
     return m.handle === filter;
@@ -167,6 +181,40 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     if (t) onOpenChat({ id: t.id, channelId: t.channelId, name: t.name, live: t.state !== "closed" });
   }
 
+  // Rich team creation: make the team, spawn the lead + each member (full Solo-
+  // style config), then open the new team's chat.
+  async function createFullTeam(name: string, lead: SpawnAgentInput, members: SpawnAgentInput[]): Promise<void> {
+    setCreating(true);
+    setError(null);
+    try {
+      const team = await createTeam({ name, workerModel: lead.model, cwd: lead.cwd });
+      await spawnTeamAgent(team.id, lead);
+      for (const m of members) await spawnTeamAgent(team.id, m);
+      setShowSetup(false);
+      onOpenChat({ id: team.id, channelId: team.channelId, name: team.name, live: true });
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  // Add one fully-configured agent into the currently-open team's channel.
+  async function addAgent(): Promise<void> {
+    if (!openTeam || !draftReady(addDraft) || adding) return;
+    setAdding(true);
+    setError(null);
+    try {
+      await spawnTeamAgent(openTeam.id, toSpawnInput(addDraft));
+      setAddDraft(newAgentDraft("@member"));
+      setShowSetup(false);
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setAdding(false);
+    }
+  }
+
   function send(): void {
     const text = draft.trim();
     if (!text) return;
@@ -182,6 +230,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
       setSending(true);
       const mentionsSomeone = /@[a-z0-9][a-z0-9-]/i.test(text);
       const wake = mentionsSomeone ? undefined : (agents.find((a) => a.role === "lead") ?? agents[0])?.handle;
+      sentRef.current.add(text); // so the manager-relayed echo renders as "You"
       void sendTeamMessage(openTeam.id, text, wake)
         .catch((e) => setError(String(e instanceof Error ? e.message : e)))
         .finally(() => setSending(false));
@@ -283,40 +332,24 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
               {f}
             </button>
           ))}
-          {!openTeam && (
+          {(!openTeam || openTeam.live) && (
             <button className="cchat-setup disclosure" onClick={() => setShowSetup((v) => !v)}>
-              {showSetup ? "hide setup" : "setup"}
+              {showSetup ? "hide" : openTeam ? "＋ add agent" : "＋ create a team"}
             </button>
           )}
         </div>
 
         {showSetup && !openTeam && (
           <div className="cchat-setup-row">
-            <label className="field grow">
-              <span>Directory</span>
-              <input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="~/any/dir" />
-            </label>
-            <label className="field">
-              <span>Lead</span>
-              <select value={lead} onChange={(e) => setLead(e.target.value)}>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.id}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Worker</span>
-              <select value={worker} onChange={(e) => setWorker(e.target.value)}>
-                {workerOptions.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.id}
-                    {m.capabilities?.toolCalling ? " ✓tools" : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <TeamBuilder models={models} profiles={profiles} busy={creating} onSubmit={createFullTeam} defaultModel={worker || lead} />
+          </div>
+        )}
+        {showSetup && openTeam && openTeam.live && (
+          <div className="cchat-setup-row cchat-addagent">
+            <AgentSetupForm title={`Add an agent to ${openTeam.name}`} value={addDraft} onChange={setAddDraft} models={models} profiles={profiles} />
+            <button className="act primary" onClick={() => void addAgent()} disabled={!draftReady(addDraft) || adding}>
+              {adding ? "Adding…" : "Add agent to this channel"}
+            </button>
           </div>
         )}
 
@@ -463,14 +496,25 @@ const ICON: Record<LoopEvent["kind"], string> = {
   report: "🏁",
 };
 
-/** A bus channel message → a stream bubble. No fromTokenId ⇒ a human (you). */
-function channelToMsg(cm: ChannelMessage): Msg {
-  const human = !cm.fromTokenId;
+/** Manager housekeeping (join/leave/ready/stop) — Maya plumbing, not conversation. */
+const SYSTEM_LINE = /^\s*[🧭➕➖🛑]/u;
+
+/**
+ * A bus channel message → a stream bubble.
+ *  • Manager housekeeping ("➕ @x joined", "🧭 team ready") → 'system' (hidden).
+ *  • A message whose text the user just sent → "You" (it relayed through the
+ *    manager, which drops the human identity — matching on text recovers it).
+ *  • No fromTokenId also means a human sender.
+ */
+function channelToMsg(cm: ChannelMessage, sent: Set<string>): Msg {
+  const text = cm.body?.text ?? "(structured frame)";
+  const system = SYSTEM_LINE.test(text);
+  const human = !cm.fromTokenId || sent.has(text.trim());
   return {
     id: cm.seq,
-    who: human ? "you" : "agent",
-    handle: human ? "You" : cm.from,
-    text: cm.body?.text ?? "(structured frame)",
+    who: system ? "system" : human ? "you" : "agent",
+    handle: system ? "system" : human ? "You" : cm.from,
+    text,
   };
 }
 
