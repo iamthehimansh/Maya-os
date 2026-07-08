@@ -7,6 +7,9 @@ import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { resolveProvider } from "./providers.js";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export interface GatewayDeps {
   manager: RuntimeManager;
@@ -275,6 +278,38 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
       ports: { gateway: cfg.gateway.port, dashboard: cfg.dashboard.port, bus: cfg.bus.port, orchestrator: cfg.orchestrator.port },
       liveInstances: deps.manager.instances().length,
     });
+  });
+
+  // ── Cloud model list for a cldz profile (himansh: list real models via the
+  // provider's API using the profile's credential — apiKey→x-api-key, oauth→
+  // Bearer). Credential is read + used SERVER-SIDE ONLY; the response carries
+  // model ids, never the secret. Falls back to [] on any error (UI keeps a
+  // static list). Anthropic today; other providers key off profile shape later.
+  app.get("/api/cloud-models", async (c) => {
+    const profile = c.req.query("profile");
+    if (!profile) return c.json({ models: [] });
+    let cred: { type?: string; apiKey?: string; oauthToken?: string } | undefined;
+    try {
+      const cfg = JSON.parse(readFileSync(join(homedir(), ".cldz", "config.json"), "utf8")) as {
+        profiles?: Record<string, { type?: string; apiKey?: string; oauthToken?: string }>;
+      };
+      cred = cfg.profiles?.[profile];
+    } catch {
+      return c.json({ models: [] });
+    }
+    if (!cred) return c.json({ models: [] });
+    const headers: Record<string, string> = { "anthropic-version": "2023-06-01" };
+    if (cred.type === "apiKey" && cred.apiKey) headers["x-api-key"] = cred.apiKey;
+    else if (cred.type === "oauth" && cred.oauthToken) { headers["authorization"] = `Bearer ${cred.oauthToken}`; headers["anthropic-beta"] = "oauth-2025-04-20"; }
+    else return c.json({ models: [] });
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/models?limit=100", { headers });
+      if (!res.ok) return c.json({ models: [], error: `HTTP ${res.status}` });
+      const data = (await res.json()) as { data?: Array<{ id: string; display_name?: string }> };
+      return c.json({ models: (data.data ?? []).map((m) => ({ id: m.id, name: m.display_name ?? m.id })) });
+    } catch (e) {
+      return c.json({ models: [], error: e instanceof Error ? e.message : String(e) });
+    }
   });
 
   // ── Filesystem browse (read-only file explorer + dir picker) ─────────────

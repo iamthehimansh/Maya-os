@@ -1,4 +1,5 @@
-import type { CatalogEntry, CldzProfile } from "./api";
+import { useEffect, useState } from "react";
+import { getCloudModels, type CatalogEntry, type CldzProfile, type CloudModel } from "./api";
 import type { SpawnAgentInput } from "./orchestratorApi";
 import "./AgentSetupForm.css";
 
@@ -66,6 +67,31 @@ export function AgentSetupForm({ value, onChange, models, profiles, title, onRem
   const cloud = value.runAs !== "";
   const set = (patch: Partial<AgentDraft>): void => onChange({ ...value, ...patch });
 
+  // When running on a cldz profile, list the REAL models from the provider (via
+  // the credential, server-side) instead of a hardcoded opus/sonnet.
+  const [cloudModels, setCloudModels] = useState<CloudModel[]>([]);
+  useEffect(() => {
+    if (!value.runAs) {
+      setCloudModels([]);
+      return;
+    }
+    let alive = true;
+    void getCloudModels(value.runAs)
+      .then((ms) => {
+        if (!alive) return;
+        setCloudModels(ms);
+        // Pick a real model id if the current value isn't one of them (prefer opus).
+        if (ms.length > 0 && !ms.some((m) => m.id === value.cloudModel)) {
+          set({ cloudModel: (ms.find((m) => /opus/i.test(m.id)) ?? ms[0]!).id });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value.runAs]);
+
   return (
     <div className="agent-setup">
       {(title || onRemove) && (
@@ -111,8 +137,18 @@ export function AgentSetupForm({ value, onChange, models, profiles, title, onRem
           <span>Model</span>
           {cloud ? (
             <select value={value.cloudModel} onChange={(e) => set({ cloudModel: e.target.value })}>
-              <option value="opus">opus — capable</option>
-              <option value="sonnet">sonnet — faster</option>
+              {cloudModels.length > 0 ? (
+                cloudModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))
+              ) : (
+                <>
+                  <option value="opus">opus — capable</option>
+                  <option value="sonnet">sonnet — faster</option>
+                </>
+              )}
             </select>
           ) : (
             <select value={value.model} onChange={(e) => set({ model: e.target.value })}>

@@ -52,6 +52,18 @@ export const getCldzProfiles = (): Promise<CldzProfile[]> =>
     .then((r) => (r.ok ? (r.json() as Promise<CldzProfile[]>) : []))
     .catch(() => []);
 
+/** Real models available for a cldz profile, listed via the provider's models
+ * API with that profile's credential (server-side). Empty on any error. */
+export interface CloudModel {
+  id: string;
+  name: string;
+}
+export const getCloudModels = (profile: string): Promise<CloudModel[]> =>
+  fetch(`/api/cloud-models?profile=${encodeURIComponent(profile)}`)
+    .then((r) => (r.ok ? (r.json() as Promise<{ models?: CloudModel[] }>) : { models: [] }))
+    .then((d) => d.models ?? [])
+    .catch(() => []);
+
 export const loadModel = (name: string, force = false): Promise<Response> =>
   fetch(`/api/models/${encodeURIComponent(name)}/load`, {
     method: "POST",
