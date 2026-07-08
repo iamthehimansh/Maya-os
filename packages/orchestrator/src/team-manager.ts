@@ -19,6 +19,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { AgentEvent, AgentSpawnSpec, AgentSpec, AgentStatus, LoopBody, MayaDb, TaskRow, TeamRow, TeamTopology } from '@maya-ai/core';
 import { HANDLE_RE, RESERVED_LEAD_HANDLE } from '@maya-ai/core';
 import type { AgentRuntime, AgentBusBridge } from '@maya-ai/agent-runtime';
@@ -270,21 +273,34 @@ export class TeamManager {
     // Reserve the handle up-front so a concurrent spawn of the same name loses.
     lt.persistent.set(handle, { spec, agentId: '', busHandle: '', adapter, state: 'spawning' });
     try {
+      // Walkie-talkie I/O (docs/agent-io.md): the agent READS incoming from its
+      // inbox file and WRITES outgoing to its outbox file; the bridge relays both.
+      // Per-agent files, created here + passed via env + to the bridge on attach.
+      const ioDir = join(homedir(), '.maya', 'agents', `${teamId}-${handle.replace(/^@/, '')}`);
+      mkdirSync(ioDir, { recursive: true });
+      const inboxPath = join(ioDir, 'in.jsonl');
+      const outboxPath = join(ioDir, 'out.jsonl');
+      writeFileSync(inboxPath, '');
+      writeFileSync(outboxPath, '');
+      const walkieHint =
+        `You are a persistent agent on a shared team channel. INCOMING: new channel messages are appended as JSON lines to the file at ${inboxPath} — read it to see who said what. OUTGOING: to say ANYTHING on the channel, APPEND a line to the file at ${outboxPath} (plain text, or a JSON line {"text":"…","to":"@who"} to direct it) — the system posts it for you. You may append several lines over time (e.g. with sleep between them) and message on your own initiative; you don't have to wait to be asked. Use your Read/Write/Bash tools on those two absolute paths. Keep running.`;
+      const systemPrompt = [spec.systemPrompt, walkieHint].filter(Boolean).join('\n\n');
       const spawnSpec: AgentSpawnSpec = {
         adapter: spec.type as AgentSpawnSpec['adapter'],
         model: spec.model as AgentSpawnSpec['model'],
         cwd: spec.cwd,
+        env: { MAYA_AGENT_INBOX: inboxPath, MAYA_AGENT_OUTBOX: outboxPath },
         // NO `prompt` → the adapter runs INTERACTIVE: the process stays alive and
         // is driven by bus messages (the bridge feeds @mentions in, posts out).
         permissionMode: 'auto',
         options: {
           ...(spec.allowedTools !== undefined ? { allowedTools: spec.allowedTools } : {}),
-          ...(spec.systemPrompt !== undefined ? { appendSystemPrompt: spec.systemPrompt } : {}),
+          ...(systemPrompt ? { appendSystemPrompt: systemPrompt } : {}),
           ...(spec.cldzProfile !== undefined ? { cldzProfile: spec.cldzProfile } : {}),
         },
       };
       const agentHandle = await this.opts.runtime.spawn(spawnSpec);
-      const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, { channelId: lt.team.channelId, label: handle });
+      const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, { channelId: lt.team.channelId, label: handle, inboxPath, outboxPath });
       const entry: PersistentAgent = { spec, agentId: agentHandle.id, busHandle, adapter, state: 'live' };
       lt.persistent.set(handle, entry);
       // Announce WITHOUT the leading @ so the join notice doesn't @mention (and
@@ -336,9 +352,9 @@ export class TeamManager {
    * the lead's MCP `send_to` (directed to an @handle), the human chat composer,
    * and @wake — a directed message wakes the target agent via the bridge.
    */
-  postMessage(teamId: string, text: string, to?: string): void {
+  postMessage(teamId: string, text: string, to?: string, human?: boolean): void {
     const lt = this.mustLive(teamId);
-    lt.manager.sendMessage({ ...(to ? { to } : {}), body: { text } });
+    lt.manager.sendMessage({ ...(to ? { to } : {}), body: { text, ...(human ? { human: true } : {}) } });
   }
 
   /**

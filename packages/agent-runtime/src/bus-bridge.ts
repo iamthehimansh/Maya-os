@@ -14,6 +14,7 @@
  * revoked on detach. Tokens never touch argv or logs.
  */
 
+import { appendFileSync, readFileSync } from 'node:fs';
 import type { AgentAdapter, AgentHandle, LoopBody } from '@maya-ai/core';
 import { BusClient } from '@maya-ai/bus-client';
 
@@ -34,6 +35,16 @@ export interface AttachOptions {
    * manager's system announcements — "➕ @x joined" mentions @x but must not
    * make @x act on its own join notice). */
   ignoreFrom?: string[];
+  /**
+   * Walkie-talkie file I/O (himansh's proactive-agent vision — docs/agent-io.md).
+   * When set, the bridge APPENDS every incoming channel message to `inboxPath`
+   * (JSON lines, for the agent to read its history) and WATCHES `outboxPath`,
+   * posting each COMPLETE new line the agent writes to the channel on its behalf.
+   * The agent runs like the walkie-talkie client: read inbox, write outbox,
+   * message on its own initiative (e.g. 5 lines with sleeps between).
+   */
+  inboxPath?: string;
+  outboxPath?: string;
 }
 
 interface Attachment {
@@ -96,6 +107,15 @@ export class AgentBusBridge {
       if (ignoreFrom.has(m.from)) return; // system/manager announcements never wake us
       const maya = m.body.maya as LoopBody | undefined;
       const text = typeof m.body.text === 'string' ? m.body.text : '';
+      // Walkie-talkie inbox: record every incoming message so the agent can read
+      // its channel history from the file. (It's still woken via stdin below.)
+      if (opts.inboxPath && text) {
+        try {
+          appendFileSync(opts.inboxPath, JSON.stringify({ seq: m.seq, from: m.from, ts: m.ts, text, ...(m.to ? { to: m.to } : {}) }) + '\n');
+        } catch {
+          /* inbox is best-effort */
+        }
+      }
       const directed = m.to === busHandle || mentionRe.test(text);
       if (maya && maya.kind === 'answer' && directed) {
         const answerText = maya.text ?? (maya.optionId !== undefined ? `answer: ${maya.optionId}` : '');
@@ -142,9 +162,11 @@ export class AgentBusBridge {
             break;
           case 'say':
             // The agent completed a turn — post its reply to the channel. This
-            // is what makes a spawned agent actually converse (closes the loop:
-            // @mention → send → turn → result → say → channel).
-            if (ev.text.trim()) client.sendMessage({ body: { text: ev.text } });
+            // is what makes a non-outbox agent converse (@mention → send → turn →
+            // result → say → channel). In outbox mode the OUTBOX file is the
+            // agent's channel, so suppress `say` there or every reply double-posts
+            // (once via say, once via the line it wrote to its outbox).
+            if (!opts.outboxPath && ev.text.trim()) client.sendMessage({ body: { text: ev.text } });
             break;
           default:
             break; // logs/tokens stay local — the channel is for signal, not noise
@@ -152,12 +174,51 @@ export class AgentBusBridge {
       }
     })();
 
+    // Walkie-talkie outbox: watch the file the agent writes to, and post each
+    // COMPLETE new line to the channel on its behalf. Offset-tracked (chars) and
+    // only lines up to the last '\n' are posted — a partial line still being
+    // written waits. Plain text → broadcast; a JSON line {text,to} → directed.
+    let outboxTimer: ReturnType<typeof setInterval> | undefined;
+    if (opts.outboxPath) {
+      const outbox = opts.outboxPath;
+      let offset = 0;
+      outboxTimer = setInterval(() => {
+        let content: string;
+        try {
+          content = readFileSync(outbox, 'utf8');
+        } catch {
+          return; // not there yet / transient read error
+        }
+        if (content.length <= offset) return;
+        const chunk = content.slice(offset);
+        const lastNl = chunk.lastIndexOf('\n');
+        if (lastNl === -1) return; // no complete line yet — a write may be in progress
+        for (const raw of chunk.slice(0, lastNl).split('\n')) {
+          const line = raw.trim();
+          if (!line) continue;
+          let out: { text: string; to?: string } = { text: line };
+          if (line.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(line) as { text?: string; to?: string };
+              if (typeof parsed.text === 'string') out = { text: parsed.text, ...(parsed.to ? { to: parsed.to } : {}) };
+            } catch {
+              /* not JSON — treat the whole line as text */
+            }
+          }
+          if (out.text) client.sendMessage({ ...(out.to ? { to: out.to } : {}), body: { text: out.text } });
+        }
+        offset += lastNl + 1; // advance past the newline of the last posted line
+      }, 1000);
+      outboxTimer.unref?.();
+    }
+
     const attachment: Attachment = {
       client,
       tokenId: minted.id,
       channelId: opts.channelId,
       stop: () => {
         stopped = true;
+        if (outboxTimer) clearInterval(outboxTimer);
       },
     };
     this.attachments.set(handle.id, attachment);
