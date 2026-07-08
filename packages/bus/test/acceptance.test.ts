@@ -29,9 +29,27 @@ afterEach(async () => {
   }
 });
 
-async function boot(dbPath = ':memory:'): Promise<RunningBusServer> {
-  running = await startBusServer({ dbPath, port: 0 });
+async function boot(dbPath = ':memory:', port = 0): Promise<RunningBusServer> {
+  running = await startBusServer({ dbPath, port });
   return running;
+}
+
+/**
+ * Bind with bounded retries — used by the restart test, which must reuse the
+ * SAME port so its clients reconnect. A high fixed port (nothing else on the
+ * box uses 40xxx, unlike OS-ephemeral) makes collision improbable; the retry
+ * absorbs the brief TIME_WAIT after close.
+ */
+async function bootWithRetry(dbPath: string, port: number): Promise<RunningBusServer> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      running = await startBusServer({ dbPath, port });
+      return running;
+    } catch (err) {
+      if (attempt >= 30) throw err;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
 }
 
 function connect(server: RunningBusServer, token: string): BusClient {
@@ -94,8 +112,10 @@ describe('bus acceptance', () => {
 
   it('2. server restart — reconnect, queued sends flush in order, no dupes', async () => {
     const dbPath = `/tmp/maya-bus-test-${process.pid}-${Date.now()}.db`;
-    const server = await boot(dbPath);
-    const port = server.port;
+    // Fixed high port (not OS-ephemeral) so the restart can reliably reuse it
+    // without racing another process's ephemeral allocation.
+    const port = 40000 + (process.pid % 20000);
+    const server = await boot(dbPath, port);
     const { token } = mintToken(server.db, { label: 'writer' });
     const { token: readerToken } = mintToken(server.db, { label: 'reader' });
 
@@ -114,20 +134,7 @@ describe('bus acceptance', () => {
     writer.say('queued-1');
     writer.say('queued-2');
 
-    // Rebinding the SAME port can race other suites' ephemeral allocations
-    // (observed under parallel `pnpm -r test`) — bounded retries, not a
-    // server-side auto-retry, which would mask the friendly "already
-    // running (pid X)" detection.
-    running = await (async () => {
-      for (let attempt = 0; ; attempt++) {
-        try {
-          return await startBusServer({ dbPath, port });
-        } catch (err) {
-          if (attempt >= 8) throw err;
-          await new Promise((r) => setTimeout(r, 250));
-        }
-      }
-    })();
+    running = await bootWithRetry(dbPath, port);
     await until(() => seen.length === 3, 20_000);
 
     expect(seen.map((m) => m.body.text)).toEqual(['before-restart', 'queued-1', 'queued-2']);
