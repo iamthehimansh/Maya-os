@@ -98,6 +98,10 @@ interface LiveAgent {
   logs: AgentLogEvent[];
   interactive: boolean;
   stdoutBuf: string;
+  /** Rolling tail of raw stdout+stderr — surfaced on an unexpected exit so a
+   * silent spawn failure (bad model, over-quota/expired cldz token, missing
+   * binary) becomes a visible channel message instead of a mystery. */
+  outTail: string;
 }
 
 const TERMINAL: ReadonlySet<AgentState> = new Set(['exited', 'killed', 'failed']);
@@ -206,7 +210,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       ...(child.pid !== undefined ? { pid: child.pid } : {}),
       spawnedAt: new Date().toISOString(),
     };
-    const live: LiveAgent = { handle, child, log: new EventLog(), logs: [], interactive, stdoutBuf: '' };
+    const live: LiveAgent = { handle, child, log: new EventLog(), logs: [], interactive, stdoutBuf: '', outTail: '' };
     this.agents.set(id, live);
 
     // Orphan guard (02's pattern): our exit takes the child with us; the
@@ -222,7 +226,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     child.once('exit', () => process.removeListener('exit', killChild));
 
     child.stdout?.on('data', (buf: Buffer) => this.onStdout(live, buf));
-    child.stderr?.on('data', (buf: Buffer) => this.pushLog(live, 'stderr', buf.toString()));
+    child.stderr?.on('data', (buf: Buffer) => {
+      const s = buf.toString();
+      live.outTail = (live.outTail + s).slice(-2000);
+      this.pushLog(live, 'stderr', s);
+    });
     child.once('error', (err) => {
       this.setState(live, 'failed');
       this.pushEvent(live, { kind: 'error', message: String(err), at: now() });
@@ -231,6 +239,15 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     child.once('exit', (code) => {
       if (!TERMINAL.has(live.handle.state)) {
         live.handle = { ...live.handle, ...(code !== null ? { exitCode: code } : {}) };
+        // An unexpected non-zero exit (a pause/kill would already have set a
+        // terminal state) is a spawn/runtime failure — surface its output so it's
+        // not silent. The bridge posts `error` events to the channel, so e.g. a
+        // cldz over-quota "You've hit your weekly limit" now shows up immediately
+        // instead of an agent that mysteriously never does anything.
+        if (code !== 0) {
+          const tail = live.outTail.trim().slice(-400);
+          this.pushEvent(live, { kind: 'error', message: `agent process exited (code ${code})${tail ? ': ' + tail : ''}`, at: now() });
+        }
         this.setState(live, code === 0 ? 'exited' : 'failed');
       }
       live.log.close();
@@ -243,7 +260,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   // ── stream-json parsing ────────────────────────────────────────────────
 
   private onStdout(live: LiveAgent, buf: Buffer): void {
-    live.stdoutBuf += buf.toString();
+    const raw = buf.toString();
+    live.outTail = (live.outTail + raw).slice(-2000); // for exit-failure surfacing (e.g. a plain-text quota error on stdout)
+    live.stdoutBuf += raw;
     for (;;) {
       const nl = live.stdoutBuf.indexOf('\n');
       if (nl === -1) return;
