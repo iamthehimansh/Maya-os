@@ -41,6 +41,7 @@ export function ModelsView(): React.JSX.Element {
   const [pullPct, setPullPct] = useState<{ model: string; pct: number } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [events, setEvents] = useState<string[]>([]);
+  const [wontFit, setWontFit] = useState<Set<string>>(new Set());
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async () => {
@@ -87,13 +88,17 @@ export function ModelsView(): React.JSX.Element {
   const floorPct = health ? (1 - (2 * GIB) / health.ramTotalBytes) * 100 : 100; // guardrail floor default 2 GiB
   const live = useMemo(() => new Map((health?.instances ?? []).map((i) => [i.model, i])), [health]);
 
-  const act = async (name: string, fn: (n: string) => Promise<Response>): Promise<void> => {
+  const act = async (name: string, fn: (n: string, force?: boolean) => Promise<Response>, force = false): Promise<void> => {
     setBusy(name);
     try {
-      const res = await fn(name);
+      const res = await fn(name, force);
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
-        setEvents((prev) => [`${new Date().toLocaleTimeString()}  ✗ ${body?.error?.message ?? `HTTP ${res.status}`}`, ...prev].slice(0, 50));
+        const msg = body?.error?.message ?? `HTTP ${res.status}`;
+        if (/cannot fit/i.test(msg)) setWontFit((s2) => new Set(s2).add(name));
+        setEvents((prev) => [`${new Date().toLocaleTimeString()}  ✗ ${msg}`, ...prev].slice(0, 50));
+      } else {
+        setWontFit((s2) => { const n = new Set(s2); n.delete(name); return n; });
       }
     } finally {
       setBusy(null);
@@ -236,6 +241,17 @@ export function ModelsView(): React.JSX.Element {
                       >
                         {busy === name ? "…" : isLive ? "Unload" : "Load"}
                       </button>
+                      {!isLive && wontFit.has(name) && (
+                        <button
+                          className="act"
+                          title="load anyway — uses SSD as RAM (slower, won't crash)"
+                          style={{ marginLeft: 6, borderColor: "var(--status-warning)" }}
+                          disabled={busy === name}
+                          onClick={() => void act(name, loadModel, true)}
+                        >
+                          ⚡ swap-load
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );

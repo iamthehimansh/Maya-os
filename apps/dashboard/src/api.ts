@@ -40,11 +40,11 @@ export type RuntimeEvent =
 export const getModels = (): Promise<CatalogEntry[]> => fetch("/api/models").then((r) => r.json());
 export const getHealth = (): Promise<Health> => fetch("/api/runtime/health").then((r) => r.json());
 
-export const loadModel = (name: string): Promise<Response> =>
+export const loadModel = (name: string, force = false): Promise<Response> =>
   fetch(`/api/models/${encodeURIComponent(name)}/load`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: "{}",
+    body: JSON.stringify(force ? { force: true } : {}),
   });
 
 export const unloadModel = (name: string): Promise<Response> =>
