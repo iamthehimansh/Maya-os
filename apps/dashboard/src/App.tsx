@@ -2,14 +2,16 @@ import { useState } from "react";
 import { ConversationsView } from "./ConversationsView";
 import { ModelsView } from "./ModelsView";
 import { RunPanel } from "./RunPanel";
+import { SettingsView } from "./SettingsView";
 import { TeamsView } from "./TeamsView";
 
 /**
- * Action-first shell: Run is the home tab (describe a goal + dir → go). Models
- * and Teams are the other doers; Conversations is the live channel viewer.
- * (The old read-only Agents dump is gone — agents show per run/team instead.)
+ * Action-first shell: Run is the home tab (describe a goal + dir → go). Models,
+ * Teams, and Settings are the other doers; Conversations is the live channel
+ * viewer. (The old read-only Agents dump is gone — agents show per run/team.)
+ * Lane split: Run / Teams / Conversations = 01; Models / Settings = 02.
  */
-const TABS = ["Run", "Models", "Teams", "Conversations"] as const;
+const TABS = ["Run", "Models", "Teams", "Settings", "Conversations"] as const;
 type Tab = (typeof TABS)[number];
 
 export function App(): React.JSX.Element {
@@ -30,6 +32,7 @@ export function App(): React.JSX.Element {
         {active === "Run" && <RunPanel />}
         {active === "Models" && <ModelsView />}
         {active === "Teams" && <TeamsView />}
+        {active === "Settings" && <SettingsView />}
         {active === "Conversations" && <ConversationsView />}
       </main>
     </div>

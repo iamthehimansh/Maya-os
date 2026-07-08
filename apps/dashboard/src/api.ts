@@ -69,3 +69,10 @@ export function onRuntimeEvents(handler: (ev: RuntimeEvent) => void): () => void
   };
   return () => es.close();
 }
+
+export const setModelProfile = (name: string, patch: { contextLength?: number; draftModel?: string | false }): Promise<Response> =>
+  fetch(`/api/models/${encodeURIComponent(name)}/profile`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });

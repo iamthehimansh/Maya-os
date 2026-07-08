@@ -8,6 +8,7 @@ import {
   loadModel,
   onRuntimeEvents,
   pullModel,
+  setModelProfile,
   unloadModel,
 } from "./api";
 
@@ -167,6 +168,7 @@ export function ModelsView(): React.JSX.Element {
                 <th>State</th>
                 <th>Quant · quality</th>
                 <th>Context</th>
+                <th>Default ctx / draft</th>
                 <th>Memory</th>
                 <th />
               </tr>
@@ -188,6 +190,18 @@ export function ModelsView(): React.JSX.Element {
                     </td>
                     <td>{qualityCell(m, inst?.quant)}</td>
                     <td>{(inst?.contextLength ?? m.contextLength ?? 0).toLocaleString()}</td>
+                    <td>
+                      <input
+                        className="mono ctx-edit"
+                        type="number"
+                        defaultValue={m.contextLength ?? 8192}
+                        title="default context on next load"
+                        onBlur={(e) => {
+                          const v = Number(e.target.value);
+                          if (v >= 512) void setModelProfile(name, { contextLength: v }).then(() => refresh());
+                        }}
+                      />
+                    </td>
                     <td>{inst?.memoryBytes ? gb(inst.memoryBytes) : "–"}</td>
                     <td style={{ textAlign: "right" }}>
                       <button
