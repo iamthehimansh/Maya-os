@@ -174,6 +174,16 @@ describe('LoopLead', () => {
     expect(round).toBe(3); // initial check + 2 fix-round re-checks
   }, 30_000);
 
+  it('report re-reads the team so tokensUsed is fresh, not the creation snapshot (02 metering bug)', async () => {
+    // TOKENS:600 makes the scripted worker meter 600; the report's team must
+    // reflect the ledger, not the stale 0 captured at team creation.
+    const planner: Planner = async () => ({ tasks: [{ spec: 'expensive TOKENS:600 job' }] });
+    const { db, lead } = await setup(planner, okVerifier);
+    const report = await lead.run('meter check');
+    expect(report.team.tokensUsed).toBe(600);
+    expect(db.team(report.team.id)?.tokensUsed).toBe(600); // ledger agrees
+  }, 30_000);
+
   it('goal-acceptance passes cleanly when the fix task satisfies the goal', async () => {
     const planner: Planner = async () => ({ tasks: [{ spec: 'write a status file' }] });
     let round = 0;
