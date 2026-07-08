@@ -27,6 +27,7 @@ export function buildServer(client: MayaClient): McpServer {
       cwd: z.string().describe("working directory for the agent"),
       role: z.enum(["lead", "worker"]).optional(),
       systemPrompt: z.string().optional().describe("persona/instructions"),
+      allowedTools: z.array(z.string()).optional().describe("tool scope YOU grant this agent, e.g. [\"Write\",\"Edit\",\"Bash\"]"),
     },
     async (args) => {
       try {
@@ -37,6 +38,7 @@ export function buildServer(client: MayaClient): McpServer {
           cwd: args.cwd,
           ...(args.role ? { role: args.role } : {}),
           ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
+          ...(args.allowedTools ? { allowedTools: args.allowedTools } : {}),
         };
         const r = await client.spawnAgent(agent);
         return text(`spawned ${args.handle} (${args.type} on ${args.model}) — ${JSON.stringify(r)}`);

@@ -53,6 +53,12 @@ export interface TeamSpec {
  * and REVOKED when the agent is stopped or the team drains. The lead gets the
  * same least-capability token as workers — spawning power comes from the MCP
  * tool (a separate, orchestrator-mediated seam), not from a privileged bus token.
+ *
+ * WHAT THE LEAD DECIDES (himansh: "let lead decide"): the bus TOKEN stays
+ * least-capability for everyone (messaging only — a security floor). What the
+ * lead chooses per agent is that agent's TOOL scope — `allowedTools` on the
+ * AgentSpec it spawns (Write/Edit/Bash/…). That's the agent's real capability
+ * (what it can DO on the system); the orchestrator caps it to the team policy.
  */
 export const AGENT_BUS_CAPS = ["receive", "send"] as const;
 export const RESERVED_LEAD_HANDLE = "@lead";
@@ -64,6 +70,9 @@ export interface AgentStatus {
   type: AdapterId;
   model: ModelId;
   role: "lead" | "worker";
+  cwd: string; // working directory — shown in the team's full-info view
+  allowedTools?: string[]; // the tool scope the lead granted this agent
   state: "spawning" | "live" | "working" | "stopped" | "failed";
   pid?: number;
+  lastMessageAt?: string; // for the team page's activity display
 }
