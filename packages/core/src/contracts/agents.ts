@@ -72,6 +72,7 @@ export type AgentEvent =
   | { kind: 'question'; text: string; at: string }          // agent needs input
   | { kind: 'artifact'; path: string; note?: string; at: string }
   | { kind: 'tokens'; input: number; output: number; at: string }
+  | { kind: 'say'; text: string; at: string } // the agent's reply for the channel (a completed turn)
   | { kind: 'error'; message: string; at: string };
 
 /**
