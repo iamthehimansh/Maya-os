@@ -196,3 +196,14 @@ button.act.primary:disabled, .act.primary:disabled { opacity: 0.5; cursor: defau
 .fs-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fs-size { color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .fs-preview { max-height: 340px; overflow: auto; background: var(--surface-0); border-radius: 8px; padding: 12px; font-size: 12px; font-family: ui-monospace, Menlo, monospace; white-space: pre-wrap; }
+/* Rendered markdown (chat + file preview) */
+.md-body { font-size: 13px; line-height: 1.5; }
+.md-body h3, .md-body h4, .md-body h5 { margin: 10px 0 4px; }
+.md-body p { margin: 6px 0; }
+.md-body ul, .md-body ol { margin: 6px 0; padding-left: 22px; }
+.md-body li { margin: 2px 0; }
+.md-body code { background: var(--surface-0); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.md-body pre { background: var(--surface-0); border-radius: 8px; padding: 10px 12px; overflow-x: auto; }
+.md-body pre code { background: none; border: none; padding: 0; }
+.md-body blockquote { border-left: 3px solid var(--border); margin: 6px 0; padding: 2px 12px; color: var(--text-secondary); }
+.md-body a { color: var(--accent); }
