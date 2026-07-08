@@ -80,18 +80,24 @@ export class AgentBusBridge {
     client.connect();
     const busHandle = await joined;
 
-    // channel → agent: loop answers and directed text turn into stdin turns.
+    // Wake-on-@tag: the agent acts on a message when it's addressed to its bus
+    // handle (m.to) OR its @handle is @mentioned in the text — himansh's "a
+    // monitor wakes whoever's tagged." The `(?![a-z0-9-])` guard stops @qa from
+    // matching @qa-2. Other channel traffic is context the agent doesn't act on.
+    const tag = `@${(opts.label ?? handle.id).replace(/^@/, '')}`;
+    const mentionRe = new RegExp(tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![a-z0-9-])', 'i');
     client.on('message', (m) => {
       if (m.from === busHandle) return; // our own bridge traffic
       const maya = m.body.maya as LoopBody | undefined;
-      const directed = m.to === busHandle;
+      const text = typeof m.body.text === 'string' ? m.body.text : '';
+      const directed = m.to === busHandle || mentionRe.test(text);
       if (maya && maya.kind === 'answer' && directed) {
-        const text = maya.text ?? (maya.optionId !== undefined ? `answer: ${maya.optionId}` : '');
-        void adapter.send(handle.id, text).catch(() => {});
+        const answerText = maya.text ?? (maya.optionId !== undefined ? `answer: ${maya.optionId}` : '');
+        void adapter.send(handle.id, answerText).catch(() => {});
         return;
       }
-      if (directed && typeof m.body.text === 'string' && m.body.text.length > 0) {
-        void adapter.send(handle.id, m.body.text).catch(() => {});
+      if (directed && text.length > 0) {
+        void adapter.send(handle.id, text).catch(() => {});
       }
     });
 
