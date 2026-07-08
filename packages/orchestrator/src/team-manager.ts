@@ -323,6 +323,16 @@ export class TeamManager {
     };
   }
 
+  /**
+   * Post a message into the team channel on the manager's connection. Dual-use:
+   * the lead's MCP `send_to` (directed to an @handle), the human chat composer,
+   * and @wake — a directed message wakes the target agent via the bridge.
+   */
+  postMessage(teamId: string, text: string, to?: string): void {
+    const lt = this.mustLive(teamId);
+    lt.manager.sendMessage({ ...(to ? { to } : {}), body: { text } });
+  }
+
   // ── internals ─────────────────────────────────────────────────────────
 
   private mustLive(teamId: string): LiveTeam {

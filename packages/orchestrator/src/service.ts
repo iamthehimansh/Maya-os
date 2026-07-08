@@ -127,6 +127,22 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     }
   });
 
+  // Post a message into the team channel. Powers 02's MCP `send_to` (directed to
+  // an @handle), the human chat composer, and @wake (a directed message wakes
+  // the addressed agent via the bridge).
+  app.post('/api/teams/:id/messages', async (c) => {
+    const id = c.req.param('id');
+    if (!teams.isLive(id)) return c.json({ error: `team ${id} is not live` }, 400);
+    const body = (await c.req.json().catch(() => null)) as { text?: string; to?: string } | null;
+    if (!body?.text) return c.json({ error: 'text required' }, 400);
+    try {
+      teams.postMessage(id, body.text, body.to);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: String(err instanceof Error ? err.message : err) }, 400);
+    }
+  });
+
   // Standing teams: create once (kept LIVE — joins its bus room), then run
   // many loops on it via POST /api/loop {teamId}. `maya team create/list`.
   app.post('/api/teams', async (c) => {
