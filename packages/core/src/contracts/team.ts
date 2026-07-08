@@ -32,7 +32,7 @@ export interface AgentSpec {
   cwd: string; // working directory
   role?: "lead" | "worker"; // default "worker"; exactly one "lead" per team
   systemPrompt?: string; // persona/instructions
-  allowedTools?: string[]; // tool scope for this agent
+  allowedTools?: string[]; // tool scope; ["*"] or omitted = ALL tools (full freedom)
 }
 
 /** A team = one lead + N workers, all persistent + parallel, sharing a channel. */

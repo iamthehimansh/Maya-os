@@ -28,6 +28,7 @@ export function buildServer(client: MayaClient): McpServer {
       role: z.enum(["lead", "worker"]).optional(),
       systemPrompt: z.string().optional().describe("persona/instructions"),
       allowedTools: z.array(z.string()).optional().describe("tool scope YOU grant this agent, e.g. [\"Write\",\"Edit\",\"Bash\"]"),
+      allowAllTools: z.boolean().optional().describe("give the agent ALL tools (full freedom) — overrides allowedTools"),
     },
     async (args) => {
       try {
@@ -38,7 +39,7 @@ export function buildServer(client: MayaClient): McpServer {
           cwd: args.cwd,
           ...(args.role ? { role: args.role } : {}),
           ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
-          ...(args.allowedTools ? { allowedTools: args.allowedTools } : {}),
+          ...(args.allowAllTools ? { allowedTools: ["*"] } : args.allowedTools ? { allowedTools: args.allowedTools } : {}),
         };
         const r = await client.spawnAgent(agent);
         return text(`spawned ${args.handle} (${args.type} on ${args.model}) — ${JSON.stringify(r)}`);
