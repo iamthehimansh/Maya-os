@@ -1,0 +1,45 @@
+{
+  "name": "smoke",
+  "defaults": {
+    "leadModel": "local/qwen2.5-3b-instruct",
+    "workerModel": "local/qwen2.5-7b-instruct",
+    "allowedTools": ["Read", "Write", "Edit"],
+    "maxTurns": 6,
+    "tokenBudget": 200000
+  },
+  "tasks": [
+    {
+      "id": "exact-status",
+      "notes": "The M3 capstone. Exact-content goal — the loop's deterministic gate should nail this or honestly report partial.",
+      "goal": "Create a file named STATUS.md whose entire content is exactly: Maya M3 demo complete",
+      "expect": { "files": [{ "path": "STATUS.md", "equals": "Maya M3 demo complete" }] }
+    },
+    {
+      "id": "exact-single-word",
+      "notes": "A trivial exact-content probe with a distinctive token, easy to verify, hard to fake.",
+      "goal": "Create a file named TOKEN.txt whose entire content is exactly: MAYA-EVAL-OK",
+      "expect": { "files": [{ "path": "TOKEN.txt", "equals": "MAYA-EVAL-OK" }] }
+    },
+    {
+      "id": "two-files",
+      "notes": "Multi-artifact goal — probes whether the loop tracks BOTH required files, not just one.",
+      "goal": "Create two files: A.txt whose entire content is exactly: alpha, and B.txt whose entire content is exactly: beta",
+      "expect": {
+        "files": [
+          { "path": "A.txt", "equals": "alpha" },
+          { "path": "B.txt", "equals": "beta" }
+        ]
+      }
+    },
+    {
+      "id": "semantic-readme",
+      "notes": "Beyond the deterministic gate: a semantic goal the loop leans on its LLM verifier for. This is where a fake success can slip through — the scorer checks real substrings.",
+      "goal": "Write a README.md for a CLI tool named 'ping' that sends ICMP echo requests. It must include a section titled '## Usage' and mention the flag --count.",
+      "expect": {
+        "files": [
+          { "path": "README.md", "contains": ["## Usage", "--count", "ping"] }
+        ]
+      }
+    }
+  ]
+}
