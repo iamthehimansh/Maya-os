@@ -27,6 +27,7 @@ type AgentEvent =
   | { kind: "error"; message?: string }
   | { kind: "state"; state?: string }
   | { kind: "tokens"; input?: number; output?: number }
+  | { kind: "pty"; data?: string }
   | { kind?: string; [k: string]: unknown };
 
 const C = {
@@ -79,6 +80,11 @@ export function TerminalPanel({
     const writeLine = (s: string) => term.write(s.replace(/\r?\n$/, "") + "\r\n");
     const render = (ev: AgentEvent) => {
       switch (ev.kind) {
+        case "pty":
+          // Interactive-pty agent: raw terminal bytes (ANSI + text) straight
+          // from node-pty — xterm renders the real Claude TUI directly.
+          if (typeof ev.data === "string") term.write(ev.data);
+          return;
         case "log": {
           const line = typeof ev.line === "string" ? ev.line : "";
           if (!line) return;
