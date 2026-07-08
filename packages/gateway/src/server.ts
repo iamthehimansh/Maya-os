@@ -1,5 +1,6 @@
 import type { ModelCatalogEntry, ModelId, ProviderConfig, RuntimeEvent } from "@maya-ai/core";
-import { QUANT_QUALITY, type RuntimeManager, availableRam, pullModel, scanModels } from "@maya-ai/model-runtime";
+import { QUANT_QUALITY, type RuntimeManager, availableRam, pullModel, scanModels, writeModelMeta } from "@maya-ai/model-runtime";
+import { type PlatformConfig, defaultConfig, loadConfig, saveConfig } from "@maya-ai/core";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -253,6 +254,85 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
   app.post("/api/models/:name/unload", async (c) => {
     await deps.manager.unload(`local/${c.req.param("name")}` as ModelId);
     return c.json({ ok: true });
+  });
+
+  // ── Config (edit ALL platform settings from the web) ─────────────────────
+  // GET is REDACTED: providers expose only their env-var NAME + whether it's
+  // currently set — never a key value (keys live in env, never in config/db).
+  app.get("/api/config", (c) => {
+    const cfg = loadConfig();
+    return c.json({
+      ...cfg,
+      providers: cfg.providers.map((p) => ({
+        id: p.id,
+        baseUrl: p.baseUrl ?? "",
+        apiKeyEnv: p.apiKeyEnv ?? "",
+        enabled: p.enabled,
+        keyPresent: Boolean(p.apiKeyEnv && process.env[p.apiKeyEnv]), // presence only
+      })),
+    });
+  });
+
+  // PUT validates + persists, and reports which changes need a `maya serve`
+  // restart (ports/dirs) vs. take effect on next use (providers/guardrails).
+  app.put("/api/config", async (c) => {
+    let body: Partial<PlatformConfig>;
+    try {
+      body = (await c.req.json()) as Partial<PlatformConfig>;
+    } catch {
+      return oaiError("invalid JSON body", 400);
+    }
+    const cur = loadConfig();
+    const d = defaultConfig();
+    // Merge conservatively; reject a provider object that tries to smuggle a raw
+    // key (config must reference an env var name, never hold a secret).
+    const providers = Array.isArray(body.providers) ? body.providers : cur.providers;
+    for (const p of providers as unknown as Array<Record<string, unknown>>) {
+      if ("apiKey" in p || "key" in p || "token" in p) {
+        return oaiError("providers must use apiKeyEnv (an env var NAME), never a raw key", 400);
+      }
+    }
+    const next: PlatformConfig = {
+      gateway: { port: Number(body.gateway?.port ?? cur.gateway.port) },
+      dashboard: { port: Number(body.dashboard?.port ?? cur.dashboard.port) },
+      bus: { port: Number(body.bus?.port ?? cur.bus.port) },
+      orchestrator: { port: Number(body.orchestrator?.port ?? cur.orchestrator.port) },
+      modelsDir: String(body.modelsDir ?? cur.modelsDir),
+      providers: providers.map((p) => ({
+        id: String((p as { id?: string }).id ?? "custom"),
+        ...((p as { baseUrl?: string }).baseUrl ? { baseUrl: String((p as { baseUrl?: string }).baseUrl) } : {}),
+        ...((p as { apiKeyEnv?: string }).apiKeyEnv ? { apiKeyEnv: String((p as { apiKeyEnv?: string }).apiKeyEnv) } : {}),
+        enabled: Boolean((p as { enabled?: boolean }).enabled),
+      })),
+      guardrails: { ...cur.guardrails, ...(body.guardrails ?? {}) },
+    };
+    // Sanity floors so a bad edit can't brick the runtime.
+    if (next.guardrails.minFreeRamBytes < 256 * 1024 * 1024) next.guardrails.minFreeRamBytes = d.guardrails.minFreeRamBytes;
+    if (next.guardrails.maxRestarts < 0) next.guardrails.maxRestarts = d.guardrails.maxRestarts;
+    saveConfig(next);
+    const needsRestart =
+      next.gateway.port !== cur.gateway.port ||
+      next.dashboard.port !== cur.dashboard.port ||
+      next.bus.port !== cur.bus.port ||
+      next.orchestrator.port !== cur.orchestrator.port ||
+      next.modelsDir !== cur.modelsDir;
+    return c.json({ ok: true, needsRestart, appliesOnNextUse: !needsRestart });
+  });
+
+  // Per-model profile: default quant / context / speculation draft (maya.json).
+  app.post("/api/models/:name/profile", async (c) => {
+    const name = c.req.param("name");
+    const body = (await c.req.json().catch(() => ({}))) as { contextLength?: number; draftModel?: string | false };
+    const patch: Record<string, unknown> = {};
+    if (typeof body.contextLength === "number" && body.contextLength >= 512) patch["contextLength"] = Math.floor(body.contextLength);
+    if (body.draftModel === false || typeof body.draftModel === "string") patch["draftModel"] = body.draftModel;
+    if (!Object.keys(patch).length) return oaiError("nothing to update (contextLength or draftModel)", 400);
+    try {
+      writeModelMeta(deps.modelsDir, name, patch);
+      return c.json({ ok: true, applied: patch, note: "takes effect on next load of this model" });
+    } catch (err) {
+      return oaiError(err instanceof Error ? err.message : String(err), 400);
+    }
   });
 
   app.get("/api/runtime/health", async (c) => {

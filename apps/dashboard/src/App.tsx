@@ -2,13 +2,14 @@ import { useState } from "react";
 import { AgentsView } from "./AgentsView";
 import { ConversationsView } from "./ConversationsView";
 import { ModelsView } from "./ModelsView";
+import { SettingsView } from "./SettingsView";
 import { TeamsView } from "./TeamsView";
 
 /**
  * Dashboard shell — tab-based so each lane's views slot in independently.
- * Models = lane 02. Agents / Teams / Conversations = lane 01 (all live).
+ * Models / Settings = lane 02. Agents / Teams / Conversations = lane 01.
  */
-const TABS = ["Models", "Agents", "Teams", "Conversations"] as const;
+const TABS = ["Models", "Agents", "Teams", "Conversations", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export function App(): React.JSX.Element {
@@ -30,6 +31,7 @@ export function App(): React.JSX.Element {
         {active === "Agents" && <AgentsView />}
         {active === "Teams" && <TeamsView />}
         {active === "Conversations" && <ConversationsView />}
+        {active === "Settings" && <SettingsView />}
       </main>
     </div>
   );
