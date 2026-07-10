@@ -88,14 +88,26 @@ interface PersistentAgent {
   adapter: ReturnType<AgentRuntime['adapter']>;
   state: AgentStatus['state'];
   pid?: number;
+  lastMessageAt?: string;
+}
+
+/** How standing LEAD agents reach Maya's own MCP server (spawn_agent, send_to,
+ * …): the per-team config file spawnAgent writes + points `--mcp-config` at. */
+export interface McpServeConfig {
+  command: string;
+  args: string[];
+  /** This orchestrator's own HTTP base — known only after listen(). */
+  orchestratorUrl: string;
+  gatewayUrl?: string;
 }
 
 interface LiveTeam {
   team: TeamRow;
   templates: MemberTemplate[];
   manager: BusClient;
-  /** The manager's bus handle — its system announcements must not wake agents. */
-  managerHandle: string;
+  /** Bus token id backing `manager` — revoked on drain so admin tokens don't
+   * accumulate across boots. */
+  managerTokenId: string;
   /** taskId → live worker (one worker per in-flight task). */
   inFlight: Map<string, InFlightWorker>;
   /** @handle → standing agent (the persistent Lead + workers). */
@@ -108,10 +120,17 @@ export class TeamManager {
   private readonly live = new Map<string, LiveTeam>();
   private readonly maxAttempts: number;
   private readonly workerTimeoutMs: number;
+  private mcpServe: McpServeConfig | null = null;
 
   constructor(private readonly opts: TeamManagerOptions) {
     this.maxAttempts = opts.maxAttempts ?? 2;
     this.workerTimeoutMs = opts.workerTimeoutMs ?? 300_000;
+  }
+
+  /** Enable MCP injection for standing LEAD agents (contract: the service
+   * calls this after listen(), once its own URL is known — see service.ts). */
+  configureMcp(cfg: McpServeConfig): void {
+    this.mcpServe = cfg;
   }
 
   private httpBase(): string {
@@ -128,6 +147,9 @@ export class TeamManager {
       topology: input.topology,
       ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
     });
+    // Persist the member templates so rehydrate() restores DISPATCH too — a
+    // restored team used to come back chat-only and hang loops to settle-timeout.
+    this.opts.db.setTeamTemplates(team.id, input.members);
 
     const lt = await this.bringLive(team, input.members);
     lt.manager.sendMessage({ body: { text: `🧭 team **${input.name}** ready — ${input.members.length} member template(s), topology ${input.topology}` } });
@@ -144,16 +166,43 @@ export class TeamManager {
       body: JSON.stringify({ label: 'manager', role: 'admin', caps: ['receive', 'send'], scopes: [team.channelId] }),
     });
     if (!res.ok) throw new Error(`manager token mint failed: HTTP ${res.status}`);
-    const minted = (await res.json()) as { token: string };
+    const minted = (await res.json()) as { id: string; token: string };
     const manager = new BusClient({ wsBase: this.opts.bus.wsBase, channelId: team.channelId, token: minted.token });
-    const joined = new Promise<string>((r) => manager.on('joined', (j: { handle: string }) => r(j.handle)));
+    // The bare 'joined' wait used to hang forever on a rejected join (the bus
+    // emits 'error' + reconnects; 'joined' never fires) — createTeam's HTTP
+    // request and the whole rehydrate loop stalled. Timeout + error path.
+    let joinedOk = false;
+    const joined = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`bus join timed out for team ${team.id}`)), 10_000);
+      timer.unref?.();
+      manager.on('joined', () => {
+        joinedOk = true;
+        clearTimeout(timer);
+        resolve();
+      });
+      manager.on('error', (e) => {
+        // Pre-join: fail bringLive loudly. Post-join: a rejected frame (e.g.
+        // bad_frame) is otherwise a SILENT no-op send — at least log it.
+        if (!joinedOk) {
+          clearTimeout(timer);
+          reject(new Error(`bus join rejected for team ${team.id}: ${e.code} ${e.message}`));
+        } else {
+          console.error(`[team-manager] bus error on team ${team.id}: ${e.code} ${e.message}`);
+        }
+      });
+    });
     manager.connect();
-    const managerHandle = await joined;
+    try {
+      await joined;
+    } catch (err) {
+      manager.close();
+      throw err;
+    }
     const lt: LiveTeam = {
       team,
       templates,
       manager,
-      managerHandle,
+      managerTokenId: minted.id,
       inFlight: new Map<string, InFlightWorker>(),
       persistent: new Map<string, PersistentAgent>(),
       nextTemplate: 0,
@@ -169,19 +218,29 @@ export class TeamManager {
    * agents — so a restart never silently wipes a live team + its agents again
    * (the bug where the dashboard composer went dead because nothing was "live").
    * Best-effort: a team whose manager won't reconnect is left for a later boot;
-   * an agent spec that won't spawn is dropped so it doesn't retry every boot.
-   * NOTE: member TEMPLATES aren't persisted, so task-dispatch needs them re-added
-   * after a restart — standing agents (what users chat with) are what we restore.
+   * an agent spec that won't spawn is KEPT (a transient boot race must not
+   * erase the agent forever) — it's marked failed in the roster, logged, and
+   * announced on the channel, then retried on the next boot. Member templates
+   * are restored from team_templates so task-dispatch works after a restart.
    */
   async rehydrate(): Promise<{ teams: number; agents: number }> {
     let teamsBack = 0;
     let agentsBack = 0;
     for (const team of this.opts.db.teams()) {
+      // A crash mid-drain leaves 'draining' forever (rehydrate skipped it, the
+      // drain route 404'd — a permanent zombie row). Its processes are gone
+      // after a restart anyway, so sweep it to 'closed' on boot.
+      if (team.state === 'draining') {
+        this.opts.db.setTeamState(team.id, 'closed');
+        this.opts.db.removeStandingAgents(team.id);
+        continue;
+      }
       if (team.state !== 'active' || this.live.has(team.id)) continue;
       let lt: LiveTeam;
       try {
-        lt = await this.bringLive(team, []);
-      } catch {
+        lt = await this.bringLive(team, this.opts.db.teamTemplates(team.id) as MemberTemplate[]);
+      } catch (err) {
+        console.error(`[team-manager] rehydrate: team ${team.id} (${team.name}) won't come live: ${String(err instanceof Error ? err.message : err)} — retrying next boot`);
         continue;
       }
       teamsBack++;
@@ -192,8 +251,18 @@ export class TeamManager {
           await this.spawnAgent(team.id, spec as AgentSpec);
           restored++;
           agentsBack++;
-        } catch {
-          this.opts.db.removeStandingAgent(team.id, handle);
+        } catch (err) {
+          const msg = String(err instanceof Error ? err.message : err);
+          console.error(`[team-manager] rehydrate: agent ${handle} on team ${team.id} failed to spawn: ${msg}`);
+          // Keep the spec for the next boot; show the failure in the roster
+          // (GET /agents) instead of pretending the agent never existed.
+          try {
+            const s = spec as AgentSpec;
+            lt.persistent.set(handle, { spec: s, agentId: '', busHandle: '', adapter: this.opts.runtime.adapter(s.type), state: 'failed' });
+          } catch {
+            /* unknown adapter — no roster entry, spec still persisted */
+          }
+          lt.manager.sendMessage({ body: { text: `⚠️ could not restore **${handle.replace(/^@/, '')}** after restart: ${msg.slice(0, 160)} — will retry next boot` } });
         }
       }
       if (specs.length > 0) {
@@ -220,6 +289,12 @@ export class TeamManager {
   async dispatch(teamId: string, opts?: { maxConcurrent?: number }): Promise<TaskRow[]> {
     const lt = this.mustLive(teamId);
     if (lt.draining) return [];
+    // 0 templates + ready work would otherwise spin until settle-timeout (a
+    // silent 5-minute hang) — fail loudly instead. Only pre-template-persistence
+    // teams restored from an old DB can hit this now.
+    if (lt.templates.length === 0 && this.opts.db.readyTasks(teamId).length > 0) {
+      throw new Error(`team ${teamId} has no member templates (restored from a pre-template-persistence DB?) — recreate the team`);
+    }
     const cap = opts?.maxConcurrent ?? lt.templates.length;
     const dispatched: TaskRow[] = [];
     for (const task of this.opts.db.readyTasks(teamId)) {
@@ -261,7 +336,11 @@ export class TeamManager {
       lt.inFlight.delete(taskId);
       const task = this.opts.db.task(taskId);
       if (task && task.state !== 'done' && task.state !== 'failed') {
-        this.opts.db.transitionTask(taskId, 'failed', { result: `drained: ${reason}` });
+        // Permanent close fails the work; a restart pause (close=false)
+        // RE-QUEUES it so the restored team resumes instead of a shutdown
+        // silently killing every in-flight task forever.
+        if (close) this.safeTransition(taskId, 'failed', { result: `drained: ${reason}` });
+        else this.safeTransition(taskId, 'queued');
       }
     }
     // Tear down the standing agents too — detach revokes each bus token.
@@ -278,6 +357,12 @@ export class TeamManager {
     }
     // close=false (serve shutdown): team stays 'active' + specs kept → rehydrate() restores it.
     lt.manager.close();
+    // Revoke the manager's admin-scoped bus token — every boot × team minted a
+    // fresh one and nothing ever revoked it (live credentials piled up in bus.db).
+    await fetch(`${this.httpBase()}/api/tokens/${lt.managerTokenId}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${this.opts.bus.adminToken}` },
+    }).catch(() => {});
     this.live.delete(teamId);
   }
 
@@ -308,6 +393,12 @@ export class TeamManager {
     return this.live.has(teamId);
   }
 
+  /** In-flight worker count without the per-team task-list fetch status() does
+   * — GET /api/teams maps EVERY historical team, so this must stay O(1). */
+  inFlightCount(teamId: string): number {
+    return this.live.get(teamId)?.inFlight.size ?? 0;
+  }
+
   // ── persistent agents (the multi-agent team on the bus) ────────────────
 
   /**
@@ -320,12 +411,18 @@ export class TeamManager {
    */
   async spawnAgent(teamId: string, spec: AgentSpec): Promise<AgentStatus> {
     const lt = this.mustLive(teamId);
+    if (lt.draining) throw new Error(`team ${teamId} is draining — no new agents`);
     const { handle } = spec;
     if (!HANDLE_RE.test(handle)) throw new Error(`invalid handle "${handle}" — must be @lowercase-kebab (${HANDLE_RE.source})`);
     const role: 'lead' | 'worker' = spec.role ?? 'worker';
     if (handle === RESERVED_LEAD_HANDLE && role !== 'lead') throw new Error(`${RESERVED_LEAD_HANDLE} is reserved for the team lead`);
     if (role === 'lead' && handle !== RESERVED_LEAD_HANDLE) throw new Error(`the lead's handle must be ${RESERVED_LEAD_HANDLE}`);
-    if (lt.persistent.has(handle)) throw new Error(`handle ${handle} already in use on this team — pick another (handles are unique, never auto-suffixed)`);
+    // A dead agent's handle (stopped/failed — e.g. a crash or a failed
+    // rehydrate) is re-claimable; only a live/spawning one blocks the spawn.
+    const existing = lt.persistent.get(handle);
+    if (existing && existing.state !== 'stopped' && existing.state !== 'failed') {
+      throw new Error(`handle ${handle} already in use on this team — pick another (handles are unique, never auto-suffixed)`);
+    }
 
     const adapter = this.opts.runtime.adapter(spec.type);
     // Reserve the handle up-front so a concurrent spawn of the same name loses.
@@ -343,6 +440,34 @@ export class TeamManager {
       const walkieHint =
         `You are a persistent agent on a shared team channel. INCOMING: new channel messages are appended as JSON lines to the file at ${inboxPath} — read it to see who said what. OUTGOING: to say ANYTHING on the channel, APPEND a line to the file at ${outboxPath} (plain text, or a JSON line {"text":"…","to":"@who"} to direct it) — the system posts it for you. You may append several lines over time (e.g. with sleep between them) and message on your own initiative; you don't have to wait to be asked. Use your Read/Write/Bash tools on those two absolute paths. Keep running.`;
       const systemPrompt = [spec.systemPrompt, walkieHint].filter(Boolean).join('\n\n');
+      // Standing LEAD agents get Maya's own MCP server (spawn_agent/send_to/…)
+      // via a per-team --mcp-config file, when the serve enabled it.
+      let mcpConfigPath: string | undefined;
+      if (role === 'lead' && this.mcpServe) {
+        const mcpDir = join(homedir(), '.maya', 'mcp');
+        mkdirSync(mcpDir, { recursive: true });
+        mcpConfigPath = join(mcpDir, `${teamId}.json`);
+        writeFileSync(
+          mcpConfigPath,
+          JSON.stringify(
+            {
+              mcpServers: {
+                maya: {
+                  command: this.mcpServe.command,
+                  args: this.mcpServe.args,
+                  env: {
+                    MAYA_ORCHESTRATOR_URL: this.mcpServe.orchestratorUrl,
+                    MAYA_GATEWAY_URL: this.mcpServe.gatewayUrl ?? '',
+                    MAYA_TEAM_ID: teamId,
+                  },
+                },
+              },
+            },
+            null,
+            2,
+          ),
+        );
+      }
       const spawnSpec: AgentSpawnSpec = {
         adapter: spec.type as AgentSpawnSpec['adapter'],
         model: spec.model as AgentSpawnSpec['model'],
@@ -355,13 +480,38 @@ export class TeamManager {
           ...(spec.allowedTools !== undefined ? { allowedTools: spec.allowedTools } : {}),
           ...(systemPrompt ? { appendSystemPrompt: systemPrompt } : {}),
           ...(spec.cldzProfile !== undefined ? { cldzProfile: spec.cldzProfile } : {}),
-          ...(spec.pty ? { pty: true } : {}), // interactive PTY (real Claude TUI, watchable) vs headless
+          // PTY is the DEFAULT for standing agents (himansh: the real Claude
+          // TUI, watchable live) — opt OUT with pty:false, never opt in.
+          ...(spec.pty !== false ? { pty: true } : {}),
+          ...(mcpConfigPath !== undefined ? { mcpConfig: mcpConfigPath } : {}),
         },
       };
       const agentHandle = await this.opts.runtime.spawn(spawnSpec);
+      // Re-check after the await: a drain that raced this spawn already took
+      // its snapshot — kill the fresh process instead of leaking it (and
+      // re-persisting a spec on a permanently closed team below).
+      if (lt.draining || !this.live.has(teamId)) {
+        await adapter.kill(agentHandle.id).catch(() => {});
+        throw new Error(`team ${teamId} drained while spawning ${handle}`);
+      }
       const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, { channelId: lt.team.channelId, label: handle, inboxPath, outboxPath });
-      const entry: PersistentAgent = { spec, agentId: agentHandle.id, busHandle, adapter, state: 'live' };
+      if (lt.draining || !this.live.has(teamId)) {
+        await this.opts.bridge.detach(agentHandle.id).catch(() => {});
+        await adapter.kill(agentHandle.id).catch(() => {});
+        throw new Error(`team ${teamId} drained while spawning ${handle}`);
+      }
+      const entry: PersistentAgent = {
+        spec,
+        agentId: agentHandle.id,
+        busHandle,
+        adapter,
+        state: 'live',
+        ...(agentHandle.pid !== undefined ? { pid: agentHandle.pid } : {}),
+      };
       lt.persistent.set(handle, entry);
+      // Keep the roster truthful: track the agent's lifecycle so a crash shows
+      // as stopped/failed (not an eternal 'live'), and count its tokens.
+      void this.watchPersistent(lt, handle, entry);
       // Persist the full spec so a serve restart can re-hydrate this agent
       // instead of silently losing it (INSERT OR REPLACE — safe on re-spawn).
       this.opts.db.addStandingAgent(teamId, handle, spec);
@@ -395,7 +545,51 @@ export class TeamManager {
       await this.opts.bridge.detach(a.agentId).catch(() => {}); // detach revokes the token
       await a.adapter.kill(a.agentId).catch(() => {});
     }
-    lt.manager.sendMessage({ body: { text: `➖ **${handle}** left the team` } });
+    // Strip the leading @ like spawnAgent's join notice — an announcement must
+    // never @mention (and wake) an agent, e.g. a quickly-reused handle.
+    lt.manager.sendMessage({ body: { text: `➖ **${handle.replace(/^@/, '')}** left the team` } });
+  }
+
+  /**
+   * Monitor a standing agent's lifecycle (task workers get watch(); standing
+   * agents used to get NOTHING — a crashed agent showed 'live' forever while
+   * messages to it silently vanished). Updates the roster state, records
+   * activity, feeds token events into the team budget (standing agents' usage
+   * used to be invisible to tokensUsed/tokenBudget), and announces an
+   * unexpected death on the channel. EventLog.iterate supports concurrent
+   * iterators, so this never starves the bridge or the SSE output endpoint.
+   */
+  private async watchPersistent(lt: LiveTeam, handle: string, entry: PersistentAgent): Promise<void> {
+    // Bail if the entry was replaced (stopAgent freed the handle + a re-spawn).
+    const current = (): boolean => lt.persistent.get(handle) === entry;
+    try {
+      for await (const ev of entry.adapter.events(entry.agentId)) {
+        if (!current()) return;
+        if (ev.kind === 'state') {
+          entry.state =
+            ev.state === 'spawning' ? 'spawning'
+            : ev.state === 'exited' || ev.state === 'killed' ? 'stopped'
+            : ev.state === 'failed' ? 'failed'
+            : 'live';
+        } else if (ev.kind === 'say') {
+          entry.lastMessageAt = ev.at;
+        } else if (ev.kind === 'tokens') {
+          const { exhausted } = this.opts.db.addTeamTokens(lt.team.id, ev.input + ev.output);
+          if (exhausted && !lt.draining) {
+            void this.drain(lt.team.id, 'token budget exhausted');
+            return;
+          }
+        }
+      }
+    } catch {
+      /* event stream broke — treat as a death below */
+    }
+    if (!current() || lt.draining) return; // stopped deliberately (stopAgent/drain)
+    const final = await entry.adapter.status(entry.agentId).catch(() => null);
+    entry.state = final?.state === 'exited' ? 'stopped' : 'failed';
+    lt.manager.sendMessage({
+      body: { text: `⚠️ agent **${handle.replace(/^@/, '')}** ${entry.state === 'stopped' ? 'exited' : 'died'}${final?.exitCode !== undefined ? ` (code ${final.exitCode})` : ''} — re-spawn it or restart the serve to restore` },
+    });
   }
 
   /** Live adapter + agentId for one standing agent, so callers can stream its
@@ -418,6 +612,8 @@ export class TeamManager {
       cwd: a.spec.cwd,
       state: a.state,
       ...(a.spec.allowedTools !== undefined ? { allowedTools: a.spec.allowedTools } : {}),
+      ...(a.pid !== undefined ? { pid: a.pid } : {}),
+      ...(a.lastMessageAt !== undefined ? { lastMessageAt: a.lastMessageAt } : {}),
     };
   }
 

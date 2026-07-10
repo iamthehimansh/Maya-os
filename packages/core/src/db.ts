@@ -105,6 +105,14 @@ export class MayaDb {
         created_at TEXT NOT NULL,
         PRIMARY KEY (team_id, handle)
       );
+      -- Member TEMPLATES (JSON array) persisted per team so rehydrate() can
+      -- restore task-dispatch after a restart — un-persisted templates made
+      -- restored teams chat-only (loops hung to settle-timeout on 0 templates).
+      CREATE TABLE IF NOT EXISTS team_templates (
+        team_id TEXT PRIMARY KEY REFERENCES teams(id),
+        templates TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY,
         team_id TEXT NOT NULL REFERENCES teams(id),
@@ -182,6 +190,36 @@ export class MayaDb {
       if (!t) throw new Error(`unknown team ${id}`);
       return { total: t.tokensUsed, exhausted: t.tokenBudget !== null && t.tokensUsed >= t.tokenBudget };
     });
+  }
+
+  /**
+   * Hard-delete a team + everything hanging off it (tasks, worker records,
+   * standing-agent specs, templates). Callers must ensure it isn't live —
+   * the archive path for the "closed teams pile up forever" problem.
+   */
+  deleteTeam(id: string): void {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM tasks WHERE team_id = ?').run(id);
+      this.db.prepare('DELETE FROM team_agents WHERE team_id = ?').run(id);
+      this.db.prepare('DELETE FROM standing_agents WHERE team_id = ?').run(id);
+      this.db.prepare('DELETE FROM team_templates WHERE team_id = ?').run(id);
+      this.db.prepare('DELETE FROM teams WHERE id = ?').run(id);
+    });
+  }
+
+  /** Persist (or replace) the team's member templates for re-hydration. */
+  setTeamTemplates(teamId: string, templates: unknown[]): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO team_templates (team_id, templates, created_at) VALUES (?,?,?)')
+      .run(teamId, JSON.stringify(templates), new Date().toISOString());
+  }
+
+  /** The team's persisted member templates; [] for pre-persistence teams. */
+  teamTemplates(teamId: string): unknown[] {
+    const r = this.db.prepare('SELECT templates FROM team_templates WHERE team_id = ?').get(teamId) as
+      | { templates: string }
+      | undefined;
+    return r ? (JSON.parse(r.templates) as unknown[]) : [];
   }
 
   // ── team members ──────────────────────────────────────────────────────

@@ -5,7 +5,8 @@
  * what the dashboard's Agents/Teams tabs (and later the CLI) consume:
  *
  *   GET  /api/orchestrator/health          → { ok, busPort }
- *   GET  /api/teams                        → TeamRow[] (+ live inFlight)
+ *   GET  /api/teams                        → TeamRow[] (+ live, inFlight)
+ *   DELETE /api/teams/:id                  → archive a non-live team (409 if live)
  *   GET  /api/teams/:id/tasks              → TaskRow[]
  *   GET  /api/teams/:id/agents             → TeamAgentRow[]
  *   GET  /api/runs                         → loop runs (live + finished)
@@ -26,7 +27,7 @@ import { BusClient } from '@maya-ai/bus-client';
 import { LlmClient } from './llm.js';
 import { makeGoalCheck, makePlanner, makeVerifier } from './judgment.js';
 import { LoopLead, type LoopEvent, type LoopReport } from './loop-lead.js';
-import { TeamManager, type CreateTeamInput } from './team-manager.js';
+import { TeamManager, newRunId, type CreateTeamInput } from './team-manager.js';
 
 export interface OrchestratorServiceOptions {
   /** SQLite path for the platform db; ':memory:' for tests. */
@@ -37,14 +38,22 @@ export interface OrchestratorServiceOptions {
   host?: string;
   /** Bearer required for POST routes; omit = open on localhost. */
   adminToken?: string;
+  /** How to launch Maya's own MCP stdio server (e.g. the CLI's hidden
+   * `mcp-serve` subcommand). When set, standing LEAD agents get a per-team
+   * --mcp-config wired to it (spawn_agent/send_to/… from inside the agent). */
+  mcpServe?: { command: string; args: string[] };
 }
+
+/** LoopReport with a nullable team: a run that throws before creating its
+ * team has none — `null` is honest where `null as never` used to crash readers. */
+export type RunReport = Omit<LoopReport, 'team'> & { team: LoopReport['team'] | null };
 
 export interface RunRecord {
   runId: string;
   goal: string;
   state: 'running' | 'done';
   startedAt: string;
-  report?: LoopReport;
+  report?: RunReport;
   /** The team channel this run speaks on — set from the `started` event, used
    * to route an owner's answer back to a loop waiting on a question. */
   channelId?: string;
@@ -82,15 +91,25 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     await next();
   });
 
-  app.get('/api/orchestrator/health', (c) => c.json({ ok: true }));
+  // busPort is part of the documented health contract (header comment above).
+  let busPort: number | undefined;
+  try {
+    busPort = Number(new URL(opts.bus.wsBase).port) || undefined;
+  } catch {
+    /* non-URL wsBase (tests) — health reports ok only */
+  }
+  app.get('/api/orchestrator/health', (c) => c.json({ ok: true, ...(busPort !== undefined ? { busPort } : {}) }));
 
   // `?live=1` → only teams currently live in the manager (standing teams not
   // yet drained) — what `maya team list` wants. Default returns ALL teams,
-  // including closed per-run ones, for the dashboard's history view.
+  // including closed per-run ones, for the dashboard's history view. `live`
+  // is the manager's truth per row — the dashboard must derive its LIVE badge
+  // + composer enablement from it, never from state !== 'closed' (a team whose
+  // rehydrate failed is DB-'active' but dead — the zombie-composer bug).
   app.get('/api/teams', (c) => {
     const liveOnly = c.req.query('live') === '1';
     const rows = db.teams().filter((t) => !liveOnly || teams.isLive(t.id));
-    return c.json(rows.map((t) => ({ ...t, inFlight: teams.statusSafe(t.id)?.inFlight ?? 0 })));
+    return c.json(rows.map((t) => ({ ...t, live: teams.isLive(t.id), inFlight: teams.inFlightCount(t.id) })));
   });
   app.get('/api/teams/:id/tasks', (c) => c.json(db.tasks(c.req.param('id'))));
   // cldz auth profiles available to spawn agents on (names + types ONLY, never
@@ -220,15 +239,39 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
         })),
         ...(b.tokenBudget !== undefined ? { tokenBudget: b.tokenBudget } : {}),
       });
-      return c.json(team, 201);
+      // Decorate like GET /api/teams so the client's Team type (inFlight,
+      // live required) is honest on the create path too.
+      return c.json({ ...team, live: true, inFlight: 0 }, 201);
     } catch (err) {
       return c.json({ error: String(err).slice(0, 300) }, 400);
     }
   });
 
   app.post('/api/teams/:id/drain', async (c) => {
-    if (!teams.isLive(c.req.param('id'))) return c.json({ error: 'unknown or already-drained team' }, 404);
-    await teams.drain(c.req.param('id'), 'drained via API');
+    const id = c.req.param('id');
+    if (teams.isLive(id)) {
+      await teams.drain(id, 'drained via API');
+      return c.json({ ok: true });
+    }
+    // Not live but still open in the DB (failed rehydrate, crash mid-drain):
+    // force-close so a zombie team is always closeable via the API. Idempotent
+    // on already-closed teams.
+    const team = db.team(id);
+    if (!team) return c.json({ error: 'unknown team' }, 404);
+    if (team.state !== 'closed') {
+      db.setTeamState(id, 'closed');
+      db.removeStandingAgents(id);
+    }
+    return c.json({ ok: true });
+  });
+
+  // Archive: hard-delete a closed/dead team + its tasks, worker records, and
+  // standing-agent specs. 409 while live — drain first.
+  app.delete('/api/teams/:id', (c) => {
+    const id = c.req.param('id');
+    if (teams.isLive(id)) return c.json({ error: 'team is live — drain it first' }, 409);
+    if (!db.team(id)) return c.json({ error: 'unknown team' }, 404);
+    db.deleteTeam(id);
     return c.json({ ok: true });
   });
   app.get('/api/agents', (c) => c.json(db.agentsAll()));
@@ -308,7 +351,7 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
         body: JSON.stringify({ label: 'owner-answer', role: 'admin', caps: ['receive', 'send'], scopes: [record.channelId] }),
       });
       if (!res.ok) return c.json({ error: `token mint failed: HTTP ${res.status}` }, 502);
-      const { token } = (await res.json()) as { token: string };
+      const { id: tokenId, token } = (await res.json()) as { id: string; token: string };
       const client = new BusClient({ wsBase: opts.bus.wsBase, channelId: record.channelId, token });
       const joined = new Promise<void>((resolve, reject) => {
         const t = setTimeout(() => reject(new Error('bus join timed out')), 5000);
@@ -328,6 +371,12 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
       client.sendMessage({ body: { text: body.text ?? `answer: option ${body.optionId}`, maya: answer } });
       await new Promise((r) => setTimeout(r, 150)); // let the frame flush before closing
       client.close();
+      // Revoke the per-answer admin token — every answered question used to
+      // leave a live admin credential in bus.db forever.
+      await fetch(`${httpBase}/api/tokens/${tokenId}`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${opts.bus.adminToken}` },
+      }).catch(() => {});
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: `answer failed: ${String(err).slice(0, 200)}` }, 502);
@@ -358,10 +407,15 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     } else if (!body.workerModel) {
       return c.json({ error: 'workerModel required (or pass teamId to run on a standing team)' }, 400);
     }
-    const runId = 'run_' + Date.now().toString(36);
+    // Collision-safe (two Date.now()-ms runs used to overwrite each other in
+    // `runs`) — and the SINGLE source: LoopLead mints its own internal id, so
+    // milestones/reports are rewritten to THIS id below or SSE consumers would
+    // match on a foreign runId.
+    const runId = newRunId();
     const record: RunRecord = { runId, goal: body.goal, state: 'running', startedAt: new Date().toISOString(), events: [] };
     runs.set(runId, record);
-    const onEvent = (e: LoopEvent): void => {
+    const onEvent = (ev: LoopEvent): void => {
+      const e: LoopEvent = ev.kind === 'started' ? { ...ev, runId } : ev;
       record.events.push(e);
       if (e.kind === 'started') record.channelId = e.channelId; // remember where to route answers
       for (const sub of runSubs.get(runId) ?? []) {
@@ -400,12 +454,12 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
       .run(body.goal, { name: runId, ...(body.teamId !== undefined ? { existingTeamId: body.teamId } : {}) })
       .then((report) => {
         record.state = 'done';
-        record.report = report;
+        record.report = { ...report, runId }; // rewrite the lead's internal id
       })
       .catch((err) => {
         record.state = 'done';
         const summary = `service error: ${String(err).slice(0, 300)}`;
-        record.report = { runId, goal: body.goal ?? '', team: null as never, outcome: 'failed', tasks: [], questionsAsked: 0, summary };
+        record.report = { runId, goal: body.goal ?? '', team: null, outcome: 'failed', tasks: [], questionsAsked: 0, summary };
         // The run threw before finish()'s report event — synthesize one so
         // SSE subscribers get a terminal event and the stream closes.
         if (!record.events.some((e) => e.kind === 'report')) {
@@ -420,6 +474,17 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
   await new Promise<void>((resolve) => server.listen(opts.port ?? 4400, opts.host ?? '127.0.0.1', resolve));
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : 0;
+
+  // MCP injection for standing LEAD agents — configured now (the orchestrator's
+  // own URL needs the bound port), BEFORE rehydrate re-spawns any leads.
+  if (opts.mcpServe) {
+    teams.configureMcp({
+      command: opts.mcpServe.command,
+      args: opts.mcpServe.args,
+      orchestratorUrl: `http://${opts.host ?? '127.0.0.1'}:${port}`,
+      gatewayUrl: opts.gatewayBaseUrl,
+    });
+  }
 
   // Re-hydrate standing teams in the background (non-blocking): a restart must
   // not silently wipe live teams + their agents (the dead-composer bug). The
@@ -439,6 +504,9 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
       // Reap spawned agents before exiting so a restart doesn't orphan them
       // (kills each by its tracked child pid — never a grep of `claude`).
       await teams.drainAll('serve shutdown').catch(() => {});
+      // Open SSE streams (run followers, agent /output viewers) hold the server
+      // alive past close() — sever them so shutdown is instant, not an 8s hang.
+      server.closeAllConnections?.();
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
       db.close();
     },

@@ -114,6 +114,9 @@ export interface ModelCatalogEntry {
   quants?: Array<{ quant: Quant; quality: number; bytes: number }>;
   /** Local only: live instance if one is serving this model right now. */
   instance?: ModelInstance;
+  /** Measured: can this model reliably emit tool calls? Top-level — this is
+   * what the gateway catalog emits and what pickers/schedulers read. */
+  toolCalling?: boolean;
 }
 
 /**
