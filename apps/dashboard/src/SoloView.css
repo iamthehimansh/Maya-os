@@ -1,6 +1,10 @@
 /* Solo agent chat — scoped styles (kept separate from the shared styles.css so
    it never collides with the team-chat redesign). Leans on the app's existing
-   tokens/classes (.panel, .act, .chip, .field) for visual consistency. */
+   tokens/classes (.panel, .act, .chip, .field) for visual consistency.
+   THEME RULE: colors come ONLY from styles.css vars (which have light + dark
+   values) — no hardcoded fallbacks. The old dark-hex fallbacks here rendered
+   dark bubbles/composer on the white light theme (--surface-2/--surface-3/
+   --accent-soft weren't defined anywhere, so the fallback always won). */
 
 .solo-chat {
   display: flex;
@@ -35,8 +39,9 @@
   max-width: min(680px, 82%);
   padding: 8px 12px;
   border-radius: 12px;
-  border: 1px solid var(--border, #2a2a2a);
-  background: var(--surface-2, #17181b);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-primary);
 }
 .bubble.agent {
   align-self: flex-start;
@@ -45,7 +50,7 @@
 .bubble.mine {
   align-self: flex-end;
   border-bottom-right-radius: 4px;
-  background: var(--accent-soft, #1d2430);
+  background: var(--accent-soft);
 }
 .bubble-who {
   font-size: 11px;
@@ -69,7 +74,7 @@
   overflow-x: auto;
   padding: 8px;
   border-radius: 8px;
-  background: var(--surface-3, #0e0f11);
+  background: var(--surface-3);
 }
 .bubble-body.md code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -88,10 +93,13 @@
   max-height: 200px;
   padding: 10px 12px;
   border-radius: 10px;
-  border: 1px solid var(--border, #2a2a2a);
-  background: var(--surface-2, #17181b);
-  color: inherit;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-primary);
   font: inherit;
+}
+.solo-composer textarea::placeholder {
+  color: var(--text-muted);
 }
 
 .field.checkbox {

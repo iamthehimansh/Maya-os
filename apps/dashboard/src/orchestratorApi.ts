@@ -157,6 +157,13 @@ export interface AgentStatus {
   lastMessageAt?: string;
 }
 
+/** Attachment metadata riding on a chat message (the file itself lives under
+ * ~/.maya/attachments/<id> on the orchestrator host). */
+export interface AttachmentRef {
+  id: string;
+  filename: string;
+}
+
 /** One message as stored on a bus channel (what the chat panes render). */
 export interface ChannelMessage {
   seq: number;
@@ -164,7 +171,7 @@ export interface ChannelMessage {
   to?: string;
   ts: string;
   fromTokenId?: string; // present ⇒ an agent/token sender; absent ⇒ a human
-  body: { text?: string; maya?: unknown; human?: boolean };
+  body: { text?: string; maya?: unknown; human?: boolean; attachments?: AttachmentRef[] };
 }
 
 const postJson = async <T>(url: string, body: unknown): Promise<T> => {
@@ -180,14 +187,50 @@ export const spawnTeamAgent = (teamId: string, agent: SpawnAgentInput): Promise<
 /** Live roster of a team's persistent agents. */
 export const getTeamAgents = (teamId: string): Promise<AgentStatus[]> => get(`/api/teams/${encodeURIComponent(teamId)}/agents`);
 
-/** Retire an agent — revokes its bus token and kills its tracked process. */
-export const stopTeamAgent = (teamId: string, handle: string): Promise<Response> =>
-  fetch(`/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(handle)}`, { method: "DELETE" });
+/** Retire an agent — revokes its bus token and kills its tracked process.
+ * Throws with the server's error text so callers can surface failures. */
+export async function stopTeamAgent(teamId: string, handle: string): Promise<void> {
+  const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(handle)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(errText(await res.json().catch(() => null), res.status));
+}
 
 /** Post to the team channel; `to` directs it at an @handle (wakes that agent).
- * `human` marks it as the owner's own message so the UI renders it as "You". */
-export const sendTeamMessage = (teamId: string, text: string, to?: string, human?: boolean): Promise<unknown> =>
-  postJson(`/api/teams/${encodeURIComponent(teamId)}/messages`, { text, ...(to ? { to } : {}), ...(human ? { human: true } : {}) });
+ * `human` marks it as the owner's own message so the UI renders it as "You".
+ * `attachments` (≤16) is uploaded-file metadata that rides into the bus body. */
+export const sendTeamMessage = (teamId: string, text: string, to?: string, human?: boolean, attachments?: AttachmentRef[]): Promise<unknown> =>
+  postJson(`/api/teams/${encodeURIComponent(teamId)}/messages`, {
+    text,
+    ...(to ? { to } : {}),
+    ...(human ? { human: true } : {}),
+    ...(attachments && attachments.length > 0 ? { attachments } : {}),
+  });
+
+/** Upload one file into a team's attachment store → {id, filename}. */
+export async function uploadAttachment(teamId: string, file: File): Promise<AttachmentRef> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}/attachments`, { method: "POST", body: fd });
+  if (!res.ok) throw new Error(errText(await res.json().catch(() => null), res.status));
+  return res.json() as Promise<AttachmentRef>;
+}
+
+/** Download URL for a stored attachment. Team-scoped on purpose: both dashboard
+ * proxies (vite dev + the CLI's prod server) only route /api/teams/* to the
+ * orchestrator — the bare /api/attachments/:id/raw route exists there too but
+ * would fall through to the gateway until the proxies learn that prefix. */
+export const attachmentUrl = (teamId: string, attachmentId: string): string =>
+  `/api/teams/${encodeURIComponent(teamId)}/attachments/${encodeURIComponent(attachmentId)}/raw`;
+
+/** Type raw bytes into an agent's interactive pty (the 🖥️ terminal). 400 with
+ * "no interactive terminal" when the agent isn't pty-backed. */
+export async function sendAgentInput(teamId: string, handle: string, data: string): Promise<void> {
+  const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(handle)}/input`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ data }),
+  });
+  if (!res.ok) throw new Error(errText(await res.json().catch(() => null), res.status));
+}
 
 /** Read a bus channel's recent history (GET-only proxy; the chat stream).
  * `after` is a seq cursor — pass the last seen seq to fetch only newer messages,

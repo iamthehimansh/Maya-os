@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import "./TerminalPanel.css";
+import { sendAgentInput } from "./orchestratorApi";
 
 /**
  * Live output view for a spawned agent — himansh's "see what the agent is
@@ -59,6 +60,7 @@ export function TerminalPanel({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<"connecting" | "live" | "closed" | "error">("connecting");
   const [tokens, setTokens] = useState<{ input: number; output: number } | null>(null);
+  const [inputNote, setInputNote] = useState<string | null>(null); // one-time "not interactive" notice
 
   useEffect(() => {
     const host = hostRef.current;
@@ -72,9 +74,42 @@ export function TerminalPanel({
       fontSize: 12,
       theme: { background: "#0b0e14", foreground: "#c7d0e0" },
       scrollback: 8000,
-      disableStdin: true, // output-only view
+      disableStdin: false, // interactive: keystrokes go to the agent's pty below
     });
     term.open(host);
+
+    // Keyboard → the agent's pty. Rapid keystrokes are batched (~30ms) into one
+    // POST; oversized bursts (paste) are chunked to the server's 4KiB/write cap.
+    // A 400 "no interactive terminal" (headless agent) notes once and goes quiet.
+    let inputBuf = "";
+    let inputTimer: ReturnType<typeof setTimeout> | null = null;
+    let inputDead = false; // the server said this agent has no pty — stop sending
+    const flushInput = (): void => {
+      inputTimer = null;
+      if (inputDead || !inputBuf) return;
+      const chunks: string[] = [];
+      for (let i = 0; i < inputBuf.length; i += 4096) chunks.push(inputBuf.slice(i, i + 4096));
+      inputBuf = "";
+      void (async () => {
+        for (const chunk of chunks) {
+          try {
+            await sendAgentInput(teamId, handle, chunk);
+          } catch (err) {
+            const msg = String(err instanceof Error ? err.message : err);
+            if (/no interactive terminal/i.test(msg)) {
+              inputDead = true;
+              setInputNote("⌨ This agent has no interactive terminal (headless) — keystrokes aren't delivered. The view stays read-only.");
+            }
+            return; // don't hammer a failing endpoint with the rest of the burst
+          }
+        }
+      })();
+    };
+    const inputSub = term.onData((d) => {
+      if (inputDead) return;
+      inputBuf += d;
+      if (!inputTimer) inputTimer = setTimeout(flushInput, 30);
+    });
 
     const writeLine = (s: string) => term.write(s.replace(/\r?\n$/, "") + "\r\n");
     const render = (ev: AgentEvent) => {
@@ -166,6 +201,8 @@ export function TerminalPanel({
     return () => {
       disposed = true;
       if (retryTimer) clearTimeout(retryTimer);
+      if (inputTimer) clearTimeout(inputTimer);
+      inputSub.dispose();
       es?.close();
       term.dispose();
     };
@@ -176,7 +213,10 @@ export function TerminalPanel({
       <div className="term-modal" onClick={(e) => e.stopPropagation()}>
         <div className="term-head">
           <span className="term-title">
-            🖥️ {handle} <span className="term-sub">live output</span>
+            🖥️ {handle} <span className="term-sub">live output</span>{" "}
+            <span className="term-interactive" title="Click the terminal and type — keystrokes go to the agent's pty">
+              ⌨ interactive
+            </span>
           </span>
           {tokens && (
             <span className="term-tokens" title="tokens in / out">
@@ -189,6 +229,7 @@ export function TerminalPanel({
           </button>
         </div>
         <div className="term-host" ref={hostRef} style={{ overflow: "auto" }} />
+        {inputNote && <div className="term-note">{inputNote}</div>}
         {status !== "live" && (
           <div className="term-note">
             {status === "connecting" && "Connecting to the agent's output stream…"}

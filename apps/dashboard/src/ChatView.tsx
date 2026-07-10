@@ -6,6 +6,7 @@ import { TeamBuilder } from "./TeamBuilder";
 import { TerminalPanel } from "./TerminalPanel";
 import {
   answerRun,
+  attachmentUrl,
   createTeam,
   deleteTeam,
   drainTeam,
@@ -15,8 +16,11 @@ import {
   sendTeamMessage,
   spawnTeamAgent,
   startLoop,
+  stopTeamAgent,
   streamRun,
+  uploadAttachment,
   type AgentStatus,
+  type AttachmentRef,
   type ChannelMessage,
   type LoopEvent,
   type OpenTeam,
@@ -45,6 +49,16 @@ interface Msg {
   kind?: LoopEvent["kind"];
   runId?: string;
   event?: LoopEvent;
+  attachments?: AttachmentRef[];
+}
+
+/** One composer attachment chip: uploads immediately on pick; `ref` lands when
+ * the server confirms the stored file. */
+interface PendingAtt {
+  key: number;
+  filename: string;
+  uploading: boolean;
+  ref?: AttachmentRef;
 }
 
 const LEAD = "@lead";
@@ -76,6 +90,11 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("All");
   const [showRail, setShowRail] = useState(true);
+  const [killConfirm, setKillConfirm] = useState<string | null>(null); // rail: agent awaiting inline kill-confirm
+  const [killing, setKilling] = useState<string | null>(null); // rail: kill request in flight
+  const [pendingAtts, setPendingAtts] = useState<PendingAtt[]>([]); // composer attachment chips
+  const attKey = useRef(1);
+  const fileInput = useRef<HTMLInputElement>(null);
   const nextId = useRef(1);
   const unsub = useRef<() => void>(() => {});
   const agentPoll = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -112,6 +131,9 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     setBusy(false);
     setError(null);
     setFilter("All"); // a handle from the old team would silently blank the new stream
+    setKillConfirm(null);
+    setKilling(null);
+    setPendingAtts([]); // uploads belong to the OLD team's store — don't carry them over
     lastSeq.current = 0;
     nearBottom.current = true;
     if (chanPoll.current) {
@@ -199,6 +221,47 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     }
   }
 
+  // Kill one agent's process (after the rail's inline confirm) and refresh the roster.
+  async function killAgent(handle: string): Promise<void> {
+    if (!openTeam || killing) return;
+    setKilling(handle);
+    setError(null);
+    try {
+      await stopTeamAgent(openTeam.id, handle);
+      setKillConfirm(null);
+      void getTeamAgents(openTeam.id).then(setAgents).catch(() => {});
+    } catch (e) {
+      setError(`Couldn't stop ${handle}: ${String(e instanceof Error ? e.message : e)}`);
+    } finally {
+      setKilling(null);
+    }
+  }
+
+  // Composer file pick: upload each file immediately; chips track progress.
+  function pickFiles(files: FileList | null): void {
+    if (!openTeam || !files || files.length === 0) return;
+    const room = 16 - pendingAtts.length;
+    if (room <= 0) {
+      setError("A message carries at most 16 attachments.");
+      return;
+    }
+    for (const f of [...files].slice(0, room)) {
+      if (f.size > 25 * 1024 * 1024) {
+        setError(`${f.name} is over the 25MB attachment limit.`);
+        continue;
+      }
+      const key = attKey.current++;
+      setPendingAtts((prev) => [...prev, { key, filename: f.name, uploading: true }]);
+      void uploadAttachment(openTeam.id, f)
+        .then((ref) => setPendingAtts((prev) => prev.map((p) => (p.key === key ? { ...p, uploading: false, ref } : p))))
+        .catch((e) => {
+          setPendingAtts((prev) => prev.filter((p) => p.key !== key));
+          setError(`Upload failed for ${f.name}: ${String(e instanceof Error ? e.message : e)}`);
+        });
+    }
+    if (fileInput.current) fileInput.current.value = ""; // re-picking the same file must re-fire onChange
+  }
+
   function watchAgents(teamId: string): void {
     const tick = (): void => void getTeamAgents(teamId).then(setAgents).catch(() => {});
     void tick();
@@ -256,7 +319,10 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   }
 
   function send(): void {
-    const text = draft.trim();
+    const readyAtts = pendingAtts.filter((p) => p.ref !== undefined).map((p) => p.ref!);
+    // A bare-attachment send (no text) still needs a text line — the bus body
+    // requires one, and agents read the filenames from it.
+    const text = draft.trim() || (openTeam && readyAtts.length > 0 ? `📎 ${readyAtts.map((a) => a.filename).join(", ")}` : "");
     if (!text) return;
 
     // Team mode: post to the team's channel. Agents wake on an @mention or a
@@ -268,15 +334,16 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
         setError("This team is closed — its history is read-only. Open a live team (or create a new one) to send messages.");
         return;
       }
-      if (sending) return;
+      if (sending || pendingAtts.some((p) => p.uploading)) return;
       setDraft("");
+      setPendingAtts([]);
       setError(null);
       setSending(true);
       // Only a mention of a REAL team agent counts — "foo@gmail.com" or a typo'd
       // handle must still fall back to waking the lead, or nobody replies.
       const mentionsSomeone = agents.some((a) => mentionsAgent(text, a.handle));
       const wake = mentionsSomeone ? undefined : (agents.find((a) => a.role === "lead") ?? agents[0])?.handle;
-      void sendTeamMessage(openTeam.id, text, wake, true)
+      void sendTeamMessage(openTeam.id, text, wake, true, readyAtts)
         .catch((e) => setError(String(e instanceof Error ? e.message : e)))
         .finally(() => setSending(false));
       return; // the 2s channel poll reflects it + any replies
@@ -327,7 +394,11 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   }
 
   const composerDisabled = openTeam ? !openLive : false;
-  const sendDisabled = !draft.trim() || (openTeam ? !openLive || sending : busy || !cwd.trim());
+  const uploadsBusy = pendingAtts.some((p) => p.uploading);
+  const hasReadyAtts = pendingAtts.some((p) => p.ref !== undefined);
+  const sendDisabled = openTeam
+    ? !openLive || sending || uploadsBusy || (!draft.trim() && !hasReadyAtts)
+    : busy || !cwd.trim() || !draft.trim();
   const placeholder = openTeam
     ? openLive
       ? `Message ${openTeam.name}… (type @handle to wake an agent)`
@@ -358,7 +429,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
               {closedTeams.length > 0 && (
                 <optgroup label="Finished teams">
                   {closedTeams.slice(0, 40).map((t) => (
-                    <option key={t.id} value={t.id} style={{ color: "#8a8f98" }}>
+                    <option key={t.id} value={t.id} style={{ color: "var(--text-muted)" }}>
                       {t.name} (finished)
                     </option>
                   ))}
@@ -462,6 +533,15 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
                       <span className="cavatar you">You</span>
                     </span>
                     <div className="cmsg-text md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }} />
+                    {openTeam && (m.attachments?.length ?? 0) > 0 && (
+                      <div className="cmsg-atts">
+                        {m.attachments!.map((a) => (
+                          <a key={a.id} className="cmsg-att" href={attachmentUrl(openTeam.id, a.id)} target="_blank" rel="noreferrer">
+                            📎 {a.filename}
+                          </a>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -473,6 +553,15 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
                       {m.kind && <span className="ckind">{ICON[m.kind]}</span>}
                     </span>
                     <div className="cmsg-text md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }} />
+                    {openTeam && (m.attachments?.length ?? 0) > 0 && (
+                      <div className="cmsg-atts">
+                        {m.attachments!.map((a) => (
+                          <a key={a.id} className="cmsg-att" href={attachmentUrl(openTeam.id, a.id)} target="_blank" rel="noreferrer">
+                            📎 {a.filename}
+                          </a>
+                        ))}
+                      </div>
+                    )}
                     {m.kind === "question" && (m.event?.options?.length ?? 0) > 0 && (
                       <div className="q-options">
                         {m.event!.options!.map((o) => (
@@ -498,6 +587,27 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
         </div>
 
         <div className="cchat-composer">
+          {pendingAtts.length > 0 && (
+            <div className="catt-chips">
+              {pendingAtts.map((p) => (
+                <span key={p.key} className={`catt-chip ${p.uploading ? "uploading" : ""}`}>
+                  📎 {p.filename}
+                  {p.uploading ? (
+                    <em className="catt-state">uploading…</em>
+                  ) : (
+                    <button
+                      className="catt-remove"
+                      aria-label={`Remove ${p.filename}`}
+                      title="Remove this attachment"
+                      onClick={() => setPendingAtts((prev) => prev.filter((x) => x.key !== p.key))}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
           <textarea
             rows={1}
             value={draft}
@@ -512,7 +622,22 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
             }}
           />
           <div className="cchat-composer-foot">
-            <span className="muted">💡 Tip: type @handle to wake a specific agent</span>
+            <span className="cchat-foot-left">
+              {openTeam && openLive && (
+                <>
+                  <input ref={fileInput} type="file" multiple style={{ display: "none" }} onChange={(e) => pickFiles(e.target.files)} />
+                  <button
+                    className="catt-pick"
+                    title="Attach a file (uploads immediately, sends with your message)"
+                    aria-label="Attach a file"
+                    onClick={() => fileInput.current?.click()}
+                  >
+                    📎
+                  </button>
+                </>
+              )}
+              <span className="muted">💡 Tip: type @handle to wake a specific agent</span>
+            </span>
             <button className="csend" onClick={send} disabled={sendDisabled} aria-label="Send">
               ↑
             </button>
@@ -547,7 +672,26 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
                   >
                     🖥️
                   </button>
+                  <button
+                    className="crail-kill"
+                    onClick={() => setKillConfirm((cur) => (cur === a.handle ? null : a.handle))}
+                    title="Stop this agent — kills its process"
+                    aria-label={`Stop ${a.handle}`}
+                  >
+                    ✕
+                  </button>
                 </div>
+                {killConfirm === a.handle && (
+                  <div className="crail-confirm" role="alertdialog" aria-label={`Confirm stopping ${a.handle}`}>
+                    <span>Kill {a.handle}'s process?</span>
+                    <button className="act crail-confirm-yes" disabled={killing === a.handle} onClick={() => void killAgent(a.handle)}>
+                      {killing === a.handle ? "Stopping…" : "Stop it"}
+                    </button>
+                    <button className="act" disabled={killing === a.handle} onClick={() => setKillConfirm(null)}>
+                      Cancel
+                    </button>
+                  </div>
+                )}
                 <code className="crail-model">{a.model}</code>
               </div>
             ))
@@ -595,6 +739,7 @@ function channelToMsg(cm: ChannelMessage): Msg {
     who: system ? "system" : human ? "you" : "agent",
     handle: system ? "system" : human ? "You" : cm.from,
     text,
+    ...(cm.body?.attachments && cm.body.attachments.length > 0 ? { attachments: cm.body.attachments } : {}),
   };
 }
 

@@ -7,7 +7,7 @@ import { defineConfig } from "vite";
 // must precede the catch-all "/api".
 const ORCHESTRATOR = "http://127.0.0.1:4400";
 const GATEWAY = "http://127.0.0.1:4100";
-const ORCHESTRATOR_PREFIXES = ["/api/teams", "/api/agents", "/api/runs", "/api/loop", "/api/orchestrator", "/api/cldz"];
+const ORCHESTRATOR_PREFIXES = ["/api/teams", "/api/attachments", "/api/agents", "/api/runs", "/api/loop", "/api/orchestrator", "/api/cldz"];
 
 export default defineConfig({
   plugins: [react()],

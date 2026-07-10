@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getModels, getCldzProfiles, getCloudModels, type CatalogEntry, type CldzProfile, type CloudModel } from "./api";
 import {
+  attachmentUrl,
   createTeam,
   deleteTeam,
   drainTeam,
@@ -8,6 +9,7 @@ import {
   getTeamAgents,
   sendTeamMessage,
   getChannelHistory,
+  stopTeamAgent,
   type AgentStatus,
   type ChannelMessage,
   type SpawnAgentInput,
@@ -62,6 +64,8 @@ export function SoloView(): React.JSX.Element {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [killConfirm, setKillConfirm] = useState(false); // inline confirm for the header's ✕
+  const [killing, setKilling] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -202,6 +206,23 @@ export function SoloView(): React.JSX.Element {
     await teardownSoloTeam(s.teamId);
   }
 
+  // Kill just the agent's PROCESS (the session + its history stay open — the
+  // state chip flips to stopped via the roster poll). Distinct from stop(),
+  // which tears the whole session down.
+  async function killAgent(): Promise<void> {
+    if (!session || killing) return;
+    setKilling(true);
+    setError(null);
+    try {
+      await stopTeamAgent(session.teamId, session.agent.handle);
+      setKillConfirm(false);
+    } catch (e) {
+      setError(`Couldn't stop ${session.agent.handle}: ${String(e instanceof Error ? e.message : e)}`);
+    } finally {
+      setKilling(false);
+    }
+  }
+
   if (!session) {
     return (
       <section className="run" aria-label="Solo agent">
@@ -320,9 +341,31 @@ export function SoloView(): React.JSX.Element {
           <span className="chip">{session.agent.model}</span> <span className={`chip state-${session.agent.state}`}>{session.agent.state}</span>
           <div className="muted small">{session.agent.cwd}</div>
         </div>
-        <button className="act" onClick={() => void stop()}>
-          Stop agent
-        </button>
+        <div className="solo-head-actions">
+          {killConfirm ? (
+            <span className="solo-kill-confirm" role="alertdialog" aria-label={`Confirm killing ${session.agent.handle}`}>
+              <span className="muted">Kill the process?</span>
+              <button className="act" disabled={killing} onClick={() => void killAgent()}>
+                {killing ? "Stopping…" : "Stop it"}
+              </button>
+              <button className="act" disabled={killing} onClick={() => setKillConfirm(false)}>
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button
+              className="act solo-kill"
+              onClick={() => setKillConfirm(true)}
+              title="Stop this agent — kills its process"
+              aria-label={`Stop ${session.agent.handle}`}
+            >
+              ✕
+            </button>
+          )}
+          <button className="act" onClick={() => void stop()}>
+            Stop agent
+          </button>
+        </div>
       </header>
 
       {agentDown && (
@@ -342,6 +385,15 @@ export function SoloView(): React.JSX.Element {
               <div key={m.seq} className={`bubble ${mine ? "mine" : "agent"}`}>
                 <div className="bubble-who">{mine ? "you" : session.agent.handle}</div>
                 <div className="bubble-body md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.body.text ?? "") }} />
+                {(m.body.attachments?.length ?? 0) > 0 && (
+                  <div className="cmsg-atts">
+                    {m.body.attachments!.map((a) => (
+                      <a key={a.id} className="cmsg-att" href={attachmentUrl(session.teamId, a.id)} target="_blank" rel="noreferrer">
+                        📎 {a.filename}
+                      </a>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })

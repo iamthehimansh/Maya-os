@@ -1,13 +1,13 @@
 /* Reusable agent-setup form (Solo, team lead, team members, add-agent). Leans on
    the app's existing .field / .field-row tokens; adds only the per-agent card chrome. */
 .agent-setup {
-  border: 1px solid var(--border, #2a2a2a);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: var(--surface-1, rgba(127, 127, 127, 0.05));
+  background: var(--surface-1);
 }
 .agent-setup-head {
   display: flex;
@@ -27,7 +27,7 @@
 .linklike {
   background: none;
   border: none;
-  color: var(--accent, #4a7);
+  color: var(--accent);
   cursor: pointer;
   font-size: 12px;
   text-decoration: underline;

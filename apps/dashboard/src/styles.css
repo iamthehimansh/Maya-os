@@ -1,12 +1,21 @@
-/* Role tokens (dataviz reference palette) — light is default, dark via media query. */
+/* Role tokens (dataviz reference palette) — light is default, dark via media query.
+   RULE: every component color routes through a var declared here, and EVERY var
+   has a value in BOTH blocks — a var defined in only one scheme is how the
+   half-themed "dark bubbles on a white page" bug happened (SoloView used
+   --surface-2/--surface-3/--accent-soft, which were never declared, so their
+   dark fallbacks applied in light mode too). */
 :root {
+  color-scheme: light; /* native selects/scrollbars follow the active palette */
   --surface-0: #f4f4f2;
   --surface-1: #fcfcfb;
+  --surface-2: #ffffff;      /* chat bubbles, chips — pops slightly off surface-0/1 */
+  --surface-3: #ecebe8;      /* inset code blocks inside bubbles */
   --border: #e2e1dd;
   --text-primary: #0b0b0b;
   --text-secondary: #52514e;
   --text-muted: #8a8985;
   --accent: #2a78d6;
+  --accent-soft: #e3edf9;    /* "my message" bubble bg (readable with text-primary) */
   --status-good: #0ca30c;
   --status-warning: #fab219;
   --status-serious: #ec835a;
@@ -15,13 +24,21 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
+    color-scheme: dark;
     --surface-0: #111110;
     --surface-1: #1a1a19;
+    --surface-2: #232322;
+    --surface-3: #0d0d0c;
     --border: #333330;
     --text-primary: #ffffff;
     --text-secondary: #c3c2b7;
     --text-muted: #8a8985;
     --accent: #3987e5;
+    --accent-soft: #1d2a3d;
+    --status-good: #21b421;
+    --status-warning: #fab219;
+    --status-serious: #ec835a;
+    --status-critical: #e05252;
     --meter-track: #2a2a28;
   }
 }
@@ -197,10 +214,38 @@ button.act.primary:disabled, .act.primary:disabled { opacity: 0.5; cursor: defau
 .h-3 { background: #db2777; } .chandle.h-3 { color: #db2777; background: none; }
 .h-4 { background: #0891b2; } .chandle.h-4 { color: #0891b2; background: none; }
 .h-5 { background: #7c3aed; } .chandle.h-5 { color: #7c3aed; background: none; }
-.cchat-composer { border-top: 1px solid var(--border); padding: 12px 16px; }
+.cchat-composer { border-top: 1px solid var(--border); padding: 12px 16px; background: var(--surface-1); }
 .cchat-composer textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-0); color: var(--text-primary); resize: none; max-height: 140px; }
 .cchat-composer textarea::placeholder { color: var(--text-muted); }
-.cchat-composer-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+.cchat-composer-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; gap: 10px; }
+.cchat-foot-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
+/* ── Chat attachments (composer chips + bubble links) ── */
+.catt-pick { font: inherit; font-size: 15px; background: var(--surface-0); border: 1px solid var(--border); border-radius: 8px; color: var(--text-secondary); cursor: pointer; padding: 3px 9px; flex: none; }
+.catt-pick:hover { border-color: var(--accent); color: var(--text-primary); }
+.catt-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.catt-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-primary); max-width: 260px; overflow: hidden; }
+.catt-chip.uploading { opacity: 0.7; }
+.catt-state { font-style: normal; color: var(--text-muted); font-size: 11px; }
+.catt-remove { font: inherit; font-size: 11px; background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 0 2px; line-height: 1; }
+.catt-remove:hover { color: var(--status-critical); }
+.cmsg-atts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.cmsg.you .cmsg-atts { justify-content: flex-end; }
+.cmsg-att { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-primary); text-decoration: none; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmsg-att:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Rail: kill-agent ✕ + inline confirm ── */
+.crail-kill { background: none; border: none; cursor: pointer; font-size: 12px; padding: 0 2px; margin-left: 2px; line-height: 1; color: var(--text-muted); opacity: 0.7; }
+.crail-kill:hover { opacity: 1; color: var(--status-critical); }
+.crail-confirm { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-top: 8px; padding: 6px 8px; border: 1px solid var(--status-critical); border-radius: 8px; background: var(--surface-0); }
+.crail-confirm-yes { border-color: var(--status-critical); color: var(--status-critical); }
+.crail-confirm-yes:hover { border-color: var(--status-critical); }
+
+/* ── Solo header: kill ✕ + inline confirm ── */
+.solo-head-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.solo-kill { color: var(--text-muted); }
+.solo-kill:hover { color: var(--status-critical); border-color: var(--status-critical); }
+.solo-kill-confirm { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--status-critical); border-radius: 8px; background: var(--surface-0); }
 .csend { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--accent); color: #fff; font-size: 16px; cursor: pointer; flex: none; }
 .csend:disabled { opacity: 0.4; cursor: default; }
 .cchat-rail { width: 288px; flex: none; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; padding-right: 2px; }

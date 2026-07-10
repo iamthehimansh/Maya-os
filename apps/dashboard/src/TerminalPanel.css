@@ -35,6 +35,16 @@
 
 .term-title { font-weight: 600; }
 .term-sub { color: #6b7688; font-weight: 400; margin-left: 4px; }
+/* Subtle "you can type here" hint next to the title. */
+.term-interactive {
+  color: #6b7688;
+  font-weight: 400;
+  font-size: 11px;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border: 1px solid #1e2636;
+  border-radius: 999px;
+}
 
 .term-tokens {
   margin-left: auto;
