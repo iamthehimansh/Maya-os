@@ -186,10 +186,20 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (typeof mcpConfig === 'string' && mcpConfig) args.push('--mcp-config', mcpConfig);
   }
 
+  /** The model name the claude CLI should see. Gateway-backed agents pass the
+   * Maya ModelId verbatim (the gateway resolves it); a cldz-profile agent talks
+   * to the REAL Anthropic API, where `anthropic/claude-x` is not a model —
+   * strip the provider prefix or the TUI errors "model may not exist". */
+  private cliModel(spec: AgentSpawnSpec): string {
+    const cldz = spec.options?.['cldzProfile'];
+    const onRealApi = cldz !== undefined && cldz !== false;
+    return onRealApi && spec.model.startsWith('anthropic/') ? spec.model.slice('anthropic/'.length) : spec.model;
+  }
+
   /** Args for INTERACTIVE claude in a pty — the real TUI, NOT headless
    * `--print`/stream-json (that would show JSON, not a terminal). */
   private buildPtyArgs(spec: AgentSpawnSpec): string[] {
-    const args = ['--model', spec.model];
+    const args = ['--model', this.cliModel(spec)];
     if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--dangerously-skip-permissions');
     this.pushOptionArgs(spec, args);
     return args;
@@ -217,7 +227,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const args = ['--print', '--output-format', 'stream-json', '--verbose'];
     if (interactive) args.push('--input-format', 'stream-json');
     else args.push(spec.prompt as string);
-    args.push('--model', spec.model);
+    args.push('--model', this.cliModel(spec));
     if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--dangerously-skip-permissions');
     this.pushOptionArgs(spec, args);
     return args;
