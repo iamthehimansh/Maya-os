@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import type { AgentEvent, AgentSpawnSpec, AgentSpec, AgentStatus, LoopBody, MayaDb, TaskRow, TeamRow, TeamTopology } from '@maya-ai/core';
 import { HANDLE_RE, RESERVED_LEAD_HANDLE } from '@maya-ai/core';
 import type { AgentRuntime, AgentBusBridge } from '@maya-ai/agent-runtime';
+import { ensureMayaTeamSkill } from '@maya-ai/agent-runtime';
 import { BusClient } from '@maya-ai/bus-client';
 
 export interface MemberTemplate {
@@ -437,9 +438,15 @@ export class TeamManager {
       const outboxPath = join(ioDir, 'out.jsonl');
       writeFileSync(inboxPath, '');
       writeFileSync(outboxPath, '');
-      const walkieHint =
-        `You are a persistent agent on a shared team channel. INCOMING: new channel messages are appended as JSON lines to the file at ${inboxPath} — read it to see who said what. OUTGOING: to say ANYTHING on the channel, APPEND a line to the file at ${outboxPath} (plain text, or a JSON line {"text":"…","to":"@who"} to direct it) — the system posts it for you. You may append several lines over time (e.g. with sleep between them) and message on your own initiative; you don't have to wait to be asked. Use your Read/Write/Bash tools on those two absolute paths. Keep running.`;
+      const isPty = spec.type === 'claude-code' && spec.pty !== false;
+      const walkieHint = isPty
+        ? // Self-driven (himansh's walkie-talkie architecture): the agent runs
+          // /maya-team — ITS OWN Monitor on the inbox wakes it per message
+          // (untagged included); the bridge never types messages in.
+          `You are a persistent agent on a Maya team channel. Run /maya-team NOW to start your loop — it wires your Monitor to $MAYA_AGENT_INBOX (every channel message wakes you) and teaches you to speak via $MAYA_AGENT_OUTBOX. If the command is unavailable: read new JSON lines from ${inboxPath} on a 1s Monitor loop and append replies to ${outboxPath} (plain text or {"text":"…","to":"@who"}). Keep running forever.`
+        : `You are a persistent agent on a shared team channel. INCOMING: new channel messages are appended as JSON lines to the file at ${inboxPath} — read it to see who said what. OUTGOING: to say ANYTHING on the channel, APPEND a line to the file at ${outboxPath} (plain text, or a JSON line {"text":"…","to":"@who"} to direct it) — the system posts it for you. You may append several lines over time (e.g. with sleep between them) and message on your own initiative; you don't have to wait to be asked. Use your Read/Write/Bash tools on those two absolute paths. Keep running.`;
       const systemPrompt = [spec.systemPrompt, walkieHint].filter(Boolean).join('\n\n');
+      if (isPty) ensureMayaTeamSkill(); // idempotent — /maya-team available to the spawned TUI
       // Standing LEAD agents get Maya's own MCP server (spawn_agent/send_to/…)
       // via a per-team --mcp-config file, when the serve enabled it.
       let mcpConfigPath: string | undefined;
@@ -472,7 +479,7 @@ export class TeamManager {
         adapter: spec.type as AgentSpawnSpec['adapter'],
         model: spec.model as AgentSpawnSpec['model'],
         cwd: spec.cwd,
-        env: { MAYA_AGENT_INBOX: inboxPath, MAYA_AGENT_OUTBOX: outboxPath },
+        env: { MAYA_AGENT_INBOX: inboxPath, MAYA_AGENT_OUTBOX: outboxPath, MAYA_AGENT_HANDLE: handle },
         // NO `prompt` → the adapter runs INTERACTIVE: the process stays alive and
         // is driven by bus messages (the bridge feeds @mentions in, posts out).
         permissionMode: 'auto',
@@ -494,12 +501,23 @@ export class TeamManager {
         await adapter.kill(agentHandle.id).catch(() => {});
         throw new Error(`team ${teamId} drained while spawning ${handle}`);
       }
-      const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, { channelId: lt.team.channelId, label: handle, inboxPath, outboxPath });
+      const { busHandle } = await this.opts.bridge.attach(adapter, agentHandle, {
+        channelId: lt.team.channelId,
+        label: handle,
+        inboxPath,
+        outboxPath,
+        // pty agents run /maya-team: their own Monitor reads the inbox (tagged
+        // AND untagged) — the bridge must not also type messages in.
+        ...(isPty ? { selfDriven: true } : {}),
+      });
       if (lt.draining || !this.live.has(teamId)) {
         await this.opts.bridge.detach(agentHandle.id).catch(() => {});
         await adapter.kill(agentHandle.id).catch(() => {});
         throw new Error(`team ${teamId} drained while spawning ${handle}`);
       }
+      // Bootstrap the self-driven loop: the ONE line the bridge ever types into
+      // a pty agent — /maya-team starts its Monitor + outbox discipline.
+      if (isPty) void adapter.send(agentHandle.id, '/maya-team').catch(() => {});
       const entry: PersistentAgent = {
         spec,
         agentId: agentHandle.id,
@@ -622,9 +640,12 @@ export class TeamManager {
    * the lead's MCP `send_to` (directed to an @handle), the human chat composer,
    * and @wake — a directed message wakes the target agent via the bridge.
    */
-  postMessage(teamId: string, text: string, to?: string, human?: boolean): void {
+  postMessage(teamId: string, text: string, to?: string, human?: boolean, attachments?: Array<{ id: string; filename: string }>): void {
     const lt = this.mustLive(teamId);
-    lt.manager.sendMessage({ ...(to ? { to } : {}), body: { text, ...(human ? { human: true } : {}) } });
+    lt.manager.sendMessage({
+      ...(to ? { to } : {}),
+      body: { text, ...(human ? { human: true } : {}), ...(attachments && attachments.length > 0 ? { attachments } : {}) },
+    });
   }
 
   /**

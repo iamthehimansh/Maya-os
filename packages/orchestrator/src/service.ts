@@ -18,7 +18,12 @@
  * configured (same pattern as the gateway's control API).
  */
 
+import { randomBytes } from 'node:crypto';
+import { createReadStream, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
 import { MayaDb, type AgentSpec, type LoopBody } from '@maya-ai/core';
@@ -150,6 +155,27 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     }
   });
 
+  // RAW terminal input — the dashboard's interactive 🖥️ types the human's
+  // keystrokes straight into the agent's pty (bytes, no Enter appended). Only
+  // pty-capable adapters support it; message-level talk stays on /messages.
+  app.post('/api/teams/:id/agents/:handle/input', async (c) => {
+    const id = c.req.param('id');
+    if (!teams.isLive(id)) return c.json({ error: `team ${id} is not live` }, 400);
+    const handle = decodeURIComponent(c.req.param('handle'));
+    const live = teams.agentLiveHandle(id, handle);
+    if (!live) return c.json({ error: `no live agent ${handle} on team ${id}` }, 404);
+    const body = (await c.req.json().catch(() => null)) as { data?: string } | null;
+    if (typeof body?.data !== 'string' || body.data.length === 0) return c.json({ error: 'data (string) required' }, 400);
+    if (body.data.length > 4096) return c.json({ error: 'data too large (4KiB max per write)' }, 400);
+    try {
+      if (!live.adapter.writeRaw) return c.json({ error: 'this agent has no interactive terminal (not a pty agent)' }, 400);
+      live.adapter.writeRaw(live.agentId, body.data);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: String(err instanceof Error ? err.message : err) }, 400);
+    }
+  });
+
   // Live per-agent output stream (SSE) — powers the dashboard "watch the agent's
   // terminal" panel (himansh's right-rail live view). Streams the agent's
   // structured events (log lines, say, error, state, tokens) as they arrive via
@@ -197,16 +223,127 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     });
   });
 
+  // ── Chat attachments ────────────────────────────────────────────────────
+  // Files the owner drops into the chat composer. Stored flat under
+  // ~/.maya/attachments/<random>-<sanitized-name>; the stored basename IS the
+  // attachment id, so agents can Read the file directly from that dir.
+  const ATTACH_DIR = join(homedir(), '.maya', 'attachments');
+  const ATTACH_MAX_BYTES = 25 * 1024 * 1024;
+  /** Strip any path parts + shell-hostile chars; never empty, bounded length. */
+  const sanitizeFilename = (name: string): string => {
+    const base = name.replace(/^.*[\\/]/, '').replace(/[^\w.\- ()]+/g, '_').replace(/\.{2,}/g, '.').trim();
+    return (base.replace(/^\.+/, '') || 'file').slice(0, 120);
+  };
+  const contentTypeFor = (name: string): string => {
+    const ext = (/\.([a-z0-9]+)$/i.exec(name)?.[1] ?? '').toLowerCase();
+    const types: Record<string, string> = {
+      txt: 'text/plain; charset=utf-8', md: 'text/markdown; charset=utf-8', csv: 'text/csv; charset=utf-8',
+      json: 'application/json', html: 'text/html; charset=utf-8', pdf: 'application/pdf',
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+      zip: 'application/zip', gz: 'application/gzip', mp4: 'video/mp4', mp3: 'audio/mpeg', wav: 'audio/wav',
+    };
+    return types[ext] ?? 'application/octet-stream';
+  };
+  /** Serve one stored attachment (shared by the bare + team-scoped routes). */
+  const serveAttachment = (id: string): Response => {
+    const jsonErr = (error: string, status: number): Response =>
+      new Response(JSON.stringify({ error }), { status, headers: { 'content-type': 'application/json' } });
+    // Path-traversal guard: the id is a stored basename — never a path.
+    if (id.includes('/') || id.includes('\\') || id.includes('..')) return jsonErr('bad attachment id', 400);
+    const path = join(ATTACH_DIR, id);
+    let size: number;
+    try {
+      const st = statSync(path);
+      if (!st.isFile()) return jsonErr('attachment not found', 404);
+      size = st.size;
+    } catch {
+      return jsonErr('attachment not found', 404);
+    }
+    const filename = id.replace(/^[0-9a-f]+-/, '') || id;
+    const stream = Readable.toWeb(createReadStream(path)) as ReadableStream<Uint8Array>;
+    return new Response(stream, {
+      headers: {
+        'content-type': contentTypeFor(filename),
+        'content-length': String(size),
+        'content-disposition': `attachment; filename="${filename.replace(/["\r\n]/g, '')}"`,
+      },
+    });
+  };
+
+  // Upload: multipart (field "file") or JSON {filename, dataBase64} → {id, filename}.
+  app.post('/api/teams/:id/attachments', async (c) => {
+    const id = c.req.param('id');
+    if (!teams.isLive(id)) return c.json({ error: `team ${id} is not live` }, 400);
+    let filename: string;
+    let bytes: Buffer;
+    if ((c.req.header('content-type') ?? '').includes('multipart/form-data')) {
+      const form = await c.req.parseBody().catch(() => null);
+      const file = form?.['file'];
+      // Duck-typed File check — works whether the runtime exposes the File global or not.
+      if (!file || typeof file === 'string' || typeof (file as File).arrayBuffer !== 'function') {
+        return c.json({ error: 'multipart field "file" required' }, 400);
+      }
+      const f = file as File;
+      if (f.size > ATTACH_MAX_BYTES) return c.json({ error: 'file too large (25MB max)' }, 413);
+      filename = f.name || 'file';
+      bytes = Buffer.from(await f.arrayBuffer());
+    } else {
+      const body = (await c.req.json().catch(() => null)) as { filename?: string; dataBase64?: string } | null;
+      if (!body?.filename || typeof body.dataBase64 !== 'string') {
+        return c.json({ error: 'filename + dataBase64 required (or multipart field "file")' }, 400);
+      }
+      filename = body.filename;
+      bytes = Buffer.from(body.dataBase64, 'base64');
+    }
+    if (bytes.length > ATTACH_MAX_BYTES) return c.json({ error: 'file too large (25MB max)' }, 413);
+    const safe = sanitizeFilename(filename);
+    const storedId = `${randomBytes(6).toString('hex')}-${safe}`;
+    try {
+      mkdirSync(ATTACH_DIR, { recursive: true });
+      writeFileSync(join(ATTACH_DIR, storedId), bytes);
+    } catch (err) {
+      return c.json({ error: `store failed: ${String(err instanceof Error ? err.message : err)}` }, 500);
+    }
+    return c.json({ id: storedId, filename: safe }, 201);
+  });
+
+  // Download. The team-scoped alias exists because both dashboard proxies (vite
+  // dev + apps/cli/src/dashboard.ts) route by prefix and only /api/teams/* comes
+  // here — bare /api/attachments/* would fall through to the gateway until the
+  // proxies add that prefix.
+  app.get('/api/attachments/:id/raw', (c) => serveAttachment(c.req.param('id')));
+  app.get('/api/teams/:id/attachments/:aid/raw', (c) => serveAttachment(c.req.param('aid')));
+
   // Post a message into the team channel. Powers 02's MCP `send_to` (directed to
   // an @handle), the human chat composer, and @wake (a directed message wakes
   // the addressed agent via the bridge).
   app.post('/api/teams/:id/messages', async (c) => {
     const id = c.req.param('id');
     if (!teams.isLive(id)) return c.json({ error: `team ${id} is not live` }, 400);
-    const body = (await c.req.json().catch(() => null)) as { text?: string; to?: string; human?: boolean } | null;
+    const body = (await c.req.json().catch(() => null)) as {
+      text?: string;
+      to?: string;
+      human?: boolean;
+      attachments?: Array<{ id?: unknown; filename?: unknown }>;
+    } | null;
     if (!body?.text) return c.json({ error: 'text required' }, 400);
+    // Optional attachment metadata rides along into the bus body (≤16, ids are
+    // stored basenames — reject anything path-shaped).
+    let attachments: Array<{ id: string; filename: string }> | undefined;
+    if (body.attachments !== undefined) {
+      if (!Array.isArray(body.attachments) || body.attachments.length > 16) {
+        return c.json({ error: 'attachments must be an array of ≤16 {id, filename}' }, 400);
+      }
+      attachments = [];
+      for (const a of body.attachments) {
+        if (typeof a?.id !== 'string' || typeof a.filename !== 'string' || a.id.includes('/') || a.id.includes('\\') || a.id.includes('..')) {
+          return c.json({ error: 'each attachment needs a plain string id (no paths) + filename' }, 400);
+        }
+        attachments.push({ id: a.id, filename: a.filename });
+      }
+    }
     try {
-      teams.postMessage(id, body.text, body.to, body.human === true);
+      teams.postMessage(id, body.text, body.to, body.human === true, attachments);
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: String(err instanceof Error ? err.message : err) }, 400);
