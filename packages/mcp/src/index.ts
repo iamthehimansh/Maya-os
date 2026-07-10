@@ -32,6 +32,7 @@ export function buildServer(client: MayaClient): McpServer {
       systemPrompt: z.string().optional().describe("persona/instructions"),
       allowedTools: z.array(z.string()).optional().describe("tool scope YOU grant this agent, e.g. [\"Write\",\"Edit\",\"Bash\"]"),
       allowAllTools: z.boolean().optional().describe("give the agent ALL tools (full freedom) — overrides allowedTools"),
+      cldzProfile: z.string().optional().describe('auth profile for REAL cloud Claude (e.g. "ak" = pay-per-use API key) — use with an anthropic/* model when local models are too weak'),
     },
     async (args) => {
       try {
@@ -43,6 +44,9 @@ export function buildServer(client: MayaClient): McpServer {
           ...(args.role ? { role: args.role } : {}),
           ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
           ...(args.allowAllTools ? { allowedTools: ["*"] } : args.allowedTools ? { allowedTools: args.allowedTools } : {}),
+          // Real cloud Claude always tool-calls; skip the local-model capability
+          // gate (it can't measure a cloud model) so the spawn isn't refused.
+          ...(args.cldzProfile ? { cldzProfile: args.cldzProfile, allowNonToolCalling: true } : {}),
         };
         const r = await client.spawnAgent(agent);
         return text(`spawned ${args.handle} (${args.type} on ${args.model}) — ${JSON.stringify(r)}`);
