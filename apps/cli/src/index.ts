@@ -31,6 +31,9 @@ Usage:
                                  [--worker <model>] [--cwd <dir>] [--tools T,T] [--budget N] [--max-turns N]
   maya team list                 live teams with budgets + token burn
   maya team drain <id>           stop a standing team
+  maya remote                    control Maya from anywhere: bearer-guarded proxy (default :4500)
+                                 to the orchestrator API + cloudflared public URL
+                                 [--port N] [--no-tunnel]  — needs a running \`maya serve\`
   maya doctor                    check llama.cpp, claude CLI, RAM tier, ports
   maya --version
 
@@ -590,6 +593,78 @@ export async function main(argv: string[]): Promise<void> {
     } else {
       console.log("(re-run with --save to make this the model's default context)");
     }
+    return;
+  }
+
+  if (cmd === "remote") {
+    ensureDirs();
+    const cfg = loadConfig();
+    const portIdx = argv.indexOf("--port");
+    const portRaw = portIdx !== -1 ? argv[portIdx + 1] : undefined;
+    const portFlag = portRaw !== undefined ? Number(portRaw) : undefined;
+    if (portFlag !== undefined && (!Number.isInteger(portFlag) || portFlag < 1 || portFlag > 65535)) {
+      console.error("usage: maya remote [--port N] [--no-tunnel]  (N = 1–65535)");
+      process.exitCode = 1;
+      return;
+    }
+    // Remote is a window onto a RUNNING serve — probe the orchestrator first.
+    try {
+      const res = await fetch(`http://127.0.0.1:${cfg.orchestrator.port}/api/orchestrator/health`, { signal: AbortSignal.timeout(3_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      console.error(`orchestrator not reachable on :${cfg.orchestrator.port} — start \`maya serve\` first, then run \`maya remote\`.`);
+      process.exitCode = 1;
+      return;
+    }
+    const { startRemoteProxy, startTunnel } = await import("./remote.js");
+    let proxy: Awaited<ReturnType<typeof startRemoteProxy>>;
+    try {
+      proxy = await startRemoteProxy({ orchestratorPort: cfg.orchestrator.port, ...(portFlag !== undefined ? { port: portFlag } : {}) });
+    } catch (err) {
+      console.error(`remote proxy failed to start: ${err instanceof Error ? err.message : err} (is the port taken? try --port)`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`maya remote   → http://127.0.0.1:${proxy.port}  (bearer-guarded proxy → orchestrator :${cfg.orchestrator.port}; gateway stays local-only)`);
+    let shuttingDown = false;
+    let tunnel: import("./remote.js").ActiveTunnel | null = null;
+    if (!argv.includes("--no-tunnel")) {
+      try {
+        const t = await startTunnel(proxy.port);
+        if (t.url === null) {
+          console.log(`tunnel        → off (cloudflared not found — ${t.installHint}; or bring your own tunnel with --no-tunnel)`);
+        } else {
+          tunnel = t;
+          console.log(`public url    → ${t.url}`);
+          t.child.on("exit", (code) => {
+            if (!shuttingDown) console.error(`[tunnel] cloudflared exited (code ${code ?? "?"}) — the public URL is dead; restart \`maya remote\``);
+          });
+        }
+      } catch (err) {
+        console.error(`tunnel failed: ${err instanceof Error ? err.message : err} — proxy still up on 127.0.0.1:${proxy.port}`);
+      }
+    }
+    const base = tunnel?.url ?? `http://127.0.0.1:${proxy.port}`;
+    // The ONE deliberate token print — this terminal is the owner's handoff.
+    console.log(`\ntoken file    → ${proxy.tokenPath}  (0600; reused across runs — delete it to rotate)`);
+    console.log(`token         → ${proxy.token}`);
+    console.log(`\nuse it from anywhere:`);
+    console.log(`  # list teams`);
+    console.log(`  curl -H "Authorization: Bearer ${proxy.token}" ${base}/api/teams`);
+    console.log(`  # start a loop (goal + leadModel + cwd required; teamId targets a standing team)`);
+    console.log(`  curl -X POST -H "Authorization: Bearer ${proxy.token}" -H "content-type: application/json" \\`);
+    console.log(`       ${base}/api/loop -d '{"goal":"…","leadModel":"local/<model>","cwd":"${process.cwd()}","teamId":"t_…"}'`);
+    console.log("\nCtrl-C to stop (closes tunnel + proxy).");
+    const shutdown = (): void => {
+      if (shuttingDown) process.exit(130);
+      shuttingDown = true;
+      console.log("\nshutting down remote… (Ctrl-C again to force)");
+      tunnel?.child.kill("SIGTERM");
+      proxy.close();
+      setTimeout(() => process.exit(0), 2_000);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
     return;
   }
 
