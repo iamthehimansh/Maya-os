@@ -1,7 +1,7 @@
 {
   "name": "maya-os",
   "version": "0.0.1",
-  "description": "Maya \u2014 a local-first AI operating system for developers. One command: models, coding agents, teams, and a Loop Agent lead on your Mac.",
+  "description": "Local-first AI OS for developers \u2014 model gateway with RAM guardrails, real-PTY Claude Code agent teams, proactive agents, verified loops, web dashboard. One command: maya serve.",
   "license": "MIT",
   "author": "Himansh Raj <iamthehimansh@gmail.com>",
   "type": "module",
@@ -15,10 +15,12 @@
     ".": "./dist/index.js"
   },
   "files": [
-    "dist",
+    "LICENSE",
+    "README.md",
     "bin",
-    "web",
-    "templates"
+    "dist",
+    "templates",
+    "web"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && tsup && node scripts/copy-assets.mjs",
@@ -43,10 +45,17 @@
   "keywords": [
     "ai",
     "agents",
-    "llama.cpp",
-    "gguf",
+    "claude",
     "claude-code",
-    "apple-silicon",
-    "local-first"
-  ]
+    "llama.cpp",
+    "local-llm",
+    "gguf",
+    "orchestrator",
+    "multi-agent",
+    "dashboard"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iamthehimansh/maya"
+  }
 }
