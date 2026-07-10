@@ -19,7 +19,10 @@ export interface CatalogEntry {
   contextLength?: number;
   quants?: Array<{ quant: string; quality: number; bytes: number }>;
   instance?: Instance;
-  /** Measured on first load — only tool-callers are valid loop WORKERS. */
+  /** Measured on first load — only tool-callers are valid loop WORKERS.
+   * The gateway emits this at the TOP level of each /api/models entry. */
+  toolCalling?: boolean;
+  /** @deprecated the gateway never emitted this nested shape — read `toolCalling`. */
   capabilities?: { toolCalling?: boolean };
 }
 
@@ -37,8 +40,16 @@ export type RuntimeEvent =
   | { type: "pull_progress"; model: string; pct: number }
   | { type: "pull_failed"; model: string; error: string };
 
-export const getModels = (): Promise<CatalogEntry[]> => fetch("/api/models").then((r) => r.json());
-export const getHealth = (): Promise<Health> => fetch("/api/runtime/health").then((r) => r.json());
+/** GET json or throw — error bodies (e.g. the proxy's 502 {error:{…}}) must
+ * surface as failures, not parse "successfully" and crash views mid-render. */
+const getJson = <T>(url: string): Promise<T> =>
+  fetch(url).then((r) => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json() as Promise<T>;
+  });
+
+export const getModels = (): Promise<CatalogEntry[]> => getJson("/api/models");
+export const getHealth = (): Promise<Health> => getJson("/api/runtime/health");
 
 /** A cldz auth profile (safe view — no secrets) for the "run as" agent picker.
  * Served by the orchestrator (`GET /api/cldz/profiles`, 01's adapter reader). */
@@ -74,11 +85,13 @@ export const loadModel = (name: string, force = false): Promise<Response> =>
 export const unloadModel = (name: string): Promise<Response> =>
   fetch(`/api/models/${encodeURIComponent(name)}/unload`, { method: "POST" });
 
-export const pullModel = (source: string): Promise<Response> =>
+/** `name` pins the installed id to `local/<name>` (else it's derived from the
+ * source filename, dots-to-dashes — which never matches curated chip names). */
+export const pullModel = (source: string, name?: string): Promise<Response> =>
   fetch("/api/models/pull", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ source }),
+    body: JSON.stringify({ source, ...(name ? { name } : {}) }),
   });
 
 /** Subscribe to the gateway's SSE runtime-event stream. Returns an unsubscribe. */

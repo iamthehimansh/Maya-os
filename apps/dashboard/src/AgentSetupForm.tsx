@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCloudModels, type CatalogEntry, type CldzProfile, type CloudModel } from "./api";
 import type { SpawnAgentInput } from "./orchestratorApi";
 import "./AgentSetupForm.css";
@@ -30,7 +30,10 @@ export function newAgentDraft(handle: string, defaultModel = "", cwd = "~/maya-d
   return { handle, type: "claude-code", runAs: "", model: defaultModel, cloudModel: "opus", cwd, allTools: false };
 }
 
-/** Resolve a draft into the spawn payload (cloud vs local model, tools, profile). */
+/** Resolve a draft into the spawn payload (cloud vs local model, tools, profile).
+ * Everything this form creates is a STANDING agent (team lead/member, solo,
+ * add-agent), so it runs a real PTY — explicit here so the default holds even
+ * against an older orchestrator without the server-side pty default. */
 export function toSpawnInput(d: AgentDraft, role?: "lead" | "worker"): SpawnAgentInput {
   const cloud = d.runAs !== "";
   const handle = d.handle.trim().startsWith("@") ? d.handle.trim() : `@${d.handle.trim()}`;
@@ -39,6 +42,7 @@ export function toSpawnInput(d: AgentDraft, role?: "lead" | "worker"): SpawnAgen
     type: d.type,
     model: cloud ? d.cloudModel : d.model,
     cwd: d.cwd.trim(),
+    pty: true,
     ...(role ? { role } : {}),
     ...(cloud ? { cldzProfile: d.runAs } : {}),
     ...(d.allTools ? { allowedTools: ["*"] } : { allowedTools: ["Read", "Write", "Edit", "Bash"] }),
@@ -65,7 +69,12 @@ interface Props {
 
 export function AgentSetupForm({ value, onChange, models, profiles, title, onRemove, handleLocked }: Props): React.JSX.Element {
   const cloud = value.runAs !== "";
-  const set = (patch: Partial<AgentDraft>): void => onChange({ ...value, ...patch });
+  // Patch against the LATEST draft, not the render-time closure — async
+  // callers (the cloud-model autopick below) must not revert fields the user
+  // edited while their fetch was in flight.
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const set = (patch: Partial<AgentDraft>): void => onChange({ ...valueRef.current, ...patch });
 
   // When running on a cldz profile, list the REAL models from the provider (via
   // the credential, server-side) instead of a hardcoded opus/sonnet.
@@ -81,7 +90,7 @@ export function AgentSetupForm({ value, onChange, models, profiles, title, onRem
         if (!alive) return;
         setCloudModels(ms);
         // Pick a real model id if the current value isn't one of them (prefer opus).
-        if (ms.length > 0 && !ms.some((m) => m.id === value.cloudModel)) {
+        if (ms.length > 0 && !ms.some((m) => m.id === valueRef.current.cloudModel)) {
           set({ cloudModel: (ms.find((m) => /opus/i.test(m.id)) ?? ms[0]!).id });
         }
       })
@@ -155,7 +164,7 @@ export function AgentSetupForm({ value, onChange, models, profiles, title, onRem
               {models.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.id}
-                  {m.capabilities?.toolCalling ? " ✓tools" : ""}
+                  {m.toolCalling ? " ✓tools" : ""}
                 </option>
               ))}
             </select>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChatView } from "./ChatView";
 import { ModelsView } from "./ModelsView";
 import { RunPanel } from "./RunPanel";
@@ -6,7 +6,7 @@ import { FilesView } from "./FilesView";
 import { SettingsView } from "./SettingsView";
 import { SoloView } from "./SoloView";
 import { TeamsView } from "./TeamsView";
-import type { OpenTeam } from "./orchestratorApi";
+import { getTeams, type OpenTeam } from "./orchestratorApi";
 
 /**
  * Chat is the front door — talk to the Loop Agent in plain language, or click a
@@ -22,6 +22,27 @@ export function App(): React.JSX.Element {
   const [active, setActive] = useState<Tab>("Chat");
   // The team the user clicked "💬 Chat" on in Teams — Chat opens it and connects.
   const [openTeam, setOpenTeam] = useState<OpenTeam | null>(null);
+  const openTeamId = openTeam?.id;
+
+  // Liveness must come from the POLLED list, never the click-time snapshot: a
+  // team can drain/close (or come back) while its chat is open, and the header
+  // badge + composer must follow reality.
+  useEffect(() => {
+    if (openTeamId === undefined) return;
+    const tick = (): void => {
+      void getTeams()
+        .then((ts) => {
+          const row = ts.find((t) => t.id === openTeamId);
+          if (!row) return;
+          const live = row.live ?? row.state !== "closed";
+          setOpenTeam((cur) => (cur && cur.id === openTeamId && cur.live !== live ? { ...cur, live } : cur));
+        })
+        .catch(() => {});
+    };
+    tick();
+    const t = setInterval(tick, 3000);
+    return () => clearInterval(t);
+  }, [openTeamId]);
 
   function openChat(team: OpenTeam): void {
     setOpenTeam(team);

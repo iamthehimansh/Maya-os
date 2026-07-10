@@ -39,6 +39,7 @@ export function ModelsView(): React.JSX.Element {
   const [offline, setOffline] = useState(false);
   const [pullSrc, setPullSrc] = useState("");
   const [pullPct, setPullPct] = useState<{ model: string; pct: number } | null>(null);
+  const [pullErr, setPullErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [events, setEvents] = useState<string[]>([]);
   const [wontFit, setWontFit] = useState<Set<string>>(new Set());
@@ -67,6 +68,7 @@ export function ModelsView(): React.JSX.Element {
     const off = onRuntimeEvents((ev: RuntimeEvent) => {
       if (ev.type === "pull_failed") {
         setPullPct(null);
+        setPullErr(`${ev.model} — ${ev.error}`); // near the form, not just the events feed
         setEvents((prev) => [`${new Date().toLocaleTimeString()}  ✗ pull failed: ${ev.model} — ${ev.error}`, ...prev].slice(0, 50));
         return;
       }
@@ -87,6 +89,28 @@ export function ModelsView(): React.JSX.Element {
   const ramPct = health ? Math.max(0, Math.min(100, (1 - health.ramFreeBytes / health.ramTotalBytes) * 100)) : 0;
   const floorPct = health ? (1 - (2 * GIB) / health.ramTotalBytes) * 100 : 100; // guardrail floor default 2 GiB
   const live = useMemo(() => new Map((health?.instances ?? []).map((i) => [i.model, i])), [health]);
+
+  /** Kick a pull off with instant feedback: the bar shows at 0% immediately
+   * (HF resolution takes seconds before the first progress frame), and a
+   * rejected POST surfaces right here instead of only in the events feed.
+   * `name` pins the installed id to local/<name> so the reco-chip "already
+   * installed" check can actually match. */
+  const startPull = (source: string, name?: string): void => {
+    setPullErr(null);
+    setPullPct({ model: name ?? source, pct: 0 });
+    void pullModel(source, name)
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+          setPullPct(null);
+          setPullErr(body?.error?.message ?? `HTTP ${res.status}`);
+        }
+      })
+      .catch((e) => {
+        setPullPct(null);
+        setPullErr(String(e instanceof Error ? e.message : e));
+      });
+  };
 
   const act = async (name: string, fn: (n: string, force?: boolean) => Promise<Response>, force = false): Promise<void> => {
     setBusy(name);
@@ -143,7 +167,7 @@ export function ModelsView(): React.JSX.Element {
           onSubmit={(e) => {
             e.preventDefault();
             if (!pullSrc.trim()) return;
-            void pullModel(pullSrc.trim());
+            startPull(pullSrc.trim());
             setPullSrc("");
           }}
         >
@@ -166,7 +190,7 @@ export function ModelsView(): React.JSX.Element {
                 key={r.name}
                 className="reco-chip"
                 title={`${r.note} · ~${gb(r.needBytes)} · ${r.tools ? "tool-capable worker" : "lead-only (no native tools)"}${fits ? "" : " · tight on current free RAM"}`}
-                onClick={() => void pullModel(r.source)}
+                onClick={() => startPull(r.source, r.name)}
               >
                 <span className="dot" style={{ background: fits ? "var(--status-good)" : "var(--status-warning)" }} />
                 {r.name} <span className="reco-size">{gb(r.needBytes)}</span>
@@ -174,13 +198,18 @@ export function ModelsView(): React.JSX.Element {
             );
           })}
         </div>
+        {pullErr && (
+          <div className="error-banner" role="alert">
+            Pull failed: {pullErr}
+          </div>
+        )}
         {pullPct && (
           <>
             <div className="progress" role="progressbar" aria-valuenow={pullPct.pct} aria-valuemin={0} aria-valuemax={100}>
               <div className="bar" style={{ width: `${pullPct.pct}%` }} />
             </div>
             <div className="sub" style={{ marginTop: 4 }}>
-              {pullPct.model} — {pullPct.pct}%
+              {pullPct.model} — {pullPct.pct === 0 ? "starting…" : `${pullPct.pct}%`}
             </div>
           </>
         )}

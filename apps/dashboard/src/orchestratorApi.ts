@@ -10,6 +10,8 @@ export interface Team {
   state: "active" | "draining" | "closed";
   createdAt: string;
   inFlight: number;
+  /** Server-reported liveness (manager.isLive) — the source of truth for LIVE badges. */
+  live?: boolean;
 }
 
 /**
@@ -34,16 +36,6 @@ export interface Task {
   attempts: number;
   result: string | null;
   updatedAt: string;
-}
-
-export interface TeamAgent {
-  id: string;
-  teamId: string;
-  adapter: string;
-  model: string;
-  busHandle: string | null;
-  state: string;
-  createdAt: string;
 }
 
 export interface Run {
@@ -94,43 +86,49 @@ export interface CreateTeamInput {
   tokenBudget?: number;
 }
 
-const get = <T>(url: string): Promise<T> => fetch(url).then((r) => r.json() as Promise<T>);
+/** Extract a human-readable error from any of the three servers' shapes:
+ * orchestrator `{error: string}`, gateway/proxy `{error: {message, type}}`. */
+const errText = (body: unknown, status: number): string => {
+  const e = (body as { error?: unknown } | null)?.error;
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object" && typeof (e as { message?: unknown }).message === "string") return (e as { message: string }).message;
+  return `HTTP ${status}`;
+};
+
+const get = async <T>(url: string): Promise<T> => {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(errText(await res.json().catch(() => null), res.status));
+  return res.json() as Promise<T>;
+};
 
 export const getTeams = (liveOnly = false): Promise<Team[]> => get(`/api/teams${liveOnly ? "?live=1" : ""}`);
 export const getTeamTasks = (teamId: string): Promise<Task[]> => get(`/api/teams/${encodeURIComponent(teamId)}/tasks`);
-export const getAgents = (): Promise<TeamAgent[]> => get("/api/agents");
 export const getRuns = (): Promise<Run[]> => get("/api/runs");
 
 export async function startLoop(input: StartLoopInput): Promise<{ runId: string }> {
-  const res = await fetch("/api/loop", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
-  return res.json() as Promise<{ runId: string }>;
+  return postJson("/api/loop", input);
 }
 
 export async function createTeam(input: CreateTeamInput): Promise<Team> {
-  const res = await fetch("/api/teams", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      name: input.name,
-      members: [{ model: input.workerModel, cwd: input.cwd, ...(input.allowedTools ? { allowedTools: input.allowedTools } : {}) }],
-      ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
-    }),
+  return postJson("/api/teams", {
+    name: input.name,
+    members: [{ model: input.workerModel, cwd: input.cwd, ...(input.allowedTools ? { allowedTools: input.allowedTools } : {}) }],
+    ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
   });
-  if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
-  return res.json() as Promise<Team>;
 }
 
 export const drainTeam = (teamId: string): Promise<Response> =>
   fetch(`/api/teams/${encodeURIComponent(teamId)}/drain`, { method: "POST" });
 
+/** Archive a finished team — deletes the team row, its tasks, and its standing-agent
+ * specs. The server answers 409 while the team is still live. */
+export async function deleteTeam(teamId: string): Promise<void> {
+  const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(errText(await res.json().catch(() => null), res.status));
+}
+
 // ── Persistent bus agents (the multi-agent path) ───────────────────────────
-// Distinct from `TeamAgent` above (the older task-worker shape from /api/agents):
-// these are addressable @handle agents that live on the team's bus channel —
+// These are addressable @handle agents that live on the team's bus channel —
 // spawned, @mentioned, and replied-to. Shared by SoloView (02) + team-chat (01).
 
 export interface SpawnAgentInput {
@@ -142,6 +140,9 @@ export interface SpawnAgentInput {
   systemPrompt?: string;
   allowedTools?: string[]; // omitted or ["*"] = all tools (full freedom)
   cldzProfile?: string; // cldz auth profile — run on real Claude/Codex (see api.getCldzProfiles)
+  /** Run a real interactive PTY (the actual Claude TUI) instead of headless -p.
+   * Omitted = server default (PTY for standing agents); false opts out. */
+  pty?: boolean;
 }
 
 export interface AgentStatus {
@@ -168,7 +169,7 @@ export interface ChannelMessage {
 
 const postJson = async <T>(url: string, body: unknown): Promise<T> => {
   const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
+  if (!res.ok) throw new Error(errText(await res.json().catch(() => null), res.status));
   return res.json() as Promise<T>;
 };
 
@@ -188,9 +189,11 @@ export const stopTeamAgent = (teamId: string, handle: string): Promise<Response>
 export const sendTeamMessage = (teamId: string, text: string, to?: string, human?: boolean): Promise<unknown> =>
   postJson(`/api/teams/${encodeURIComponent(teamId)}/messages`, { text, ...(to ? { to } : {}), ...(human ? { human: true } : {}) });
 
-/** Read a bus channel's recent history (GET-only proxy; the chat stream). */
-export const getChannelHistory = (channelId: string, limit = 60): Promise<{ messages: ChannelMessage[] }> =>
-  get(`/api/channels/${encodeURIComponent(channelId)}/history?limit=${limit}`);
+/** Read a bus channel's recent history (GET-only proxy; the chat stream).
+ * `after` is a seq cursor — pass the last seen seq to fetch only newer messages,
+ * so pollers append instead of re-reading (and freezing at) a fixed window. */
+export const getChannelHistory = (channelId: string, limit = 60, after?: number): Promise<{ messages: ChannelMessage[] }> =>
+  get(`/api/channels/${encodeURIComponent(channelId)}/history?limit=${limit}${after ? `&after=${after}` : ""}`);
 
 /** Answer a loop that's waiting on a proactive question (routes over the bus). */
 export async function answerRun(runId: string, answer: { qid?: string; optionId?: string; text?: string }): Promise<void> {
@@ -199,18 +202,32 @@ export async function answerRun(runId: string, answer: { qid?: string; optionId?
     headers: { "content-type": "application/json" },
     body: JSON.stringify(answer),
   });
-  if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
+  if (!res.ok) throw new Error(errText(await res.json().catch(() => null), res.status));
 }
 
-/** Subscribe to a run's live milestones over SSE. Returns an unsubscribe. */
-export function streamRun(runId: string, onEvent: (e: LoopEvent) => void): () => void {
+/** Subscribe to a run's live milestones over SSE. Returns an unsubscribe.
+ * `report` is terminal: the server closes the stream there, so we close the
+ * EventSource too — otherwise the browser auto-reconnects and replays the whole
+ * run every few seconds forever. Any other disconnect (serve restart, 404 on a
+ * forgotten run) lands in `onError` so the UI can stop spinning. */
+export function streamRun(runId: string, onEvent: (e: LoopEvent) => void, onError?: () => void): () => void {
   const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
+  let done = false;
   es.onmessage = (m) => {
     try {
-      onEvent(JSON.parse(m.data) as LoopEvent);
+      const e = JSON.parse(m.data) as LoopEvent;
+      if (e.kind === "report") {
+        done = true;
+        es.close();
+      }
+      onEvent(e);
     } catch {
       /* ignore malformed */
     }
+  };
+  es.onerror = () => {
+    es.close();
+    if (!done) onError?.();
   };
   return () => es.close();
 }

@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { getModels, getCldzProfiles, type CatalogEntry, type CldzProfile } from "./api";
+import { getModels, getCldzProfiles, getCloudModels, type CatalogEntry, type CldzProfile, type CloudModel } from "./api";
 import {
   createTeam,
+  deleteTeam,
+  drainTeam,
   spawnTeamAgent,
-  stopTeamAgent,
+  getTeamAgents,
   sendTeamMessage,
   getChannelHistory,
   type AgentStatus,
   type ChannelMessage,
+  type SpawnAgentInput,
 } from "./orchestratorApi";
 import { renderMarkdown } from "./md";
 import "./SoloView.css";
@@ -28,8 +31,20 @@ interface Session {
   agent: AgentStatus;
 }
 
-/** Manager/system chatter (join/leave/ready) — shown as quiet context, not chat. */
-const isSystemLine = (m: ChannelMessage): boolean => /^\s*[🧭➕➖🛑]/u.test(m.body.text ?? "");
+/** Manager/system chatter (join/leave/ready/restore/task frames) — classified
+ * by SENDER, not emoji: anything the manager posts that isn't human-marked is
+ * housekeeping. The owner's own messages arrive from the manager token too,
+ * but carry body.human — those are chat ("you"), not system. */
+const isSystemLine = (m: ChannelMessage): boolean => m.from === "manager" && m.body.human !== true;
+
+/** Tear a solo session's backing team down: drain it (kills the agent, closes
+ * the team) and then archive the now-closed row so solo-* teams never pile up
+ * in the Teams page. Best-effort — an older orchestrator without DELETE
+ * /api/teams/:id just leaves the closed row behind. */
+async function teardownSoloTeam(teamId: string): Promise<void> {
+  await drainTeam(teamId).catch(() => {});
+  await deleteTeam(teamId).catch(() => {});
+}
 
 export function SoloView(): React.JSX.Element {
   const [models, setModels] = useState<CatalogEntry[]>([]);
@@ -52,21 +67,53 @@ export function SoloView(): React.JSX.Element {
   useEffect(() => {
     void getModels().then((m) => {
       setModels(m);
-      const w = m.find((x) => x.capabilities?.toolCalling) ?? m.find((x) => x.kind === "local-gguf");
+      const w = m.find((x) => x.toolCalling) ?? m.find((x) => x.kind === "local-gguf");
       setModel((prev) => prev || w?.id || "");
-    });
+    }).catch(() => {});
     void getCldzProfiles().then(setProfiles).catch(() => {});
   }, []);
 
   const cloud = runAs !== "";
 
-  // Poll the agent's channel while a session is live.
+  // When running on a cldz profile, list the REAL models from the provider
+  // (server-side, via the credential) — opus/sonnet stay as the fallback.
+  const [cloudModels, setCloudModels] = useState<CloudModel[]>([]);
+  const cloudModelRef = useRef(cloudModel);
+  cloudModelRef.current = cloudModel;
+  useEffect(() => {
+    if (!runAs) {
+      setCloudModels([]);
+      return;
+    }
+    let alive = true;
+    void getCloudModels(runAs).then((ms) => {
+      if (!alive) return;
+      setCloudModels(ms);
+      if (ms.length > 0 && !ms.some((m) => m.id === cloudModelRef.current)) {
+        setCloudModel((ms.find((m) => /opus/i.test(m.id)) ?? ms[0]!).id);
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [runAs]);
+
+  // Poll the agent's channel AND its live state while a session is open — the
+  // header chip must reflect reality (a crashed/limited agent), not the
+  // spawn-time snapshot, or the composer becomes a silent void.
   useEffect(() => {
     if (!session) return;
     let alive = true;
     const tick = (): void => {
-      void getChannelHistory(session.channelId)
+      void getChannelHistory(session.channelId, 500)
         .then((h) => alive && setMessages(h.messages ?? []))
+        .catch(() => {});
+      void getTeamAgents(session.teamId)
+        .then((agents) => {
+          if (!alive) return;
+          const a = agents.find((x) => x.handle === session.agent.handle);
+          if (a && a.state !== session.agent.state) setSession((cur) => (cur ? { ...cur, agent: a } : cur));
+        })
         .catch(() => {});
     };
     tick();
@@ -76,6 +123,16 @@ export function SoloView(): React.JSX.Element {
       clearInterval(t);
     };
   }, [session]);
+
+  // If the page navigates away mid-session, the session state is gone for good
+  // (no reconnect UI yet) — tear the backing team down instead of leaking it.
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  useEffect(() => {
+    return () => {
+      if (sessionRef.current) void teardownSoloTeam(sessionRef.current.teamId);
+    };
+  }, []);
 
   // Autoscroll to newest.
   useEffect(() => {
@@ -89,24 +146,33 @@ export function SoloView(): React.JSX.Element {
     if (!handle.trim() || !engineModel || !cwd.trim() || busy) return;
     setBusy(true);
     setError(null);
+    let teamId: string | null = null;
     try {
       const h = handle.trim().startsWith("@") ? handle.trim() : `@${handle.trim()}`;
       const team = await createTeam({ name: `solo-${h.replace(/^@/, "")}`, workerModel: engineModel, cwd: cwd.trim() });
-      const agent = await spawnTeamAgent(team.id, {
+      teamId = team.id;
+      // Solo agents are standing/interactive — a real PTY (the actual Claude
+      // TUI in the 🖥️ terminal), never headless --print. Explicit here so the
+      // default holds even against an older orchestrator.
+      const input: SpawnAgentInput = {
         handle: h,
         type,
         model: engineModel,
         cwd: cwd.trim(),
+        pty: true,
         ...(cloud ? { cldzProfile: runAs } : {}),
         // Essential tools by default (small request, ~fast). "All tools" is the
         // opt-in freedom toggle — heavier request, wants a bigger context.
         allowedTools: allTools ? ["*"] : ["Read", "Write", "Edit", "Bash"],
         systemPrompt:
           "You are a helpful worker agent on a shared channel. When asked to do something, DO it with your tools, then reply with a short, clear report. Render answers in Markdown.",
-      });
+      };
+      const agent = await spawnTeamAgent(team.id, input);
       setSession({ teamId: team.id, channelId: team.channelId, agent });
       setMessages([]);
     } catch (e) {
+      // Don't abandon a just-created team with no agent on it — tear it down.
+      if (teamId) void teardownSoloTeam(teamId);
       setError(String(e instanceof Error ? e.message : e));
     } finally {
       setBusy(false);
@@ -118,8 +184,9 @@ export function SoloView(): React.JSX.Element {
     const text = draft.trim();
     setDraft("");
     try {
-      // Direct it at the agent's handle so the monitor wakes it.
-      await sendTeamMessage(session.teamId, text, session.agent.handle);
+      // Direct it at the agent's handle so the monitor wakes it; human-mark it
+      // so it renders as "you", not manager housekeeping.
+      await sendTeamMessage(session.teamId, text, session.agent.handle, true);
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
     }
@@ -130,7 +197,9 @@ export function SoloView(): React.JSX.Element {
     const s = session;
     setSession(null);
     setMessages([]);
-    await stopTeamAgent(s.teamId, s.agent.handle).catch(() => {});
+    // Drain kills the agent and closes the team; the archive keeps solo-*
+    // rows out of the Teams pile.
+    await teardownSoloTeam(s.teamId);
   }
 
   if (!session) {
@@ -177,15 +246,25 @@ export function SoloView(): React.JSX.Element {
               <span>Model</span>
               {cloud ? (
                 <select value={cloudModel} onChange={(e) => setCloudModel(e.target.value)}>
-                  <option value="opus">opus — capable, for hard work</option>
-                  <option value="sonnet">sonnet — faster/cheaper</option>
+                  {cloudModels.length > 0 ? (
+                    cloudModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="opus">opus — capable, for hard work</option>
+                      <option value="sonnet">sonnet — faster/cheaper</option>
+                    </>
+                  )}
                 </select>
               ) : (
                 <select value={model} onChange={(e) => setModel(e.target.value)}>
                   {models.map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.id}
-                      {m.capabilities?.toolCalling ? " ✓tools" : ""}
+                      {m.toolCalling ? " ✓tools" : ""}
                     </option>
                   ))}
                 </select>
@@ -208,7 +287,17 @@ export function SoloView(): React.JSX.Element {
               <span>All tools (full freedom — slower, wants a bigger context)</span>
             </label>
           </div>
-          <button className="act primary" onClick={() => void spawn()} disabled={busy || !handle.trim() || !model}>
+          {!cloud && models.length === 0 && (
+            <p className="muted small">
+              No local models installed — pull one on the <strong>Models</strong> page, or pick a cldz profile under “Run as” to spawn on a
+              cloud model instead.
+            </p>
+          )}
+          <button
+            className="act primary"
+            onClick={() => void spawn()}
+            disabled={busy || !handle.trim() || !(cloud ? cloudModel : model)}
+          >
             {busy ? "Spawning…" : "Spawn & chat"}
           </button>
         </div>
@@ -217,6 +306,7 @@ export function SoloView(): React.JSX.Element {
   }
 
   const chat = messages.filter((m) => !isSystemLine(m));
+  const agentDown = session.agent.state === "failed" || session.agent.state === "stopped";
   return (
     <section className="solo-chat" aria-label={`Chat with ${session.agent.handle}`}>
       {error && (
@@ -234,6 +324,13 @@ export function SoloView(): React.JSX.Element {
           Stop agent
         </button>
       </header>
+
+      {agentDown && (
+        <div className="error-banner" role="alert">
+          {session.agent.handle} has {session.agent.state === "failed" ? "exited unexpectedly" : "stopped"} — messages won't reach it. Stop the
+          session and spawn again.
+        </div>
+      )}
 
       <div className="solo-stream" ref={streamRef}>
         {chat.length === 0 ? (
@@ -261,10 +358,15 @@ export function SoloView(): React.JSX.Element {
               void send();
             }
           }}
-          placeholder={`Message ${session.agent.handle}…  (Enter to send, Shift+Enter for newline)`}
+          placeholder={
+            agentDown
+              ? `${session.agent.handle} is ${session.agent.state} — respawn to keep chatting`
+              : `Message ${session.agent.handle}…  (Enter to send, Shift+Enter for newline)`
+          }
+          disabled={agentDown}
           rows={2}
         />
-        <button className="act primary" onClick={() => void send()} disabled={!draft.trim()}>
+        <button className="act primary" onClick={() => void send()} disabled={!draft.trim() || agentDown}>
           Send
         </button>
       </div>

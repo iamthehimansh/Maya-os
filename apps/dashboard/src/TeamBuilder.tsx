@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { CatalogEntry, CldzProfile } from "./api";
 import type { SpawnAgentInput } from "./orchestratorApi";
 import { AgentSetupForm, newAgentDraft, toSpawnInput, draftReady, type AgentDraft } from "./AgentSetupForm";
@@ -23,20 +23,29 @@ interface Props {
 export function TeamBuilder({ models, profiles, busy, onSubmit, defaultModel }: Props): React.JSX.Element {
   const [name, setName] = useState("");
   const [lead, setLead] = useState<AgentDraft>(() => newAgentDraft("@lead", defaultModel ?? ""));
-  const [members, setMembers] = useState<AgentDraft[]>([]);
+  // Members keyed by a monotonic id (never reused): naming by array length
+  // would mint duplicate @handles after remove-then-add, and index keys would
+  // reparent each form's state on removal.
+  const [members, setMembers] = useState<Array<{ id: number; draft: AgentDraft }>>([]);
+  const nextId = useRef(1);
 
   function addMember(): void {
-    setMembers((ms) => [...ms, newAgentDraft(`@member${ms.length + 1}`, lead.model, lead.cwd)]);
+    const id = nextId.current++;
+    setMembers((ms) => [...ms, { id, draft: newAgentDraft(`@member${id}`, lead.model, lead.cwd) }]);
   }
-  const setMember = (i: number, d: AgentDraft): void => setMembers((ms) => ms.map((m, j) => (j === i ? d : m)));
-  const removeMember = (i: number): void => setMembers((ms) => ms.filter((_, j) => j !== i));
+  const setMember = (id: number, d: AgentDraft): void => setMembers((ms) => ms.map((m) => (m.id === id ? { ...m, draft: d } : m)));
+  const removeMember = (id: number): void => setMembers((ms) => ms.filter((m) => m.id !== id));
 
-  const canCreate = name.trim().length > 0 && draftReady(lead) && !busy;
+  // A duplicate handle would abort the create mid-spawn (the manager reserves
+  // handles), leaving a half-created team — block it up front.
+  const handles = [lead, ...members.map((m) => m.draft)].map((d) => d.handle.trim().replace(/^@/, "").toLowerCase());
+  const hasDupHandle = new Set(handles).size !== handles.length;
+  const canCreate = name.trim().length > 0 && draftReady(lead) && !hasDupHandle && !busy;
 
   function submit(): void {
     if (!canCreate) return;
     const leadSpec = toSpawnInput(lead, "lead");
-    const memberSpecs = members.filter(draftReady).map((m) => toSpawnInput(m, "worker"));
+    const memberSpecs = members.map((m) => m.draft).filter(draftReady).map((m) => toSpawnInput(m, "worker"));
     void onSubmit(name.trim(), leadSpec, memberSpecs);
   }
 
@@ -48,13 +57,13 @@ export function TeamBuilder({ models, profiles, busy, onSubmit, defaultModel }: 
       </label>
 
       <AgentSetupForm title="Team lead (@lead)" value={lead} onChange={setLead} models={models} profiles={profiles} handleLocked />
-      {members.map((m, i) => (
+      {members.map((m) => (
         <AgentSetupForm
-          key={i}
-          title={`Member ${i + 1}`}
-          value={m}
-          onChange={(d) => setMember(i, d)}
-          onRemove={() => removeMember(i)}
+          key={m.id}
+          title={`Member (${m.draft.handle || `@member${m.id}`})`}
+          value={m.draft}
+          onChange={(d) => setMember(m.id, d)}
+          onRemove={() => removeMember(m.id)}
           models={models}
           profiles={profiles}
         />
@@ -67,6 +76,7 @@ export function TeamBuilder({ models, profiles, busy, onSubmit, defaultModel }: 
         <button type="button" className="act primary" onClick={submit} disabled={!canCreate}>
           {busy ? "Creating…" : "Create team & open chat"}
         </button>
+        {hasDupHandle && <span className="muted">two agents share a handle — make them unique</span>}
       </div>
     </div>
   );

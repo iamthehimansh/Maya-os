@@ -1,45 +1,56 @@
 import { useEffect, useState } from "react";
 import { getModels, getCldzProfiles, type CatalogEntry, type CldzProfile } from "./api";
-import { createTeam, drainTeam, getTeams, spawnTeamAgent, startLoop, type OpenTeam, type SpawnAgentInput, type Team } from "./orchestratorApi";
+import { createTeam, deleteTeam, drainTeam, getTeams, getTeamAgents, spawnTeamAgent, startLoop, type OpenTeam, type SpawnAgentInput, type Team } from "./orchestratorApi";
 import { TeamBuilder } from "./TeamBuilder";
+
+/** Liveness from the polled list: prefer the orchestrator's `live` flag (is the
+ * manager actually running it?); older orchestrators fall back to row state. */
+const isLive = (t: Team): boolean => t.live ?? t.state !== "closed";
 
 /**
  * Teams: create a standing fleet, run loops on it, all from the web. Each team —
  * live or finished — has a 💬 Chat button that opens it in the Chat page, loaded
  * with that team's conversation (live teams you can talk to; closed ones open
  * read-only so you can review what the agents did). Live teams up front; the
- * pile of closed teams tucks behind a disclosure so the view stays clean.
+ * pile of closed teams tucks behind a disclosure so the view stays clean —
+ * with 🗑 Archive to actually clear it out.
  */
 export function TeamsView({ onOpenChat }: { onOpenChat: (t: OpenTeam) => void }): React.JSX.Element {
   const [models, setModels] = useState<CatalogEntry[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null); // action failures (create/run/drain/archive)
+  const [pollError, setPollError] = useState<string | null>(null); // orchestrator reachability — clears on recovery
   const [showHistory, setShowHistory] = useState(false);
 
-  // defaults for the quick "▶ Run" loop; full team creation uses <TeamBuilder>.
+  // default model for the quick "▶ Run" loop; full team creation uses <TeamBuilder>.
   const [worker, setWorker] = useState("");
-  const [cwd] = useState("~/maya-demo");
   const [profiles, setProfiles] = useState<CldzProfile[]>([]);
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     void getModels().then((m) => {
       setModels(m);
-      const w = m.find((x) => x.capabilities?.toolCalling) ?? m.find((x) => x.kind === "local-gguf");
+      const w = m.find((x) => x.toolCalling) ?? m.find((x) => x.kind === "local-gguf");
       setWorker((prev) => prev || w?.id || "");
-    });
+    }).catch(() => {});
     void getCldzProfiles().then(setProfiles).catch(() => {});
-    const tick = (): void => void getTeams().then(setTeams).catch(() => setError("Can't reach the orchestrator — is `maya serve` running?"));
+    const tick = (): void =>
+      void getTeams()
+        .then((t) => {
+          setTeams(t);
+          setPollError(null); // recovered — don't pin a stale banner
+        })
+        .catch(() => setPollError("Can't reach the orchestrator — is `maya serve` running?"));
     void tick();
     const t = setInterval(tick, 3000);
     return () => clearInterval(t);
   }, []);
 
-  const live = teams.filter((t) => t.state !== "closed");
-  const closed = teams.filter((t) => t.state === "closed");
+  const live = teams.filter(isLive);
+  const closed = teams.filter((t) => !isLive(t));
 
   // Hand a team to the Chat page: live → talk to it, closed → read-only history.
-  const open = (t: Team): void => onOpenChat({ id: t.id, channelId: t.channelId, name: t.name, live: t.state !== "closed" });
+  const open = (t: Team): void => onOpenChat({ id: t.id, channelId: t.channelId, name: t.name, live: isLive(t) });
 
   // Rich create: team + lead + N members (each fully configured), then open it.
   async function createFullTeam(name: string, lead: SpawnAgentInput, members: SpawnAgentInput[]): Promise<void> {
@@ -61,9 +72,43 @@ export function TeamsView({ onOpenChat }: { onOpenChat: (t: OpenTeam) => void })
   async function runOn(team: Team): Promise<void> {
     const goal = window.prompt(`Goal for "${team.name}":`, "Create a file named NOTE.md containing exactly: hello");
     if (!goal) return;
-    const leadModel = models.find((m) => m.capabilities?.toolCalling)?.id ?? models[0]?.id ?? worker;
+    const leadModel = models.find((m) => m.toolCalling)?.id ?? models[0]?.id ?? worker;
     try {
+      // Verify the goal where the team actually works: the standing lead's cwd
+      // (falling back to any member's). Only ask the user when the roster gives
+      // us nothing — a hardcoded dir would make the verifier inspect the wrong
+      // workspace and reject (or fake-pass) every run.
+      const agents = await getTeamAgents(team.id).catch(() => [] as Awaited<ReturnType<typeof getTeamAgents>>);
+      const teamCwd = agents.find((a) => a.role === "lead")?.cwd ?? agents[0]?.cwd;
+      const cwd = teamCwd ?? window.prompt(`Directory to run + verify "${team.name}" in:`, "~/maya-demo");
+      if (!cwd) return;
       await startLoop({ goal, cwd, leadModel, teamId: team.id });
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    }
+  }
+
+  /** Drain a live team — a 400 (e.g. the 3s-stale row already closed) must
+   * surface, not silently no-op. */
+  async function drain(team: Team): Promise<void> {
+    try {
+      const res = await drainTeam(team.id);
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      setTeams(await getTeams());
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    }
+  }
+
+  /** Delete a closed team (row + tasks + agent specs) — the pile-up killer.
+   * The orchestrator refuses (409) if the team is somehow live again. */
+  async function archive(team: Team): Promise<void> {
+    try {
+      await deleteTeam(team.id);
+      setTeams(await getTeams());
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
     }
@@ -71,9 +116,9 @@ export function TeamsView({ onOpenChat }: { onOpenChat: (t: OpenTeam) => void })
 
   return (
     <section className="run" aria-label="Teams">
-      {error && (
+      {(error ?? pollError) && (
         <div className="error-banner" role="alert">
-          {error}
+          {error ?? pollError}
         </div>
       )}
 
@@ -104,7 +149,7 @@ export function TeamsView({ onOpenChat }: { onOpenChat: (t: OpenTeam) => void })
                     <button className="act" onClick={() => void runOn(t)}>
                       ▶ Run
                     </button>
-                    <button className="act" onClick={() => void drainTeam(t.id).then(() => getTeams().then(setTeams))}>
+                    <button className="act" onClick={() => void drain(t)}>
                       Drain
                     </button>
                   </td>
@@ -121,22 +166,28 @@ export function TeamsView({ onOpenChat }: { onOpenChat: (t: OpenTeam) => void })
             {showHistory ? "▾" : "▸"} Finished teams ({closed.length})
           </button>
           {showHistory && (
-            <table>
-              <tbody>
-                {closed.slice(0, 40).map((t) => (
-                  <tr key={t.id}>
-                    <td>{t.name}</td>
-                    <td>{t.tokensUsed.toLocaleString()} tok</td>
-                    <td className="muted">closed</td>
-                    <td className="row-actions">
-                      <button className="act" onClick={() => open(t)} title="Review this team's conversation (read-only)">
-                        💬 Chat
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <>
+              <table>
+                <tbody>
+                  {closed.slice(0, 40).map((t) => (
+                    <tr key={t.id}>
+                      <td>{t.name}</td>
+                      <td>{t.tokensUsed.toLocaleString()} tok</td>
+                      <td className="muted">closed</td>
+                      <td className="row-actions">
+                        <button className="act" onClick={() => open(t)} title="Review this team's conversation (read-only)">
+                          💬 Chat
+                        </button>
+                        <button className="act" onClick={() => void archive(t)} title="Delete this team, its tasks, and agent specs">
+                          🗑 Archive
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {closed.length > 40 && <p className="muted">Showing the 40 most recent of {closed.length} finished teams — archive some to see the rest.</p>}
+            </>
           )}
         </div>
       )}

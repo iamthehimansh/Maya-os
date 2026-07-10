@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getModels, type CatalogEntry } from "./api";
-import { getRuns, startLoop, streamRun, type LoopEvent, type Run } from "./orchestratorApi";
+import { answerRun, getRuns, startLoop, streamRun, type LoopEvent, type Run } from "./orchestratorApi";
 
 /**
  * The action hub: describe a goal + a directory, pick models, hit Run — the
@@ -18,16 +18,18 @@ export function RunPanel(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<LoopEvent[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [answered, setAnswered] = useState<Set<string>>(new Set());
   const unsub = useRef<() => void>(() => {});
 
   useEffect(() => {
     void getModels().then((m) => {
       setModels(m);
       const localFirst = m.filter((x) => x.kind === "local-gguf");
-      const toolCaller = localFirst.find((x) => x.capabilities?.toolCalling) ?? localFirst[0];
+      const toolCaller = localFirst.find((x) => x.toolCalling) ?? localFirst[0];
       setLead((prev) => prev || toolCaller?.id || m[0]?.id || "");
       setWorker((prev) => prev || toolCaller?.id || "");
-    });
+    }).catch(() => {});
     const tick = (): void => void getRuns().then(setRuns).catch(() => {});
     void tick();
     const t = setInterval(tick, 3000);
@@ -38,7 +40,7 @@ export function RunPanel(): React.JSX.Element {
   }, []);
 
   const workers = useMemo(
-    () => models.filter((m) => m.capabilities?.toolCalling !== false), // exclude only MEASURED non-callers
+    () => models.filter((m) => m.toolCalling !== false), // exclude only MEASURED non-callers
     [models],
   );
 
@@ -47,23 +49,42 @@ export function RunPanel(): React.JSX.Element {
     setBusy(true);
     setError(null);
     setEvents([]);
+    setAnswered(new Set());
     unsub.current();
     try {
-      const { runId } = await startLoop({
+      const started = await startLoop({
         goal: goal.trim(),
         cwd: cwd.trim(),
         leadModel: lead,
         workerModel: worker,
         allowedTools: tools.split(",").map((t) => t.trim()).filter(Boolean),
       });
-      unsub.current = streamRun(runId, (e) => {
-        setEvents((prev) => [...prev, e]);
-        if (e.kind === "report") setBusy(false);
-      });
+      setRunId(started.runId);
+      // streamRun closes itself on the terminal `report`; a dropped stream
+      // (serve restart, forgotten run) lands in the error callback so the
+      // button never spins forever.
+      unsub.current = streamRun(
+        started.runId,
+        (e) => {
+          setEvents((prev) => [...prev, e]);
+          if (e.kind === "report") setBusy(false);
+        },
+        () => {
+          setBusy(false);
+          setError("Lost the run's event stream — is `maya serve` still running? Check Recent runs below for the outcome.");
+        },
+      );
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
       setBusy(false);
     }
+  }
+
+  /** Tap an option on a live question — the loop is blocked waiting on it. */
+  function answer(qid: string, optionId: string): void {
+    if (!runId) return;
+    setAnswered((prev) => new Set(prev).add(qid));
+    void answerRun(runId, { qid, optionId }).catch((e) => setError(String(e instanceof Error ? e.message : e)));
   }
 
   const report = events.find((e) => e.kind === "report");
@@ -112,7 +133,7 @@ export function RunPanel(): React.JSX.Element {
               {workers.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.id}
-                  {m.capabilities?.toolCalling ? " ✓tools" : ""}
+                  {m.toolCalling ? " ✓tools" : ""}
                 </option>
               ))}
             </select>
@@ -129,12 +150,29 @@ export function RunPanel(): React.JSX.Element {
             Progress {report ? <span className={`chip outcome-${report.outcome}`}>{report.outcome}</span> : <span className="chip">● live</span>}
           </h2>
           <ol className="timeline">
-            {events.map((e, i) => (
-              <li key={i} className={`tl-${e.kind}`}>
-                <span className="tl-kind">{label(e)}</span>
-                <span className="tl-detail">{detail(e)}</span>
-              </li>
-            ))}
+            {events.map((e, i) => {
+              // Live question with tap-able options: answer it right here — the
+              // loop is blocked on it (and auto-picks a default after 5 min).
+              const answerable = e.kind === "question" && e.qid !== undefined && (e.options?.length ?? 0) > 0 && !answered.has(e.qid) && !report;
+              return (
+                <li key={i} className={`tl-${e.kind}`}>
+                  <span className="tl-kind">{label(e)}</span>
+                  <span className="tl-detail">
+                    {detail(e)}
+                    {answerable && (
+                      <span className="q-options">
+                        {e.options!.map((o) => (
+                          <button key={o.id} className="act" onClick={() => answer(e.qid!, o.id)}>
+                            {o.label}
+                          </button>
+                        ))}
+                      </span>
+                    )}
+                    {e.kind === "question" && e.qid !== undefined && answered.has(e.qid) && <span className="muted"> · answered</span>}
+                  </span>
+                </li>
+              );
+            })}
           </ol>
           {report && (
             <p className="empty">

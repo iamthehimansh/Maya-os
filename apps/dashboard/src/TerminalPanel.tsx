@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import "./TerminalPanel.css";
 
@@ -8,9 +7,8 @@ import "./TerminalPanel.css";
  * Live output view for a spawned agent — himansh's "see what the agent is
  * actually doing" ask. Streams the agent's captured stdout/stderr + lifecycle
  * events over SSE from `GET /api/teams/:id/agents/:handle/output` (01's
- * agent-runtime seam — NOT a raw TTY, which would fight the headless
- * stream-json mode the bridge needs). The endpoint replays a backlog then tails
- * live, and closes when the agent exits.
+ * agent-runtime seam). The endpoint replays a backlog then tails live, and
+ * closes when the agent exits.
  *
  * Each SSE `data:` line is one AgentEvent JSON:
  *   log   {stream: "stdout"|"stderr"|"system", line, at}  → the terminal body
@@ -18,8 +16,18 @@ import "./TerminalPanel.css";
  *   error {message, at}
  *   state {state, at}
  *   tokens{input, output, at}                              → header counter
+ *   pty   {data}                                            → raw TUI bytes
  * Rendered into xterm.js with ANSI colour so stdout/stderr/say/error read apart.
+ *
+ * The grid is FIXED at 120x34 to mirror the server-side pty (the adapter spawns
+ * node-pty at exactly that size, with no resize plumbing) — fitting xterm to the
+ * modal would re-wrap every TUI row and garble the real Claude UI. The host div
+ * scrolls when the modal is narrower than the grid.
  */
+
+/** Must match the adapter's hardcoded pty size (claude-code.ts spawn). */
+const PTY_COLS = 120;
+const PTY_ROWS = 34;
 
 type AgentEvent =
   | { kind: "log"; stream?: "stdout" | "stderr" | "system"; line?: string }
@@ -57,6 +65,8 @@ export function TerminalPanel({
     if (!host) return;
 
     const term = new Terminal({
+      cols: PTY_COLS,
+      rows: PTY_ROWS,
       convertEol: true,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       fontSize: 12,
@@ -64,18 +74,7 @@ export function TerminalPanel({
       scrollback: 8000,
       disableStdin: true, // output-only view
     });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
     term.open(host);
-    const refit = () => {
-      try {
-        fit.fit();
-      } catch {
-        /* not laid out yet */
-      }
-    };
-    refit();
-    window.addEventListener("resize", refit);
 
     const writeLine = (s: string) => term.write(s.replace(/\r?\n$/, "") + "\r\n");
     const render = (ev: AgentEvent) => {
@@ -111,31 +110,63 @@ export function TerminalPanel({
     };
 
     const url = `/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(handle)}/output`;
-    const es = new EventSource(url);
+    let es: EventSource | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
+    let retried = false;
     let opened = false;
-    es.onopen = () => {
-      opened = true;
-      setStatus("live");
-    };
-    es.onmessage = (e) => {
+
+    // EventSource fires `error` both when the endpoint closes (agent exited)
+    // and on any transient drop (proxy blip, orchestrator restart). Don't
+    // conflate them: probe the roster once — if the agent is still live,
+    // reconnect once (the endpoint replays its backlog, so reset first);
+    // only claim "the agent exited" when it genuinely isn't there anymore.
+    const probe = async (): Promise<void> => {
       try {
-        render(JSON.parse(e.data) as AgentEvent);
+        const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}/agents`);
+        const roster = (res.ok ? await res.json() : []) as Array<{ handle?: string; state?: string }>;
+        const a = Array.isArray(roster) ? roster.find((x) => x.handle === handle) : undefined;
+        const stillLive = a !== undefined && (a.state === "live" || a.state === "working" || a.state === "spawning");
+        if (disposed) return;
+        if (stillLive && !retried) {
+          retried = true;
+          setStatus("connecting");
+          term.reset(); // the reconnect replays the backlog — don't double it
+          retryTimer = setTimeout(connect, 1200);
+          return;
+        }
+        setStatus(stillLive ? "error" : opened ? "closed" : "error");
       } catch {
-        // Not JSON — show the raw payload so nothing is silently dropped.
-        if (e.data) writeLine(String(e.data));
+        if (!disposed) setStatus(opened ? "closed" : "error");
       }
     };
-    es.onerror = () => {
-      // EventSource fires error on stream end too. Once we've had data, treat a
-      // subsequent error as the agent having exited (the endpoint closes then),
-      // and stop the browser's auto-reconnect (it would 404 on a gone agent).
-      es.close();
-      setStatus(opened ? "closed" : "error");
+
+    const connect = (): void => {
+      if (disposed) return;
+      es = new EventSource(url);
+      es.onopen = () => {
+        opened = true;
+        setStatus("live");
+      };
+      es.onmessage = (e) => {
+        try {
+          render(JSON.parse(e.data) as AgentEvent);
+        } catch {
+          // Not JSON — show the raw payload so nothing is silently dropped.
+          if (e.data) writeLine(String(e.data));
+        }
+      };
+      es.onerror = () => {
+        es?.close();
+        if (!disposed) void probe();
+      };
     };
+    connect();
 
     return () => {
-      window.removeEventListener("resize", refit);
-      es.close();
+      disposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      es?.close();
       term.dispose();
     };
   }, [teamId, handle]);
@@ -157,7 +188,7 @@ export function TerminalPanel({
             ✕
           </button>
         </div>
-        <div className="term-host" ref={hostRef} />
+        <div className="term-host" ref={hostRef} style={{ overflow: "auto" }} />
         {status !== "live" && (
           <div className="term-note">
             {status === "connecting" && "Connecting to the agent's output stream…"}

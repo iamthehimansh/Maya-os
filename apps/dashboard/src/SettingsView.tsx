@@ -144,8 +144,20 @@ export function SettingsView(): React.JSX.Element {
     setNote(null);
   };
 
+  // A cleared port field becomes 0 and the PUT handler has no range check — a
+  // saved 0 makes the next `maya serve` bind a random port and breaks the
+  // stack. Validate here; Save stays disabled (with a reason) until fixed.
+  const validPort = (n: number): boolean => Number.isInteger(n) && n >= 1 && n <= 65535;
+  const invalidReason = ((): string | null => {
+    if (!cfg) return null;
+    if (!(["gateway", "dashboard", "bus", "orchestrator"] as const).every((k) => validPort(cfg[k].port))) return "ports must be 1–65535";
+    if (cfg.modelsDir.trim().length === 0) return "models directory can't be empty";
+    if (cfg.user !== undefined && cfg.user.handle.trim().length <= 1) return "@handle can't be empty";
+    return null;
+  })();
+
   const save = async (): Promise<void> => {
-    if (!cfg) return;
+    if (!cfg || invalidReason !== null) return;
     setSaving(true);
     setError(null);
     try {
@@ -301,10 +313,11 @@ export function SettingsView(): React.JSX.Element {
       </section>
 
       <div className="save-bar">
-        <button className="act primary" disabled={!dirty || saving} onClick={() => void save()}>
+        <button className="act primary" disabled={!dirty || saving || invalidReason !== null} onClick={() => void save()}>
           {saving ? "Saving…" : dirty ? "Save changes" : "Saved"}
         </button>
         {dirty && <button className="act" onClick={() => void load()}>Discard</button>}
+        {dirty && invalidReason && <span className="hint">{invalidReason}</span>}
       </div>
     </>
   );

@@ -7,6 +7,8 @@ import { TerminalPanel } from "./TerminalPanel";
 import {
   answerRun,
   createTeam,
+  deleteTeam,
+  drainTeam,
   getChannelHistory,
   getTeamAgents,
   getTeams,
@@ -78,9 +80,8 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   const unsub = useRef<() => void>(() => {});
   const agentPoll = useRef<ReturnType<typeof setInterval> | null>(null);
   const chanPoll = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Texts the user sent this session — so their own messages (which relay through
-  // the manager, losing the human sender identity) render as "You", not "manager".
-  const sentRef = useRef<Set<string>>(new Set());
+  const lastSeq = useRef(0); // channel poll cursor — only fetch messages newer than this
+  const nearBottom = useRef(true); // is the reader at (or near) the end of the stream?
   const stream = useRef<HTMLDivElement>(null);
 
   // Mount: model catalog (for the front-door setup) + the team list (for the switcher).
@@ -93,9 +94,8 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
       setWorker((p) => p || caller?.id || "");
     });
     void getCldzProfiles().then(setProfiles).catch(() => {});
-    const loadTeams = (): void => void getTeams().then(setTeamList).catch(() => {});
-    loadTeams();
-    const t = setInterval(loadTeams, 5000);
+    refreshTeams();
+    const t = setInterval(refreshTeams, 5000);
     return () => {
       clearInterval(t);
       unsub.current();
@@ -111,6 +111,9 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     setMsgs([]);
     setBusy(false);
     setError(null);
+    setFilter("All"); // a handle from the old team would silently blank the new stream
+    lastSeq.current = 0;
+    nearBottom.current = true;
     if (chanPoll.current) {
       clearInterval(chanPoll.current);
       chanPoll.current = null;
@@ -122,10 +125,14 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     }
     watchAgents(openTeam.id);
     let alive = true;
+    // Cursor poll: fetch only messages newer than the last seen seq and APPEND —
+    // a fixed window would freeze the chat once the channel outgrows it.
     const tick = (): void =>
-      void getChannelHistory(openTeam.channelId, 200)
+      void getChannelHistory(openTeam.channelId, 1000, lastSeq.current)
         .then(({ messages }) => {
-          if (alive) setMsgs(messages.map((cm) => channelToMsg(cm, sentRef.current)));
+          if (!alive || messages.length === 0) return; // nothing new — don't touch state
+          lastSeq.current = messages[messages.length - 1]!.seq;
+          setMsgs((prev) => [...prev, ...messages.map(channelToMsg)]);
         })
         .catch(() => {});
     tick();
@@ -140,8 +147,11 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openTeam?.channelId]);
 
+  // Follow new messages only when the reader is already at the bottom — never
+  // yank someone who scrolled up to read history. `msgs` only changes when
+  // content actually arrived (the poll bails on empty diffs).
   useEffect(() => {
-    stream.current?.scrollTo({ top: stream.current.scrollHeight, behavior: "smooth" });
+    if (nearBottom.current) stream.current?.scrollTo({ top: stream.current.scrollHeight, behavior: "smooth" });
   }, [msgs]);
 
 
@@ -160,11 +170,33 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   });
 
   const online = 1 + agents.filter((a) => a.state === "live" || a.state === "working").length;
-  const liveTeams = teamList.filter((t) => t.state !== "closed");
-  const closedTeams = teamList.filter((t) => t.state === "closed");
+  const isLive = (t: Team): boolean => t.live ?? t.state !== "closed";
+  const liveTeams = teamList.filter(isLive);
+  const closedTeams = teamList.filter((t) => !isLive(t));
+  // Liveness of the OPEN team comes from the polled list, not the click-time
+  // snapshot — a team that drains (or rehydrates) while open updates the badge,
+  // the composer, and the send guard within one poll.
+  const polledOpen = openTeam ? teamList.find((t) => t.id === openTeam.id) : undefined;
+  const openLive = openTeam ? (polledOpen ? isLive(polledOpen) : openTeam.live) : false;
 
   function push(m: Omit<Msg, "id">): void {
     setMsgs((prev) => [...prev, { ...m, id: nextId.current++ }]);
+  }
+
+  function refreshTeams(): void {
+    void getTeams().then(setTeamList).catch(() => {});
+  }
+
+  // Archive (delete) a finished team, then drop back to the front door.
+  async function archiveTeam(id: string): Promise<void> {
+    setError(null);
+    try {
+      await deleteTeam(id);
+      refreshTeams();
+      if (openTeam?.id === id) onNewChat();
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    }
   }
 
   function watchAgents(teamId: string): void {
@@ -180,7 +212,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
       return;
     }
     const t = teamList.find((x) => x.id === id);
-    if (t) onOpenChat({ id: t.id, channelId: t.channelId, name: t.name, live: t.state !== "closed" });
+    if (t) onOpenChat({ id: t.id, channelId: t.channelId, name: t.name, live: isLive(t) });
   }
 
   // Rich team creation: make the team, spawn the lead + each member (full Solo-
@@ -190,8 +222,14 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     setError(null);
     try {
       const team = await createTeam({ name, workerModel: lead.model, cwd: lead.cwd });
-      await spawnTeamAgent(team.id, lead);
-      for (const m of members) await spawnTeamAgent(team.id, m);
+      try {
+        await spawnTeamAgent(team.id, lead);
+        for (const m of members) await spawnTeamAgent(team.id, m);
+      } catch (e) {
+        // Don't leave a zombie team behind when a spawn fails mid-way.
+        await drainTeam(team.id).catch(() => {});
+        throw e;
+      }
       setShowSetup(false);
       onOpenChat({ id: team.id, channelId: team.channelId, name: team.name, live: true });
     } catch (e) {
@@ -226,13 +264,18 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     // the message to the lead (or the first agent) so a plain "hello" gets a
     // reply instead of silence. Explicit @mentions still route themselves.
     if (openTeam) {
-      if (!openTeam.live || sending) return;
+      if (!openLive) {
+        setError("This team is closed — its history is read-only. Open a live team (or create a new one) to send messages.");
+        return;
+      }
+      if (sending) return;
       setDraft("");
       setError(null);
       setSending(true);
-      const mentionsSomeone = /@[a-z0-9][a-z0-9-]/i.test(text);
+      // Only a mention of a REAL team agent counts — "foo@gmail.com" or a typo'd
+      // handle must still fall back to waking the lead, or nobody replies.
+      const mentionsSomeone = agents.some((a) => mentionsAgent(text, a.handle));
       const wake = mentionsSomeone ? undefined : (agents.find((a) => a.role === "lead") ?? agents[0])?.handle;
-      sentRef.current.add(text); // so the manager-relayed echo renders as "You"
       void sendTeamMessage(openTeam.id, text, wake, true)
         .catch((e) => setError(String(e instanceof Error ? e.message : e)))
         .finally(() => setSending(false));
@@ -246,16 +289,30 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     setBusy(true);
     push({ who: "you", handle: "You", text });
     unsub.current();
-    void startLoop({ goal: text, cwd: cwd.trim(), leadModel: lead, workerModel: worker, allowedTools: ["Write", "Edit"] })
+    void startLoop({ goal: text, cwd: cwd.trim(), leadModel: lead, workerModel: worker, allowedTools: ["Read", "Write", "Edit"] })
       .then(({ runId }) => {
-        unsub.current = streamRun(runId, (e) => {
-          if (e.kind === "started" && e.channelId) {
-            const teamId = e.channelId.replace(/^maya\/team\//, "");
-            watchAgents(teamId);
-          }
-          push({ who: "agent", handle: LEAD, text: renderEvent(e), kind: e.kind, runId, event: e });
-          if (e.kind === "report") setBusy(false);
-        });
+        unsub.current = streamRun(
+          runId,
+          (e) => {
+            if (e.kind === "started" && e.channelId) {
+              const teamId = e.channelId.replace(/^maya\/team\//, "");
+              watchAgents(teamId);
+            }
+            push({ who: "agent", handle: LEAD, text: renderEvent(e), kind: e.kind, runId, event: e });
+            if (e.kind === "report") {
+              // Terminal: streamRun closed the SSE; stop polling the drained team.
+              setBusy(false);
+              if (agentPoll.current) {
+                clearInterval(agentPoll.current);
+                agentPoll.current = null;
+              }
+            }
+          },
+          () => {
+            setBusy(false);
+            setError("Lost the connection to the run — it may still be finishing; check the Runs panel.");
+          },
+        );
       })
       .catch((e) => {
         setError(String(e instanceof Error ? e.message : e));
@@ -269,10 +326,10 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     void answerRun(runId, { ...(qid ? { qid } : {}), optionId }).catch((e) => setError(String(e instanceof Error ? e.message : e)));
   }
 
-  const composerDisabled = openTeam ? !openTeam.live : false;
-  const sendDisabled = !draft.trim() || (openTeam ? !openTeam.live || sending : busy || !cwd.trim());
+  const composerDisabled = openTeam ? !openLive : false;
+  const sendDisabled = !draft.trim() || (openTeam ? !openLive || sending : busy || !cwd.trim());
   const placeholder = openTeam
-    ? openTeam.live
+    ? openLive
       ? `Message ${openTeam.name}… (type @handle to wake an agent)`
       : "This team is finished — read-only"
     : "Message the channel…";
@@ -301,8 +358,8 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
               {closedTeams.length > 0 && (
                 <optgroup label="Finished teams">
                   {closedTeams.slice(0, 40).map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
+                    <option key={t.id} value={t.id} style={{ color: "#8a8f98" }}>
+                      {t.name} (finished)
                     </option>
                   ))}
                 </optgroup>
@@ -311,7 +368,20 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
             {openTeam ? (
               <>
                 <strong>{openTeam.name}</strong>
-                {openTeam.live ? <span className="cchat-live">● LIVE</span> : <span className="chip">read-only</span>}
+                {openLive ? (
+                  <span className="cchat-live">● LIVE</span>
+                ) : (
+                  <>
+                    <span className="chip">read-only</span>
+                    <button
+                      className="act"
+                      onClick={() => void archiveTeam(openTeam.id)}
+                      title="Archive this finished team (deletes its record + tasks)"
+                    >
+                      🗑 Archive
+                    </button>
+                  </>
+                )}
               </>
             ) : (
               <>
@@ -334,7 +404,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
               {f}
             </button>
           ))}
-          {(!openTeam || openTeam.live) && (
+          {(!openTeam || openLive) && (
             <button className="cchat-setup disclosure" onClick={() => setShowSetup((v) => !v)}>
               {showSetup ? "hide" : openTeam ? "＋ add agent" : "＋ create a team"}
             </button>
@@ -346,7 +416,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
             <TeamBuilder models={models} profiles={profiles} busy={creating} onSubmit={createFullTeam} defaultModel={worker || lead} />
           </div>
         )}
-        {showSetup && openTeam && openTeam.live && (
+        {showSetup && openTeam && openLive && (
           <div className="cchat-setup-row cchat-addagent">
             <AgentSetupForm title={`Add an agent to ${openTeam.name}`} value={addDraft} onChange={setAddDraft} models={models} profiles={profiles} />
             <button className="act primary" onClick={() => void addAgent()} disabled={!draftReady(addDraft) || adding}>
@@ -361,13 +431,20 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
           </div>
         )}
 
-        <div className="cchat-stream" ref={stream}>
+        <div
+          className="cchat-stream"
+          ref={stream}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          }}
+        >
           {shown.length === 0 ? (
             <div className="cchat-empty">
               {openTeam ? (
                 <>
                   <p>👀 Watching <strong>{openTeam.name}</strong> — loading its conversation…</p>
-                  <p className="muted">{openTeam.live ? "Send a message below to talk to the team." : "This team has finished — read-only."}</p>
+                  <p className="muted">{openLive ? "Send a message below to talk to the team." : "This team has finished — read-only."}</p>
                 </>
               ) : (
                 <>
@@ -435,7 +512,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
             }}
           />
           <div className="cchat-composer-foot">
-            <span className="muted">📎 Tip: type @ to tag an agent, or attach a file</span>
+            <span className="muted">💡 Tip: type @handle to wake a specific agent</span>
             <button className="csend" onClick={send} disabled={sendDisabled} aria-label="Send">
               ↑
             </button>
@@ -447,16 +524,14 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
         <aside className="cchat-rail">
           <div className="crail-tabs">
             <span className="crail-tab active">Agents ({agents.length})</span>
-            <span className="crail-tab muted">Queue</span>
-          </div>
-
-          <div className="crail-card crail-dm">
-            <span>🔒 Private agent DMs</span>
-            <span className="muted">Let your agents DM each other on this channel.</span>
           </div>
 
           {agents.length === 0 ? (
-            <p className="empty">{openTeam ? "No agents on this team." : "No agents yet — send a message and the Lead spins up the team."}</p>
+            <p className="empty">
+              {openTeam
+                ? "No agents on this team."
+                : "No standing agents — front-door loop workers are transient; their progress streams into the chat."}
+            </p>
           ) : (
             agents.map((a) => (
               <div className="crail-agent" key={a.handle}>
@@ -477,18 +552,6 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
               </div>
             ))
           )}
-
-          <div className="crail-section">
-            <h4>People online (1)</h4>
-            <div className="crail-person">👤 you (owner)</div>
-          </div>
-
-          <div className="crail-section">
-            <h4>Members (1)</h4>
-            <div className="crail-person">
-              you <span className="chip owner">OWNER</span>
-            </div>
-          </div>
         </aside>
       )}
       {termAgent && openTeam && (
@@ -508,20 +571,25 @@ const ICON: Record<LoopEvent["kind"], string> = {
   report: "🏁",
 };
 
-/** Manager housekeeping (join/leave/ready/stop) — Maya plumbing, not conversation. */
-const SYSTEM_LINE = /^\s*[🧭➕➖🛑]/u;
+/** Did the text @mention this agent? Word-boundary on both sides so "@qa"
+ * doesn't match inside "@qa-lead" or "foo@qatar" — mirrors the bus-bridge's
+ * wake regex, so what the UI treats as a mention is what actually wakes. */
+function mentionsAgent(text: string, handle: string): boolean {
+  const tag = handle.replace(/^@/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|\\s)@${tag}(?![a-z0-9-])`, "i").test(text);
+}
 
 /**
- * A bus channel message → a stream bubble.
- *  • Manager housekeeping ("➕ @x joined", "🧭 team ready") → 'system' (hidden).
- *  • A message whose text the user just sent → "You" (it relayed through the
- *    manager, which drops the human identity — matching on text recovers it).
- *  • No fromTokenId also means a human sender.
+ * A bus channel message → a stream bubble. Classified by SENDER, not content:
+ *  • from the manager and not human-marked → 'system' (housekeeping, hidden).
+ *  • `body.human` (the composer's mark, relayed end-to-end) or no fromTokenId
+ *    (a raw human post) → "You".
+ *  • anything else → an agent bubble under its own handle.
  */
-function channelToMsg(cm: ChannelMessage, sent: Set<string>): Msg {
+function channelToMsg(cm: ChannelMessage): Msg {
   const text = cm.body?.text ?? "(structured frame)";
-  const system = SYSTEM_LINE.test(text);
-  const human = !cm.fromTokenId || cm.body?.human === true || sent.has(text.trim());
+  const human = cm.body?.human === true || (!cm.fromTokenId && cm.from !== "manager");
+  const system = !human && cm.from === "manager";
   return {
     id: cm.seq,
     who: system ? "system" : human ? "you" : "agent",
