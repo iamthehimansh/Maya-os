@@ -15,6 +15,9 @@ const bodySchema = z
       .array(z.object({ id: z.string().max(128), filename: z.string().max(256) }))
       .max(16)
       .optional(),
+    /** Orchestrator-relayed on behalf of the human owner (contracts/bus.ts) —
+     * without this key here, .strict() rejected EVERY composer message. */
+    human: z.boolean().optional(),
   })
   .strict();
 

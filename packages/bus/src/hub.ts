@@ -112,6 +112,7 @@ export class Hub {
       ...(frame.body.text !== undefined ? { text: frame.body.text } : {}),
       ...(frame.body.maya !== undefined ? { maya: frame.body.maya } : {}),
       ...(frame.body.attachments !== undefined ? { attachments: frame.body.attachments } : {}),
+      ...(frame.body.human !== undefined ? { human: frame.body.human } : {}),
     };
     const stamped = this.db.appendMessage(conn.channelId, {
       from: conn.handle,
