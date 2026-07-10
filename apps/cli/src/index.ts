@@ -239,9 +239,8 @@ export async function main(argv: string[]): Promise<void> {
         return;
       }
       if (sub === "list" || sub === undefined) {
-        const all = (await (await fetch(`${base}/teams`)).json()) as Array<{ id: string; name: string; state: string; tokensUsed?: number; tokenBudget?: number | null }>;
-        // Standing teams only — per-run teams close on completion and are history.
-        const teams = all.filter((t) => t.state === "active");
+        // ?live=1 → server returns only standing teams (per-run teams are history).
+        const teams = (await (await fetch(`${base}/teams?live=1`)).json()) as Array<{ id: string; name: string; state: string; tokensUsed?: number; tokenBudget?: number | null }>;
         if (!teams.length) return void console.log("no live teams — maya team create <name>");
         for (const t of teams) console.log(`${t.id}  🟢 ${t.name}  ${t.tokensUsed ?? 0}${t.tokenBudget ? `/${t.tokenBudget}` : ""} tok`);
         return;
