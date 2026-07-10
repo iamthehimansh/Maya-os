@@ -65,6 +65,8 @@ interface Attachment {
 
 export class AgentBusBridge {
   private readonly attachments = new Map<string, Attachment>();
+  /** Debounce timers for self-driven pty wakes (agentId → pending poke). */
+  private readonly wakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly opts: BusBridgeOptions) {}
 
@@ -191,10 +193,25 @@ export class AgentBusBridge {
           /* inbox is best-effort */
         }
       }
-      // Self-driven agents (the /maya-team skill) read the inbox themselves —
-      // their own Monitor wakes them on EVERY message (untagged included).
-      // Typing into them here would double-deliver and corrupt their TUI.
-      if (opts.selfDriven) return;
+      // Self-driven agents (the /maya-team skill) read the inbox THEMSELVES —
+      // but an interactive pty agent goes idle at its prompt and its own
+      // background Monitor (a shell loop) can't re-invoke a turn; only stdin
+      // can. So the bridge still WAKES it — with a tiny, fixed poke (never the
+      // message content) — and the agent then reads all new inbox lines
+      // (untagged included) per the skill. Debounced so a burst = one wake.
+      if (opts.selfDriven) {
+        if (m.from === label || m.from === tag) return; // our own outbox echo — no self-wake
+        if (this.wakeTimers.has(handle.id)) return; // a wake is already pending
+        const t = setTimeout(() => {
+          this.wakeTimers.delete(handle.id);
+          // Minimal, recognizable nudge — the skill tells the agent this means
+          // "read your $MAYA_AGENT_INBOX past your cursor and act."
+          void adapter.send(handle.id, '📨 new inbox messages — read $MAYA_AGENT_INBOX past your cursor and act (reply via $MAYA_AGENT_OUTBOX).').catch(() => {});
+        }, 1200);
+        t.unref?.();
+        this.wakeTimers.set(handle.id, t);
+        return;
+      }
       // Accept the LABEL as well as the allocated handle: the bus suffixes on
       // collision ("@lead" taken by a stale twin → we join as "@lead-2"), and a
       // sender directing to the label must still wake us — not go silent.
@@ -342,6 +359,11 @@ export class AgentBusBridge {
     const att = this.attachments.get(agentId);
     if (!att) return;
     this.attachments.delete(agentId);
+    const wake = this.wakeTimers.get(agentId);
+    if (wake) {
+      clearTimeout(wake);
+      this.wakeTimers.delete(agentId);
+    }
     att.stop();
     att.client.close();
     await this.revokeToken(att.tokenId);

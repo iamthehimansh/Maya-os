@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 /** Bump when the skill text changes — installed copies are refreshed. */
-const SKILL_VERSION = '1';
+const SKILL_VERSION = '2';
 
 const MAYA_TEAM_SKILL = `<!-- maya-team v${SKILL_VERSION} (auto-installed by maya-os; edits are overwritten) -->
 # /maya-team — run your team-member loop
@@ -34,6 +34,8 @@ Your handle is in \`$MAYA_AGENT_HANDLE\`.
 Then go idle. Do not exit — you live here.
 
 ## Every wake
+
+You are woken two ways — treat BOTH the same: (a) your inbox Monitor prints \`inbox <size>\`, or (b) the system types \`📨 new inbox messages …\` into your terminal. Either means: new lines arrived.
 
 1. Read the inbox lines with \`seq\` > cursor (ALL of them — several can queue while you work). Update the cursor.
 2. Skip your own lines and \`from: "manager"\` housekeeping (➕ joined / ♻️ restored / task frames).
