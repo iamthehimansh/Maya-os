@@ -90,6 +90,10 @@ export interface AgentAdapter {
   kill(id: string, graceMs?: number): Promise<void>;
   /** Deliver an answer/prompt to a running (or waiting_input) agent's stdin/PTY. */
   send(id: string, text: string): Promise<void>;
+  /** OPTIONAL: raw byte passthrough to the agent's pty (the dashboard's
+   * interactive terminal — human keystrokes, no Enter appended). Only adapters
+   * that run a real pty implement it. */
+  writeRaw?(id: string, data: string): void;
   status(id: string): Promise<AgentHandle>;
   /** Tail of structured events; `since` is an opaque cursor from a prior call. */
   events(id: string, since?: string): AsyncIterable<AgentEvent>;

@@ -16,6 +16,7 @@ export { CodexAdapter, type CodexAdapterOptions } from './adapters/codex.js';
 export { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencode.js';
 export { AgentBusBridge, type BusBridgeOptions, type AttachOptions } from './bus-bridge.js';
 export { EventLog } from './events.js';
+export { ensureMayaTeamSkill } from './skills.js';
 
 export interface AgentRuntimeOptions {
   /** Maya gateway base — every agent's model routes through it. */

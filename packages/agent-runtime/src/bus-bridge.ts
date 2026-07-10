@@ -15,6 +15,8 @@
  */
 
 import { appendFileSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { AgentAdapter, AgentHandle, LoopBody } from '@maya-ai/core';
 import { BusClient } from '@maya-ai/bus-client';
 
@@ -45,6 +47,13 @@ export interface AttachOptions {
    */
   inboxPath?: string;
   outboxPath?: string;
+  /**
+   * The agent drives its OWN message loop (the /maya-team skill: its Monitor on
+   * inboxPath wakes it per message — tagged and untagged alike). The bridge
+   * still appends every message to the inbox and posts the outbox, but NEVER
+   * types messages into the agent; only the spawn-time bootstrap line is sent.
+   */
+  selfDriven?: boolean;
 }
 
 interface Attachment {
@@ -162,13 +171,30 @@ export class AgentBusBridge {
       const text = typeof m.body.text === 'string' ? m.body.text : '';
       // Walkie-talkie inbox: record every incoming message so the agent can read
       // its channel history from the file. (It's still woken via stdin below.)
-      if (opts.inboxPath && text) {
+      if (opts.inboxPath && (text || (m.body.attachments?.length ?? 0) > 0)) {
         try {
-          appendFileSync(opts.inboxPath, JSON.stringify({ seq: m.seq, from: m.from, ts: m.ts, text, ...(m.to ? { to: m.to } : {}) }) + '\n');
+          // Attachments ride along with a localPath so the agent can Read the
+          // file directly (the orchestrator stores them under ~/.maya/attachments).
+          const atts = m.body.attachments?.map((a) => ({ ...a, localPath: join(homedir(), '.maya', 'attachments', a.id) }));
+          appendFileSync(
+            opts.inboxPath,
+            JSON.stringify({
+              seq: m.seq,
+              from: m.from,
+              ts: m.ts,
+              text,
+              ...(m.to ? { to: m.to } : {}),
+              ...(atts && atts.length > 0 ? { attachments: atts } : {}),
+            }) + '\n',
+          );
         } catch {
           /* inbox is best-effort */
         }
       }
+      // Self-driven agents (the /maya-team skill) read the inbox themselves —
+      // their own Monitor wakes them on EVERY message (untagged included).
+      // Typing into them here would double-deliver and corrupt their TUI.
+      if (opts.selfDriven) return;
       // Accept the LABEL as well as the allocated handle: the bus suffixes on
       // collision ("@lead" taken by a stale twin → we join as "@lead-2"), and a
       // sender directing to the label must still wake us — not go silent.

@@ -19,7 +19,7 @@
 
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 // node-pty is a NATIVE module: importing it at module load breaks the bundled
 // ESM CLI (its CJS loader uses __dirname, undefined in ESM). Type-only import
@@ -353,12 +353,33 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   /** Spawn interactive claude in a real PTY and stream its raw terminal bytes as
    * `pty` events (the dashboard renders them in xterm). Messages are delivered by
    * TYPING into the pty (send()); chat output flows via the agent's outbox file. */
+  /** Pre-trust a workspace in ~/.claude.json so interactive claude never shows
+   * the folder-trust dialog (its wording changes between versions — v2.1.206
+   * broke our stream detector and wedged agents at the prompt). Best-effort:
+   * the widened stream detector below remains as the fallback. */
+  private preTrustWorkspace(cwd: string): void {
+    try {
+      const cfgPath = join(homedir(), '.claude.json');
+      const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as {
+        projects?: Record<string, Record<string, unknown>>;
+      };
+      cfg.projects ??= {};
+      const proj = (cfg.projects[cwd] ??= {});
+      if (proj['hasTrustDialogAccepted'] === true) return; // already trusted — don't rewrite
+      proj['hasTrustDialogAccepted'] = true;
+      writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+    } catch {
+      /* missing/locked config — the stream detector still answers the prompt */
+    }
+  }
+
   private async spawnPty(
     id: string,
     spec: AgentSpawnSpec,
     cwd: string | undefined,
     env: Record<string, string | undefined>,
   ): Promise<AgentHandle> {
+    this.preTrustWorkspace(cwd ?? spec.cwd);
     // Lazy native-module load — keeps agent-runtime import-safe in the bundled CLI.
     const { spawn: ptySpawn } = await import('node-pty');
     const p = ptySpawn(this.ptyBin(), this.buildPtyArgs(spec), {
@@ -426,7 +447,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         }, 1200);
       }
       trustBuf = (trustBuf + data).slice(-600);
-      if (trustAnswers < 3 && /do you trust the files in this folder/i.test(trustBuf)) {
+      // Wording varies by claude version: "Do you trust the files in this
+      // folder?" (≤2.0), "Quick safety check … Yes, I trust this folder" (2.1+).
+      if (trustAnswers < 3 && /(do you trust the files in this folder|yes, i trust this folder)/i.test(trustBuf)) {
         trustBuf = '';
         trustAnswers += 1;
         setTimeout(() => {
@@ -634,6 +657,16 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       live.child?.stdin?.write(JSON.stringify(turn) + '\n');
     }
     if (live.handle.state === 'waiting_input') this.setState(live, 'running');
+  }
+
+  /** RAW pty passthrough for the dashboard's interactive terminal: the human's
+   * xterm keystrokes go straight to the agent's pty — no Enter appended, no
+   * escaping (arrow keys/ctrl sequences arrive as bytes). pty agents only. */
+  writeRaw(id: string, data: string): void {
+    const live = this.mustGet(id);
+    if (!live.pty) throw new Error('raw terminal input needs a pty agent');
+    if (TERMINAL.has(live.handle.state)) throw new Error(`agent is ${live.handle.state}`);
+    live.pty.write(data);
   }
 
   async status(id: string): Promise<AgentHandle> {
