@@ -68,15 +68,45 @@ export class AgentBusBridge {
     return [...this.attachments.keys()];
   }
 
+  /** Best-effort revoke of every live token with this label on this channel —
+   * leftovers from a crash/SIGKILL where detach() never ran. Keeps orphaned
+   * credentials from accumulating in the bus (and keeps the rejoin from being
+   * handle-suffixed to "@x-2" over a stale twin). */
+  private async revokeStaleTokens(label: string, channelId: string): Promise<void> {
+    try {
+      const res = await fetch(`${this.httpBase()}/api/tokens`, {
+        headers: { authorization: `Bearer ${this.opts.adminToken}` },
+      });
+      if (!res.ok) return;
+      const tokens = (await res.json()) as Array<{ id: string; label: string; scopes: string[]; revoked: boolean }>;
+      for (const t of tokens) {
+        if (t.revoked || t.label !== label || !t.scopes.includes(channelId)) continue;
+        await this.revokeToken(t.id);
+      }
+    } catch {
+      /* sweep is best-effort */
+    }
+  }
+
+  private async revokeToken(id: string): Promise<void> {
+    await fetch(`${this.httpBase()}/api/tokens/${id}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${this.opts.adminToken}` },
+    }).catch(() => {});
+  }
+
   async attach(adapter: AgentAdapter, handle: AgentHandle, opts: AttachOptions): Promise<{ busHandle: string }> {
     if (this.attachments.has(handle.id)) throw new Error(`agent ${handle.id} already attached`);
+    const label = opts.label ?? handle.id;
+
+    await this.revokeStaleTokens(label, opts.channelId);
 
     // Mint a least-capability token scoped to exactly this channel.
     const res = await fetch(`${this.httpBase()}/api/tokens`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${this.opts.adminToken}` },
       body: JSON.stringify({
-        label: opts.label ?? handle.id,
+        label,
         role: 'member',
         caps: ['receive', 'send'],
         scopes: [opts.channelId],
@@ -91,15 +121,38 @@ export class AgentBusBridge {
       token: minted.token,
     });
 
-    const joined = new Promise<string>((resolve) => client.on('joined', (j) => resolve(j.handle)));
+    // Bounded join: a bus hiccup (reject frame, server never answering) must
+    // fail attach LOUDLY — an unbounded await here hung spawnAgent with the
+    // handle stuck in 'spawning', and one bad join stalled boot rehydration of
+    // every remaining agent. ('close' isn't terminal — the client auto-
+    // reconnects — so the timeout covers a bus that never comes back.)
+    const joined = new Promise<string>((resolve, reject) => {
+      client.on('joined', (j) => resolve(j.handle));
+      client.on('error', (e) => reject(new Error(`bus join failed: ${e.code} ${e.message}`)));
+    });
     client.connect();
-    const busHandle = await joined;
+    let busHandle: string;
+    let joinTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      busHandle = await Promise.race([
+        joined,
+        new Promise<never>((_, reject) => {
+          joinTimer = setTimeout(() => reject(new Error(`bus join timed out (15s) for ${label} on ${opts.channelId}`)), 15_000);
+        }),
+      ]);
+    } catch (err) {
+      client.close();
+      await this.revokeToken(minted.id); // don't leak the just-minted credential
+      throw err instanceof Error ? err : new Error(String(err));
+    } finally {
+      if (joinTimer) clearTimeout(joinTimer);
+    }
 
     // Wake-on-@tag: the agent acts on a message when it's addressed to its bus
     // handle (m.to) OR its @handle is @mentioned in the text — himansh's "a
     // monitor wakes whoever's tagged." The `(?![a-z0-9-])` guard stops @qa from
     // matching @qa-2. Other channel traffic is context the agent doesn't act on.
-    const tag = `@${(opts.label ?? handle.id).replace(/^@/, '')}`;
+    const tag = `@${label.replace(/^@/, '')}`;
     const mentionRe = new RegExp(tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![a-z0-9-])', 'i');
     const ignoreFrom = new Set(opts.ignoreFrom ?? []);
     client.on('message', (m) => {
@@ -116,7 +169,10 @@ export class AgentBusBridge {
           /* inbox is best-effort */
         }
       }
-      const directed = m.to === busHandle || mentionRe.test(text);
+      // Accept the LABEL as well as the allocated handle: the bus suffixes on
+      // collision ("@lead" taken by a stale twin → we join as "@lead-2"), and a
+      // sender directing to the label must still wake us — not go silent.
+      const directed = m.to === busHandle || m.to === tag || m.to === label || mentionRe.test(text);
       if (maya && maya.kind === 'answer' && directed) {
         const answerText = maya.text ?? (maya.optionId !== undefined ? `answer: ${maya.optionId}` : '');
         void adapter.send(handle.id, answerText).catch(() => {});
@@ -126,6 +182,58 @@ export class AgentBusBridge {
         void adapter.send(handle.id, text).catch(() => {});
       }
     });
+
+    // Walkie-talkie outbox: watch the file the agent writes to, and post each
+    // COMPLETE new line to the channel on its behalf. Offset-tracked (chars) and
+    // only lines up to the last '\n' are posted — a partial line still being
+    // written waits. Plain text → broadcast; a JSON line {text,to} → directed.
+    // (Defined BEFORE the pump so the 'say' case can drain synchronously.)
+    let outboxTimer: ReturnType<typeof setInterval> | undefined;
+    // Did the agent post via its outbox since the last completed turn? Used to
+    // suppress that turn's 'say' (same content said twice — see the say case).
+    let outboxPostedThisTurn = false;
+    let drainOutbox: (() => void) | undefined;
+    if (opts.outboxPath) {
+      const outbox = opts.outboxPath;
+      let offset = 0;
+      drainOutbox = (): void => {
+        let content: string;
+        try {
+          content = readFileSync(outbox, 'utf8');
+        } catch {
+          return; // not there yet / transient read error
+        }
+        // Truncation/rewrite recovery: Claude's Write tool REWRITES the file,
+        // so the outbox can SHRINK — a grow-only offset would go silent forever
+        // (and later post a mid-line fragment once the file regrew past it).
+        // Resync from the top; identical-prefix rewrites keep their offset.
+        if (content.length < offset) offset = 0;
+        if (content.length <= offset) return;
+        const chunk = content.slice(offset);
+        const lastNl = chunk.lastIndexOf('\n');
+        if (lastNl === -1) return; // no complete line yet — a write may be in progress
+        for (const raw of chunk.slice(0, lastNl).split('\n')) {
+          const line = raw.trim();
+          if (!line) continue;
+          let out: { text: string; to?: string } = { text: line };
+          if (line.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(line) as { text?: string; to?: string };
+              if (typeof parsed.text === 'string') out = { text: parsed.text, ...(parsed.to ? { to: parsed.to } : {}) };
+            } catch {
+              /* not JSON — treat the whole line as text */
+            }
+          }
+          if (out.text) {
+            client.sendMessage({ ...(out.to ? { to: out.to } : {}), body: { text: out.text } });
+            outboxPostedThisTurn = true;
+          }
+        }
+        offset += lastNl + 1; // advance past the newline of the last posted line
+      };
+      outboxTimer = setInterval(drainOutbox, 1000);
+      outboxTimer.unref?.();
+    }
 
     // agent → channel: pump structured events until terminal.
     let stopped = false;
@@ -145,6 +253,9 @@ export class AgentBusBridge {
             }
             break;
           case 'question': {
+            // NOTE: no shipped adapter emits kind:'question' yet (headless
+            // permission/plan prompts and PTY prompt detection are a later
+            // slice) — kept so the contract's question→loop path is ready.
             const q: LoopBody = { kind: 'question', qid: `${handle.id}-${Date.now().toString(36)}`, prompt: ev.text };
             client.sendMessage({ body: { text: `❓ ${ev.text}`, maya: q } });
             break;
@@ -163,12 +274,16 @@ export class AgentBusBridge {
           case 'say':
             // The agent completed a turn — post its reply to the channel (@mention
             // → send → turn → result → say → channel). We ALSO post outbox lines,
-            // so an agent that both writes its outbox AND says the same text can
-            // double-post — but suppressing `say` for outbox agents silenced any
-            // agent that replies normally instead of writing its outbox, which made
-            // debugging blind. Visibility wins; the double-post is cosmetic. (A
-            // clean fix later: suppress `say` only if the agent wrote its outbox
-            // THAT turn — needs per-turn tracking.)
+            // so drain the outbox NOW (the 1s poll may not have seen this turn's
+            // write yet) and suppress the say only when the agent spoke via its
+            // outbox THIS turn — that say is the same content said twice. Agents
+            // that reply normally (no outbox write) still post, so debugging
+            // stays visible.
+            drainOutbox?.();
+            if (outboxPostedThisTurn) {
+              outboxPostedThisTurn = false;
+              break;
+            }
             if (ev.text.trim()) client.sendMessage({ body: { text: ev.text } });
             break;
           default:
@@ -176,44 +291,6 @@ export class AgentBusBridge {
         }
       }
     })();
-
-    // Walkie-talkie outbox: watch the file the agent writes to, and post each
-    // COMPLETE new line to the channel on its behalf. Offset-tracked (chars) and
-    // only lines up to the last '\n' are posted — a partial line still being
-    // written waits. Plain text → broadcast; a JSON line {text,to} → directed.
-    let outboxTimer: ReturnType<typeof setInterval> | undefined;
-    if (opts.outboxPath) {
-      const outbox = opts.outboxPath;
-      let offset = 0;
-      outboxTimer = setInterval(() => {
-        let content: string;
-        try {
-          content = readFileSync(outbox, 'utf8');
-        } catch {
-          return; // not there yet / transient read error
-        }
-        if (content.length <= offset) return;
-        const chunk = content.slice(offset);
-        const lastNl = chunk.lastIndexOf('\n');
-        if (lastNl === -1) return; // no complete line yet — a write may be in progress
-        for (const raw of chunk.slice(0, lastNl).split('\n')) {
-          const line = raw.trim();
-          if (!line) continue;
-          let out: { text: string; to?: string } = { text: line };
-          if (line.startsWith('{')) {
-            try {
-              const parsed = JSON.parse(line) as { text?: string; to?: string };
-              if (typeof parsed.text === 'string') out = { text: parsed.text, ...(parsed.to ? { to: parsed.to } : {}) };
-            } catch {
-              /* not JSON — treat the whole line as text */
-            }
-          }
-          if (out.text) client.sendMessage({ ...(out.to ? { to: out.to } : {}), body: { text: out.text } });
-        }
-        offset += lastNl + 1; // advance past the newline of the last posted line
-      }, 1000);
-      outboxTimer.unref?.();
-    }
 
     const attachment: Attachment = {
       client,
@@ -241,10 +318,7 @@ export class AgentBusBridge {
     this.attachments.delete(agentId);
     att.stop();
     att.client.close();
-    await fetch(`${this.httpBase()}/api/tokens/${att.tokenId}`, {
-      method: 'DELETE',
-      headers: { authorization: `Bearer ${this.opts.adminToken}` },
-    }).catch(() => {});
+    await this.revokeToken(att.tokenId);
   }
 
   async detachAll(): Promise<void> {

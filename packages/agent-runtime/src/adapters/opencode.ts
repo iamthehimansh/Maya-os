@@ -144,6 +144,15 @@ export class OpenCodeAdapter implements AgentAdapter {
     process.once('exit', killChild);
     child.once('exit', () => process.removeListener('exit', killChild));
 
+    // OpenCode has no native mapping (yet) for Maya's scoping/persona options —
+    // say what was dropped instead of silently running unrestricted/persona-less.
+    const ignored = ['allowedTools', 'maxTurns', 'systemPrompt', 'appendSystemPrompt'].filter(
+      (k) => spec.options?.[k] !== undefined,
+    );
+    if (ignored.length > 0) {
+      this.pushLog(live, 'system', `[opencode] unsupported options ignored: ${ignored.join(', ')}`);
+    }
+
     child.stdout?.on('data', (buf: Buffer) => this.onStdout(live, buf));
     child.stderr?.on('data', (buf: Buffer) => this.pushLog(live, 'stderr', buf.toString()));
     child.once('error', (err) => {

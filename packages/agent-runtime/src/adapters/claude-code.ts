@@ -2,8 +2,8 @@
  * Claude Code adapter (contracts: AgentAdapter).
  *
  * Headless integration via `claude --print --output-format stream-json` —
- * structured NDJSON events, no PTY/ANSI scraping (a PTY mode for attended
- * sessions is a later slice). Two spawn shapes:
+ * structured NDJSON events — plus an interactive PTY mode (options.pty) that
+ * runs the real Claude TUI for standing agents. Two headless spawn shapes:
  *
  * - `prompt` given → one-shot: the task is argv's positional prompt; the
  *   agent runs to completion; send() is invalid.
@@ -49,7 +49,13 @@ import { EventLog } from '../events.js';
 function cldzProfileEnv(profileName?: string): Record<string, string> {
   const home = process.env['CLDZ_HOME']?.trim() || join(homedir(), '.cldz');
   const cfgPath = join(home, 'config.json');
-  const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as {
+  let raw: string;
+  try {
+    raw = readFileSync(cfgPath, 'utf8');
+  } catch {
+    throw new Error(`cldz is not configured (no ${cfgPath}) — run \`cldz login\` first, or spawn without cldzProfile`);
+  }
+  const cfg = JSON.parse(raw) as {
     defaultProfile?: string;
     profiles?: Record<string, { type: string; apiKey?: string; oauthToken?: string; baseUrl?: string; authToken?: string }>;
   };
@@ -108,6 +114,10 @@ interface LiveAgent {
   logs: AgentLogEvent[];
   interactive: boolean;
   stdoutBuf: string;
+  /** PTY only: serializes send() (type → Enter → settle) so two rapid channel
+   * @mentions can't interleave into one garbled input line. Seeded with the
+   * TUI-readiness gate so nothing is typed before the terminal renders. */
+  sendChain?: Promise<void>;
   /** Rolling tail of raw stdout+stderr — surfaced on an unexpected exit so a
    * silent spawn failure (bad model, over-quota/expired cldz token, missing
    * binary) becomes a visible channel message instead of a mystery. */
@@ -143,13 +153,45 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     return this._ptyBin;
   }
 
+  /** Option flags shared by BOTH spawn shapes (headless --print and interactive
+   * PTY) — persona, tool scoping, turn caps, and MCP injection must reach the
+   * agent whichever way it runs. */
+  private pushOptionArgs(spec: AgentSpawnSpec, args: string[]): void {
+    const opts = spec.options ?? {};
+    // Persona + walkie inbox/outbox hint (team-manager sets this for EVERY
+    // standing agent). The CLI supports --append-system-prompt in print mode too.
+    const sp = opts['appendSystemPrompt'];
+    if (typeof sp === 'string' && sp) args.push('--append-system-prompt', sp);
+    // Worker scoping (the Loop lead relies on these): restrict the tool
+    // surface and cap agentic turns — small local models especially need
+    // guardrails against tool-hallucination loops.
+    const allowedTools = opts['allowedTools'];
+    // ["*"] means ALL tools → OMIT the flag. Claude Code IGNORES a literal "*"
+    // rule ("Wildcard tool name * is not supported"), which would leave the agent
+    // with NO usable tools (alive + tasked but unable to Write/Bash — the silent
+    // failure that blocked every all-tools agent). With --dangerously-skip-permissions,
+    // omitting --allowed-tools = all tools available. Only pass it for a real
+    // restricted list (worker scoping / tool-hallucination guardrails).
+    // ([] would ALSO fall through to all-tools — the inverse of intent — so
+    // spawn() rejects it up-front.)
+    if (Array.isArray(allowedTools) && allowedTools.length > 0 && !allowedTools.includes('*')) {
+      args.push('--allowed-tools', allowedTools.join(','));
+      args.push('--tools', allowedTools.join(','));
+    }
+    const maxTurns = opts['maxTurns'];
+    if (typeof maxTurns === 'number' && maxTurns > 0) args.push('--max-turns', String(maxTurns));
+    // MCP injection: the orchestrator writes a config pointing at Maya's MCP
+    // server (spawn_agent/send_message/… for standing leads) and passes its path.
+    const mcpConfig = opts['mcpConfig'];
+    if (typeof mcpConfig === 'string' && mcpConfig) args.push('--mcp-config', mcpConfig);
+  }
+
   /** Args for INTERACTIVE claude in a pty — the real TUI, NOT headless
    * `--print`/stream-json (that would show JSON, not a terminal). */
   private buildPtyArgs(spec: AgentSpawnSpec): string[] {
     const args = ['--model', spec.model];
     if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--dangerously-skip-permissions');
-    const sp = spec.options?.['appendSystemPrompt'];
-    if (typeof sp === 'string' && sp) args.push('--append-system-prompt', sp);
+    this.pushOptionArgs(spec, args);
     return args;
   }
 
@@ -177,23 +219,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     else args.push(spec.prompt as string);
     args.push('--model', spec.model);
     if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--dangerously-skip-permissions');
-    // Worker scoping (the Loop lead relies on these): restrict the tool
-    // surface and cap agentic turns — small local models especially need
-    // guardrails against tool-hallucination loops.
-    const opts = spec.options ?? {};
-    const allowedTools = opts['allowedTools'];
-    // ["*"] means ALL tools → OMIT the flag. Claude Code IGNORES a literal "*"
-    // rule ("Wildcard tool name * is not supported"), which would leave the agent
-    // with NO usable tools (alive + tasked but unable to Write/Bash — the silent
-    // failure that blocked every all-tools agent). With --dangerously-skip-permissions,
-    // omitting --allowed-tools = all tools available. Only pass it for a real
-    // restricted list (worker scoping / tool-hallucination guardrails).
-    if (Array.isArray(allowedTools) && allowedTools.length > 0 && !allowedTools.includes('*')) {
-      args.push('--allowed-tools', allowedTools.join(','));
-      args.push('--tools', allowedTools.join(','));
-    }
-    const maxTurns = opts['maxTurns'];
-    if (typeof maxTurns === 'number' && maxTurns > 0) args.push('--max-turns', String(maxTurns));
+    this.pushOptionArgs(spec, args);
     return args;
   }
 
@@ -203,6 +229,14 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
     const id = 'ag_' + randomUUID().replaceAll('-', '').slice(0, 12);
     const interactive = spec.prompt === undefined;
+
+    // allowedTools: [] means "no tools" — but the CLI flag would be omitted
+    // (see pushOptionArgs) and skip-permissions would grant EVERYTHING, the
+    // silent inverse of intent. Fail loudly instead.
+    const allowedTools = spec.options?.['allowedTools'];
+    if (Array.isArray(allowedTools) && allowedTools.length === 0) {
+      throw new Error('allowedTools: [] would spawn an UNRESTRICTED agent — pass a real tool list, or ["*"] for all tools');
+    }
 
     // A worker must run in a DETERMINISTIC env, independent of who launched
     // the orchestrator. When Maya runs inside a Claude Code session (or its
@@ -344,9 +378,55 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       }
     };
     process.once('exit', killPty);
+
+    // Readiness gate: send() waits until the TUI has actually rendered (first
+    // output + a settle beat) so text isn't typed into a not-yet-started
+    // terminal; a 10s cap keeps a silent start from wedging sends forever.
+    let readyArmed = false;
+    let readyDone = false;
+    let readyResolve!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      readyResolve = (): void => {
+        if (!readyDone) {
+          readyDone = true;
+          resolve();
+        }
+      };
+    });
+    const readyCap = setTimeout(() => readyResolve(), 10_000);
+    readyCap.unref?.();
+    live.sendChain = ready;
+
+    // Folder-trust prompt: answer Enter only when the prompt actually renders
+    // in the byte stream (accepts the default "Yes, I trust"; trust persists).
+    // The scan buffer resets on each answer, so a re-render (our Enter landed
+    // before the TUI was listening) gets answered again — capped so a
+    // lookalike string can't loop keystrokes into the session.
+    let trustBuf = '';
+    let trustAnswers = 0;
+
     p.onData((data: string) => {
       live.outTail = (live.outTail + data).slice(-2000);
       this.pushEvent(live, { kind: 'pty', data, at: now() });
+      if (!readyArmed) {
+        readyArmed = true;
+        setTimeout(() => {
+          clearTimeout(readyCap);
+          readyResolve();
+        }, 1200);
+      }
+      trustBuf = (trustBuf + data).slice(-600);
+      if (trustAnswers < 3 && /do you trust the files in this folder/i.test(trustBuf)) {
+        trustBuf = '';
+        trustAnswers += 1;
+        setTimeout(() => {
+          try {
+            p.write('\r');
+          } catch {
+            /* gone */
+          }
+        }, 250);
+      }
     });
     p.onExit(({ exitCode }: { exitCode: number }) => {
       process.removeListener('exit', killPty);
@@ -360,16 +440,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       }
       live.log.close();
     });
-    // Dismiss the one-time folder-trust prompt if it shows (Enter accepts the
-    // default "Yes, I trust"; a no-op empty submit otherwise). Trust then persists.
-    setTimeout(() => {
-      try {
-        p.write('\r');
-      } catch {
-        /* gone */
-      }
-    }, 2500);
-
     this.setState(live, 'running');
     return live.handle;
   }
@@ -478,11 +548,28 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (TERMINAL.has(live.handle.state)) return;
     this.setState(live, 'killed');
     if (live.pty) {
+      // Graceful first, then force: pty.kill() sends SIGHUP, which an
+      // interactive claude can ignore — escalate to SIGKILL after graceMs and
+      // await the ACTUAL exit so stopAgent/drain never resolve with the
+      // process still alive. (The race guards a pid that vanished before
+      // onExit could fire.)
+      const p = live.pty;
+      const exited = new Promise<void>((resolve) => p.onExit(() => resolve()));
       try {
-        live.pty.kill();
+        p.kill();
       } catch {
         /* already gone */
       }
+      const escalate = setTimeout(() => {
+        try {
+          process.kill(p.pid, 'SIGKILL');
+        } catch {
+          /* gone */
+        }
+      }, graceMs);
+      escalate.unref?.();
+      await Promise.race([exited, sleep(graceMs + 2000)]);
+      clearTimeout(escalate);
       return;
     }
     const child = live.child;
@@ -512,15 +599,23 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // Type into the TUI, then submit with Enter a beat later — the input box
       // needs the text to register before the newline submits it. Flatten
       // newlines to spaces so a multi-line message doesn't submit early.
-      live.pty.write(text.replace(/\r?\n/g, ' '));
+      // Serialized through the per-agent chain (seeded by the TUI-readiness
+      // gate): without it, two sends ~400ms apart type into the same input box
+      // and submit as one merged prompt plus an empty line.
       const p = live.pty;
-      setTimeout(() => {
+      const run = async (): Promise<void> => {
         try {
+          p.write(text.replace(/\r?\n/g, ' '));
+          await sleep(400);
           p.write('\r');
+          await sleep(150); // settle before the next queued send types
         } catch {
-          /* gone */
+          /* pty gone mid-send */
         }
-      }, 400);
+      };
+      const chained = (live.sendChain ?? Promise.resolve()).then(run);
+      live.sendChain = chained;
+      await chained;
     } else {
       const turn = {
         type: 'user',
@@ -577,3 +672,5 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 }
 
 const now = (): string => new Date().toISOString();
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

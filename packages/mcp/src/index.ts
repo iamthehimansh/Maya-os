@@ -10,7 +10,10 @@ import { MayaClient, type MayaClientConfig } from "./client.js";
  * MAYA_TEAM_ID. Each tool is a thin proxy to Maya's own HTTP APIs.
  */
 
-const AGENT_TYPES = ["claude-code", "codex", "opencode"] as const;
+// Standing (interactive) spawns only work on claude-code today — the codex and
+// opencode adapters are one-shot and throw on a prompt-less spawn, so offering
+// them here would just hand the lead a guaranteed "spawn failed: … one-shot".
+const AGENT_TYPES = ["claude-code"] as const;
 
 const text = (s: string): { content: Array<{ type: "text"; text: string }> } => ({ content: [{ type: "text", text: s }] });
 
@@ -22,7 +25,7 @@ export function buildServer(client: MayaClient): McpServer {
     "Spawn a new agent into your team. Pick a tool-capable model for workers that must edit files.",
     {
       handle: z.string().describe("addressable handle, e.g. @backend"),
-      type: z.enum(AGENT_TYPES).describe("coding-agent type"),
+      type: z.enum(AGENT_TYPES).describe('coding-agent type ("claude-code" only — codex/opencode cannot yet run as standing teammates)'),
       model: z.string().describe('gateway ModelId, e.g. "local/qwen2.5-7b-instruct"'),
       cwd: z.string().describe("working directory for the agent"),
       role: z.enum(["lead", "worker"]).optional(),
@@ -101,20 +104,6 @@ export function buildServer(client: MayaClient): McpServer {
         return text("posted to the channel");
       } catch (e) {
         return text(`post failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    },
-  );
-
-  server.tool(
-    "schedule_message",
-    "Schedule a message to post to your team channel AFTER a delay (seconds). Use this to ping the human PROACTIVELY later or set a reminder — the orchestrator holds the timer, so it fires even after your current turn ends. `to` optionally directs it at a handle.",
-    { delaySeconds: z.number().min(1).max(86400), text: z.string(), to: z.string().optional() },
-    async ({ delaySeconds, text: msg, to }) => {
-      try {
-        await client.scheduleMessage(delaySeconds, msg, to);
-        return text(`scheduled in ${delaySeconds}s`);
-      } catch (e) {
-        return text(`schedule unavailable (${e instanceof Error ? e.message : e}) — post now with send_message instead.`);
       }
     },
   );
