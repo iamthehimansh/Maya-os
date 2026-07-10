@@ -16,7 +16,7 @@ export function quantFromFilename(file: string): Quant | undefined {
   return m ? (m[1]!.toUpperCase() as Quant) : undefined;
 }
 
-interface ModelMeta {
+export interface ModelMeta {
   source?: string;
   contextLength?: number;
   chatTemplate?: string;
@@ -87,6 +87,16 @@ export function scanModels(modelsDir: string): LocalModel[] {
     });
   }
   return out;
+}
+
+/** Raw maya.json for one model ({} when absent) — the fields scanModels doesn't
+ *  surface on LocalModel (e.g. `tuned`) are readable here without a rescan. */
+export function readModelMeta(modelsDir: string, name: string): ModelMeta {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(modelsDir, name, "maya.json"), "utf8")) as ModelMeta;
+  } catch {
+    return {};
+  }
 }
 
 export function findModel(modelsDir: string, id: ModelId): LocalModel | undefined {

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { ModelId, RuntimeEvent } from "@maya-ai/core";
-import { quantFromFilename, writeModelMeta } from "./registry.js";
+import { quantFromFilename, readModelMeta, writeModelMeta } from "./registry.js";
 
 export interface PullRequest {
   /** "hf:<owner>/<repo>[/<file>.gguf]" or a direct https URL to a .gguf. */
@@ -90,7 +90,10 @@ export async function pullModel(
     }
     fs.renameSync(part, dest);
   }
-  writeModelMeta(modelsDir, name, { source: req.source, contextLength: 8192 });
+  // contextLength 8192 is only the FIRST-pull default — pulling another quant
+  // into an existing dir (or re-pulling) must not clobber a tuned/profiled ctx.
+  const hasCtx = readModelMeta(modelsDir, name).contextLength !== undefined;
+  writeModelMeta(modelsDir, name, { source: req.source, ...(hasCtx ? {} : { contextLength: 8192 }) });
   onProgress?.({ type: "pull_progress", model, pct: 100 });
   return model;
 }

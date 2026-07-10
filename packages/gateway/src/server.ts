@@ -1,4 +1,4 @@
-import type { ModelCatalogEntry, ModelId, ProviderConfig, RuntimeEvent } from "@maya-ai/core";
+import type { ModelCatalogEntry, ModelId, ProviderConfig, Quant, RuntimeEvent } from "@maya-ai/core";
 import { QUANT_QUALITY, type RuntimeManager, availableRam, detectLlamaCpp, pullModel, scanModels, writeModelMeta } from "@maya-ai/model-runtime";
 import { type PlatformConfig, defaultConfig, loadConfig, saveConfig } from "@maya-ai/core";
 import { TunnelManager } from "./tunnel.js";
@@ -44,8 +44,15 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
   };
   deps.manager.on("event", fanout);
 
-  const oaiError = (message: string, status: 400 | 401 | 404 | 501 | 503) =>
+  const oaiError = (message: string, status: 400 | 401 | 403 | 404 | 501 | 503) =>
     Response.json({ error: { message, type: "maya_gateway_error" } }, { status });
+
+  // beginRequest/endRequest ship with the current model-runtime; optional-call
+  // so the gateway still typechecks/runs against an older runtime build.
+  const track = deps.manager as RuntimeManager & {
+    beginRequest?: (m: ModelId) => void;
+    endRequest?: (m: ModelId) => void;
+  };
 
   // ── OpenAI-compatible surface ─────────────────────────────────────────────
   app.post("/v1/chat/completions", async (c) => {
@@ -68,11 +75,18 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
       if ("error" in resolved) return oaiError(resolved.error, resolved.status);
       // Rewrite the model field to the provider-native name, then stream through.
       const rewritten = JSON.stringify({ ...(body as Record<string, unknown>), model: resolved.upstreamModel });
-      const upstream = await fetch(`${resolved.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${resolved.apiKey}` },
-        body: rewritten,
-      });
+      let upstream: Response;
+      try {
+        upstream = await fetch(`${resolved.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${resolved.apiKey}` },
+          body: rewritten,
+        });
+      } catch (err) {
+        // Network failure to the provider must come back in the OpenAI error
+        // shape clients parse, not Hono's bare 500.
+        return oaiError(`upstream provider unreachable: ${err instanceof Error ? err.message : String(err)}`, 503);
+      }
       return new Response(upstream.body, {
         status: upstream.status,
         headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
@@ -82,10 +96,17 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
     // On-demand start (Ollama-style): loading respects every guardrail.
     let port: number;
     try {
-      // Agent clients (Claude Code, Codex) send 20k+ token prompts — on-demand
-      // loads default to a large context; the fit planner shrinks it under RAM
-      // pressure, so small machines still work (with a degraded event).
-      const inst = deps.manager.instanceFor(model) ?? (await deps.manager.load(model, { contextLength: 32768 }));
+      // Agent clients (Claude Code, Codex) send 20k+ token prompts — untuned
+      // models default to a large context; the fit planner shrinks it under
+      // RAM pressure, so small machines still work (with a degraded event).
+      // A tuned/profiled contextLength (anything but the 8192 pull default)
+      // is a deliberate, host-measured choice and wins — smaller or larger.
+      // manager.load is idempotent + serialized: it reuses a matching live
+      // instance, waits out a concurrent cold start instead of handing back a
+      // dead port, and reloads when the requested context genuinely differs.
+      const local = scanModels(deps.modelsDir).find((m) => `local/${m.name}` === model);
+      const configuredCtx = local && local.contextLength !== 8192 ? local.contextLength : undefined;
+      const inst = await deps.manager.load(model, { contextLength: configuredCtx ?? 32768 });
       deps.manager.touch(model);
       port = inst.port;
     } catch (err) {
@@ -103,13 +124,26 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
       fs.writeFileSync(`${process.env.MAYA_DEBUG_DUMP_DIR}/req-${Date.now()}.json`, typeof payload === "string" ? payload : Buffer.from(payload));
     }
     // Zero-copy passthrough — stream the upstream response body straight out.
-    const upstream = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: payload,
-    });
+    // The in-flight count keeps idle eviction off a >60s generation; it drops
+    // when the body finishes, errors, or the client cancels.
+    track.beginRequest?.(model);
+    const requestDone = (): void => {
+      track.endRequest?.(model);
+      deps.manager.touch(model);
+    };
+    let upstream: Response;
+    try {
+      upstream = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: payload,
+      });
+    } catch (err) {
+      requestDone();
+      return oaiError(`model instance unreachable: ${err instanceof Error ? err.message : String(err)}`, 503);
+    }
     deps.manager.touch(model);
-    return new Response(upstream.body, {
+    return new Response(trackBody(upstream.body, requestDone), {
       status: upstream.status,
       headers: {
         "content-type": upstream.headers.get("content-type") ?? "application/json",
@@ -207,16 +241,31 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
   });
 
   app.get("/v1/models", (c) => {
+    // catalog() is local-only today; cloud catalog entries (owned_by
+    // "maya-cloud", listed from live providers' remote catalogs) land in M2.
     const data = catalog(deps).map((m) => ({
       id: m.id,
       object: "model" as const,
-      owned_by: m.kind === "local-gguf" ? "maya-local" : "maya-cloud",
+      owned_by: "maya-local",
     }));
     return c.json({ object: "list", data });
   });
 
   // ── Control API (admin) ───────────────────────────────────────────────────
+  // SECURITY: the admin plane (/api/* — fs read, config, tunnels, model
+  // control) must never be reachable through a shared tunnel. The server
+  // binds 127.0.0.1, but a cloudflared tunnel (our own /api/tunnels feature,
+  // or one the user runs by hand) forwards public traffic straight to
+  // localhost — and /api/fs/read can hand out ~/.cldz credentials. Tunneled
+  // requests arrive with the public hostname in Host plus proxy headers;
+  // refuse both, so a tunnel only ever exposes the inference surface (/v1/*).
+  const LOCAL_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
   app.use("/api/*", async (c, next) => {
+    const host = c.req.header("host") ?? "";
+    const proxied = c.req.header("x-forwarded-for") ?? c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-host");
+    if (!LOCAL_HOST_RE.test(host) || proxied) {
+      return oaiError("admin API is local-only — it is never served through tunnels or proxies", 403);
+    }
     if (deps.adminToken) {
       const auth = c.req.header("authorization");
       if (auth !== `Bearer ${deps.adminToken}`) {
@@ -249,9 +298,15 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
 
   app.post("/api/models/:name/load", async (c) => {
     const model = `local/${c.req.param("name")}` as ModelId;
-    const opts = await c.req.json<{ quant?: never; contextLength?: number; force?: boolean }>().catch(() => ({}) as Record<string, never>);
+    type LoadBody = { quant?: Quant; contextLength?: number; force?: boolean };
+    const body = await c.req.json<LoadBody>().catch(() => ({}) as LoadBody);
     try {
-      const inst = await deps.manager.load(model, opts);
+      // Whitelist the fields we document — the raw body goes nowhere near load.
+      const inst = await deps.manager.load(model, {
+        ...(body.quant !== undefined ? { quant: body.quant } : {}),
+        ...(body.contextLength !== undefined ? { contextLength: Number(body.contextLength) } : {}),
+        ...(body.force !== undefined ? { force: Boolean(body.force) } : {}),
+      });
       return c.json(inst);
     } catch (err) {
       return oaiError(err instanceof Error ? err.message : String(err), 503);
@@ -335,6 +390,23 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
   app.post("/api/tunnels", async (c) => {
     const { port } = await c.req.json<{ port?: number }>().catch(() => ({}) as { port?: number });
     if (!port) return oaiError("port required", 400);
+    // Never tunnel the admin plane: dashboard/orchestrator/bus have no
+    // tunnel-aware guard of their own (the dashboard proxies /api/* through).
+    // The gateway port itself is fine — its /api/* rejects proxied traffic
+    // above, so a shared gateway tunnel exposes exactly the /v1 surface.
+    const cfg = loadConfig();
+    const blocked: Array<[number, string]> = [
+      [cfg.dashboard.port, "dashboard"],
+      [cfg.orchestrator.port, "orchestrator"],
+      [cfg.bus.port, "bus"],
+    ];
+    const hit = blocked.find(([p]) => p === Number(port));
+    if (hit) {
+      return oaiError(
+        `refusing to tunnel port ${port}: it serves the ${hit[1]} (admin plane). Only the inference surface may go public — tunnel the gateway port (${cfg.gateway.port}) instead.`,
+        400,
+      );
+    }
     try {
       return c.json(await tunnels.open(Number(port)));
     } catch (err) {
@@ -383,12 +455,18 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
         return oaiError("providers must use apiKeyEnv (an env var NAME), never a raw key", 400);
       }
     }
+    // A cleared/garbage port field must never persist (port 0 bricks the next
+    // boot) — clamp to a real port or keep the current value.
+    const port = (v: unknown, fallback: number): number => {
+      const n = Number(v ?? fallback);
+      return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : fallback;
+    };
     const next: PlatformConfig = {
-      ...(body.user?.handle || cur.user ? { user: { handle: String(body.user?.handle ?? cur.user?.handle ?? "@me") } } : {}),
-      gateway: { port: Number(body.gateway?.port ?? cur.gateway.port) },
-      dashboard: { port: Number(body.dashboard?.port ?? cur.dashboard.port) },
-      bus: { port: Number(body.bus?.port ?? cur.bus.port) },
-      orchestrator: { port: Number(body.orchestrator?.port ?? cur.orchestrator.port) },
+      ...(body.user?.handle || cur.user ? { user: { handle: String(body.user?.handle ?? cur.user?.handle ?? "@me").trim() || "@me" } } : {}),
+      gateway: { port: port(body.gateway?.port, cur.gateway.port) },
+      dashboard: { port: port(body.dashboard?.port, cur.dashboard.port) },
+      bus: { port: port(body.bus?.port, cur.bus.port) },
+      orchestrator: { port: port(body.orchestrator?.port, cur.orchestrator.port) },
       modelsDir: String(body.modelsDir ?? cur.modelsDir),
       providers: providers.map((p) => ({
         id: String((p as { id?: string }).id ?? "custom"),
@@ -482,6 +560,46 @@ function sanitizeToolSchemas(body: { tools?: Array<{ function?: { parameters?: u
   };
   for (const t of body.tools ?? []) walk(t.function?.parameters);
   return changed;
+}
+
+/**
+ * Pass an upstream body through unchanged, invoking `onDone` exactly once when
+ * it ends, errors, or the client cancels — so the manager knows when a
+ * generation actually finished (SSE bodies outlive the fetch by minutes).
+ */
+function trackBody(body: ReadableStream<Uint8Array> | null, onDone: () => void): ReadableStream<Uint8Array> | null {
+  let called = false;
+  const finish = (): void => {
+    if (!called) {
+      called = true;
+      onDone();
+    }
+  };
+  if (!body) {
+    finish();
+    return null;
+  }
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done || value === undefined) {
+          finish();
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (err) {
+        finish();
+        controller.error(err);
+      }
+    },
+    cancel(reason) {
+      finish();
+      return reader.cancel(reason);
+    },
+  });
 }
 
 function catalog(deps: GatewayDeps): ModelCatalogEntry[] {

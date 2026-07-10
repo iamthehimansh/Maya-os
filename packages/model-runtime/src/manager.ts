@@ -13,7 +13,7 @@ import type {
 import { detectLlamaCpp, llamaServerArgs } from "./backends/llamacpp.js";
 import { estimateLoadBytes, planFit } from "./estimate.js";
 import { availableRam, processRss } from "./ram.js";
-import { findModel, quantLadderFrom, scanModels, writeModelMeta } from "./registry.js";
+import { findModel, quantLadderFrom, readModelMeta, scanModels, writeModelMeta } from "./registry.js";
 import { fileURLToPath } from "node:url";
 import path2 from "node:path";
 
@@ -47,6 +47,13 @@ interface Managed {
   instance: ModelInstance;
   supervisor: InstanceSupervisor;
   lastUsed: number;
+  /** Requests currently streaming through this instance — never evict while >0. */
+  inflight: number;
+  /** What the loader ASKED for (the fit planner may have degraded below it) —
+   *  reload decisions compare against this, so a RAM-degraded instance doesn't
+   *  reload-thrash on every request that re-asks for the original params. */
+  requestedCtx: number;
+  requestedQuant?: Quant;
 }
 
 const BASE_PORT = 41100; // instance ports live above the platform range
@@ -59,6 +66,7 @@ const BASE_PORT = 41100; // instance ports live above the platform range
  */
 export class RuntimeManager extends EventEmitter {
   private readonly managed = new Map<string, Managed>(); // key: ModelId
+  private readonly loadQueue = new Map<string, Promise<unknown>>(); // key: ModelId
   private lruTimer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -87,21 +95,64 @@ export class RuntimeManager extends EventEmitter {
     if (m) m.lastUsed = Date.now();
   }
 
+  /** Count a request in — an instance with in-flight requests is never evicted,
+   *  even when a long generation outlives the idle threshold. */
+  beginRequest(model: ModelId): void {
+    const m = this.managed.get(model);
+    if (m) {
+      m.inflight++;
+      m.lastUsed = Date.now();
+    }
+  }
+
+  /** Count a request out (when the response body finishes/aborts). Idempotence
+   *  is the caller's job; the floor guard just keeps a miscount from wedging LRU. */
+  endRequest(model: ModelId): void {
+    const m = this.managed.get(model);
+    if (m) {
+      m.inflight = Math.max(0, m.inflight - 1);
+      m.lastUsed = Date.now();
+    }
+  }
+
   /**
    * Load (idempotent): plan a fit within guardrails — degrade quant, then
    * context; if nothing fits after LRU-evicting idle instances, refuse with a
    * typed error. Never lets the host cross the free-RAM floor.
+   *
+   * Loads are SERIALIZED per model: agent clients fire parallel requests on a
+   * cold start — racing loads would spawn duplicate llama-servers (one leaked,
+   * untracked) and concurrent callers would hit a port nothing listens on yet.
+   * Queued callers resolve once the shared load is ready (or reload if their
+   * params genuinely differ).
    */
   async load(model: ModelId, opts: LoadOpts = {}): Promise<ModelInstance> {
+    const prev = this.loadQueue.get(model) ?? Promise.resolve();
+    const run = prev.then(() => this.doLoad(model, opts));
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.loadQueue.set(model, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.loadQueue.get(model) === tail) this.loadQueue.delete(model);
+    }
+  }
+
+  private async doLoad(model: ModelId, opts: LoadOpts): Promise<ModelInstance> {
     const existing = this.managed.get(model);
     if (existing && existing.instance.state !== "stopped") {
       // Reuse only when the caller isn't asking for different params. A load
       // that requests a context or quant unlike what's live must RELOAD
       // (restart llama-server) — otherwise "load at 32k" over an 8k instance is
       // a silent no-op (observed: all-tools agents 400 because the requested
-      // larger context never actually took effect).
-      const ctxDiffers = opts.contextLength !== undefined && opts.contextLength !== existing.instance.contextLength;
-      const quantDiffers = opts.quant !== undefined && opts.quant !== existing.instance.quant;
+      // larger context never actually took effect). Compare against what was
+      // REQUESTED, not what the fit planner delivered: a RAM-degraded instance
+      // must not reload-thrash every time the same params are re-asked.
+      const ctxDiffers = opts.contextLength !== undefined && opts.contextLength !== existing.requestedCtx;
+      const quantDiffers = opts.quant !== undefined && opts.quant !== (existing.requestedQuant ?? existing.instance.quant);
       if (!ctxDiffers && !quantDiffers) {
         existing.lastUsed = Date.now();
         return existing.instance;
@@ -117,18 +168,26 @@ export class RuntimeManager extends EventEmitter {
       throw new Error(`llama-server not found — ${llama.installHint ?? "install llama.cpp"}`);
     }
 
+    // `maya tune --save` persists the MEASURED-fastest quant under meta.tuned —
+    // it wins over the on-disk default (files sort largest-first, so without
+    // this a leftover Q8_0 would shadow a tuned Q4_K_M on every load). An
+    // explicit opts.quant still overrides; a tuned quant whose file was since
+    // deleted is ignored.
+    const tuned = readModelMeta(this.modelsDir, local.name).tuned;
+    const tunedQuant = tuned && local.files.some((f) => f.quant === tuned.quant) ? tuned.quant : undefined;
+    const wantQuant = opts.quant ?? tunedQuant;
     const contextLength = opts.contextLength ?? local.contextLength;
-    let plan = await this.planWithinBudget(local, opts.quant, contextLength);
+    let plan = await this.planWithinBudget(local, wantQuant, contextLength);
     if (!plan) {
       // Try reclaiming RAM from idle instances before refusing
       const evicted = await this.evictIdle();
-      if (evicted > 0) plan = await this.planWithinBudget(local, opts.quant, contextLength);
+      if (evicted > 0) plan = await this.planWithinBudget(local, wantQuant, contextLength);
     }
     if (!plan) {
       if (opts.force) {
         // Owner-authorized overcommit: load anyway (macOS swaps to SSD). Use the
         // requested/best quant at the requested context; expect slow, not crash.
-        const file0 = local.files.find((f) => f.quant === (opts.quant ?? local.files[0]?.quant)) ?? local.files[0]!;
+        const file0 = local.files.find((f) => f.quant === (wantQuant ?? local.files[0]?.quant)) ?? local.files[0]!;
         plan = {
           quant: file0.quant,
           fileBytes: file0.bytes,
@@ -147,8 +206,8 @@ export class RuntimeManager extends EventEmitter {
       }
     }
 
-    if (plan.degraded.quant && opts.quant) {
-      this.emitEvent({ type: "model_degraded", model, from: opts.quant, to: plan.quant, reason: "ram_pressure" });
+    if (plan.degraded.quant && wantQuant) {
+      this.emitEvent({ type: "model_degraded", model, from: wantQuant, to: plan.quant, reason: "ram_pressure" });
     }
 
     const port = await freePort(BASE_PORT + this.managed.size);
@@ -200,7 +259,14 @@ export class RuntimeManager extends EventEmitter {
       memoryBytes: 0,
       startedAt: new Date().toISOString(),
     };
-    const managed: Managed = { instance, supervisor, lastUsed: Date.now() };
+    const managed: Managed = {
+      instance,
+      supervisor,
+      lastUsed: Date.now(),
+      inflight: 0,
+      requestedCtx: contextLength,
+      ...(wantQuant ? { requestedQuant: wantQuant } : {}),
+    };
     this.managed.set(model, managed);
 
     supervisor.on("event", (ev: SupervisorEvent) => {
@@ -217,6 +283,11 @@ export class RuntimeManager extends EventEmitter {
         if (ev.state === "stopped") this.managed.delete(model);
       } else if (ev.type === "restarted") {
         this.emitEvent({ type: "instance_restarted", instanceId: instance.id, model, attempt: ev.attempt });
+      } else if (ev.type === "log") {
+        // Surface llama-server's own error lines (OOM, bad GGUF, template
+        // failure, fallback retries) on the SSE feed — without this, a crash
+        // loop shows the UI nothing but "exit code=1".
+        this.emitEvent({ type: "instance_state", instanceId: instance.id, model, state: instance.state, reason: ev.line });
       }
     });
 
@@ -224,6 +295,10 @@ export class RuntimeManager extends EventEmitter {
       await supervisor.start();
     } catch (err) {
       this.managed.delete(model);
+      // Kill any crash-restart the supervisor may still have queued — a failed
+      // load must never leave a self-respawning llama-server the manager no
+      // longer tracks (stop() flips `stopping`, which cancels pending restarts).
+      await supervisor.stop(0).catch(() => {});
       throw err;
     }
     instance.pid = supervisor.pid ?? 0;
@@ -247,10 +322,12 @@ export class RuntimeManager extends EventEmitter {
 
   /** Draft GGUF path for speculative decoding, or undefined. */
   private resolveDraft(local: LocalModel): string | undefined {
-    if (local.draftModel === false) return undefined;
-    const all = scanModels(this.modelsDir);
-    if (typeof local.draftModel === "string") {
-      const named = all.find((m) => m.name === local.draftModel);
+    // Explicit maya.json draftModel wins; else the tune --save winner
+    // (meta.tuned.draft — false = measured slower with a draft) applies.
+    const pref = local.draftModel !== undefined ? local.draftModel : readModelMeta(this.modelsDir, local.name).tuned?.draft;
+    if (pref === false) return undefined;
+    if (typeof pref === "string") {
+      const named = scanModels(this.modelsDir).find((m) => m.name === pref);
       return named?.files[named.files.length - 1]?.path;
     }
     // MEASURED on Apple Silicon (llama.cpp Metal build 9890, q8 KV, 7B+0.5B):
@@ -283,10 +360,12 @@ export class RuntimeManager extends EventEmitter {
     this.lruTimer = null;
   }
 
-  /** Evict idle instances (oldest first); returns count evicted. */
+  /** Evict idle instances (oldest first); returns count evicted. Instances
+   *  with in-flight requests are never idle — a >60s generation must not have
+   *  its llama-server SIGTERM'd mid-stream by a concurrent load's RAM hunt. */
   private async evictIdle(): Promise<number> {
     const idle = [...this.managed.entries()]
-      .filter(([, m]) => Date.now() - m.lastUsed > 60_000)
+      .filter(([, m]) => m.inflight === 0 && Date.now() - m.lastUsed > 60_000)
       .sort(([, a], [, b]) => a.lastUsed - b.lastUsed);
     let evicted = 0;
     for (const [model] of idle) {
@@ -303,7 +382,7 @@ export class RuntimeManager extends EventEmitter {
     this.lruTimer = setInterval(() => {
       void (async () => {
         for (const [model, m] of this.managed) {
-          if (Date.now() - m.lastUsed > this.idleUnloadAfterSec * 1000) {
+          if (m.inflight === 0 && Date.now() - m.lastUsed > this.idleUnloadAfterSec * 1000) {
             await this.unload(model as ModelId);
           }
         }

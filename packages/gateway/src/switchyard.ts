@@ -86,7 +86,12 @@ export function generateSwitchyardConfig(modelsDir: string, gatewayPort: number)
     "targets:",
   ];
   for (const m of models) {
-    lines.push(`  ${targetKey(m.name)}:`, "    endpoint: maya", `    model: local/${m.name}`, "    format: openai");
+    // Target KEYS are sanitized; the model VALUE is the raw dir name — quote it
+    // (JSON string = valid YAML scalar) when it carries YAML-significant chars
+    // (':', '#', …), or one odd manual dir corrupts the whole sidecar config.
+    const id = `local/${m.name}`;
+    const value = /^[A-Za-z0-9/_.-]+$/.test(id) ? id : JSON.stringify(id);
+    lines.push(`  ${targetKey(m.name)}:`, "    endpoint: maya", `    model: ${value}`, "    format: openai");
   }
   lines.push("", "profiles:", "  maya-default:", "    type: passthrough", `    target: ${targetKey(models[0]!.name)}`);
   return lines.join("\n") + "\n";

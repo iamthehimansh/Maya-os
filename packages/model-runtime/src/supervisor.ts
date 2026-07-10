@@ -217,7 +217,16 @@ export class InstanceSupervisor extends EventEmitter {
       new Promise<boolean>((r) => child.once("exit", () => r(true))),
       new Promise<boolean>((r) => setTimeout(() => r(false), graceMs)),
     ]);
-    if (!exited) child.kill("SIGKILL");
+    if (!exited) {
+      child.kill("SIGKILL");
+      // Wait for the exit event (it nulls this.child + flips state to stopped)
+      // — returning early left this.child set, so the --no-mmap fallback
+      // retry's start() threw "already running" and the stale exit handler
+      // could crash-respawn an untracked llama-server.
+      if (child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>((r) => child.once("exit", () => r()));
+      }
+    }
     this.logStream?.end();
     this.logStream = null;
   }
