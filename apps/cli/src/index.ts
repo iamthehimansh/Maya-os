@@ -28,21 +28,47 @@ Usage:
                                  [--worker <model>] [--lead <model>] [--cwd <dir>] [--tools Write,Edit] [--max-turns N]
   maya runs                      recent loop runs with outcomes + tokens
   maya team create <name>        standing team (run many loops on one fleet)
-                                 [--worker <model>] [--cwd <dir>] [--tools T,T] [--budget N]
+                                 [--worker <model>] [--cwd <dir>] [--tools T,T] [--budget N] [--max-turns N]
   maya team list                 live teams with budgets + token burn
   maya team drain <id>           stop a standing team
-  maya doctor                    check llama.cpp, RAM tier, ports
+  maya doctor                    check llama.cpp, claude CLI, RAM tier, ports
   maya --version
 
 The gateway serves OpenAI-compatible /v1 at http://127.0.0.1:<gateway.port>.
-Bus / agents / teams / dashboard commands land with Phases 3–8.`;
+\`maya serve\` also boots the dashboard (web UI), bus (agent channels) and orchestrator.`;
+
+/** First positional in args at/after `from`, skipping --flag value pairs
+ * (every flag on these subcommands takes a value — so `maya loop --team t_1
+ * "goal"` finds "goal", not the team id). */
+function positionalArg(args: string[], from: number): string | undefined {
+  for (let i = from; i < args.length; i++) {
+    const a = args[i];
+    if (a === undefined) return undefined;
+    if (a.startsWith("--")) { i++; continue; } // skip the flag's value too
+    return a;
+  }
+  return undefined;
+}
 
 export async function main(argv: string[]): Promise<void> {
   const [cmd, sub, ...rest] = argv;
 
   if (cmd === "--version" || cmd === "-v") {
-    console.log("maya-os 0.0.1");
+    // Resolve from the package itself (works from src/ and dist/ alike) so the
+    // reported version never drifts from what was published.
+    const { createRequire } = await import("node:module");
+    const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
+    console.log(`maya-os ${pkg.version}`);
     return;
+  }
+
+  // Hidden: stdio MCP server exposing Maya's control tools. The orchestrator
+  // spawns `node <this bin> mcp-serve` for standing leads with
+  // MAYA_ORCHESTRATOR_URL / MAYA_GATEWAY_URL / MAYA_TEAM_ID in env.
+  if (cmd === "mcp-serve") {
+    const { main: mcpMain } = await import("@maya-ai/mcp");
+    await mcpMain();
+    return; // transport keeps the process alive on stdin
   }
 
   if (cmd === "status" || cmd === undefined) {
@@ -51,8 +77,8 @@ export async function main(argv: string[]): Promise<void> {
     console.log("Maya");
     console.log(`  home       ${mayaHome()}`);
     console.log(`  gateway    :${cfg.gateway.port}   (OpenAI-compatible /v1 — \`maya serve\`)`);
-    console.log(`  dashboard  :${cfg.dashboard.port}   (web UI — Phase 8)`);
-    console.log(`  bus        :${cfg.bus.port}   (Maya bus — Phase 3)`);
+    console.log(`  dashboard  :${cfg.dashboard.port}   (web UI — boots with \`maya serve\`)`);
+    console.log(`  bus        :${cfg.bus.port}   (agent channels)`);
     console.log(`  models     ${cfg.modelsDir}`);
     console.log(`  providers  ${cfg.providers.filter((p) => p.enabled).map((p) => p.id).join(", ") || "none enabled yet"}`);
     return;
@@ -109,16 +135,30 @@ export async function main(argv: string[]): Promise<void> {
       const tokenFile = path3.join(mayaHome(), "bus-admin.token");
       let adminToken = busServer.bootstrapAdminToken?.token ?? "";
       if (adminToken) fs.writeFileSync(tokenFile, adminToken, { mode: 0o600 });
-      else adminToken = fs.readFileSync(tokenFile, "utf8").trim();
+      else {
+        try {
+          adminToken = fs.readFileSync(tokenFile, "utf8").trim();
+        } catch {
+          // bus.db exists (so no re-bootstrap) but the credential file is gone
+          // — name the real problem instead of a generic "failed to start".
+          throw new Error(`bus admin token missing (${tokenFile}) — delete ${path3.join(mayaHome(), "bus.db")} to re-bootstrap, then re-run \`maya serve\``);
+        }
+      }
       busInfo = { port: busServer.port, adminToken };
       console.log(`maya bus      → ws://127.0.0.1:${busServer.port}  (agent channels)`);
       // Orchestrator service (teams / tasks / loop runs) — agent plane.
-      orch = await startOrchestratorService({
+      // mcpServe: standing LEAD agents get Maya's MCP tools — the orchestrator
+      // writes ~/.maya/mcp/<teamId>.json pointing back at this CLI's hidden
+      // `mcp-serve` stdio server (older orchestrators simply ignore the field).
+      type OrchOptions = Parameters<typeof startOrchestratorService>[0] & { mcpServe?: { command: string; args: string[] } };
+      const orchOpts: OrchOptions = {
         dbPath: dbPath(),
         gatewayBaseUrl: `http://127.0.0.1:${cfg.gateway.port}`,
         bus: { wsBase: `ws://127.0.0.1:${busServer.port}`, adminToken, httpBase: `http://127.0.0.1:${busServer.port}` },
         port: cfg.orchestrator.port,
-      });
+        ...(process.argv[1] ? { mcpServe: { command: process.execPath, args: [process.argv[1], "mcp-serve"] } } : {}),
+      };
+      orch = await startOrchestratorService(orchOpts);
       console.log(`orchestrator  → http://127.0.0.1:${orch.port}/api  (teams · tasks · loop)`);
     } catch (e) {
       console.error("[serve] bus/orchestrator failed to start:", e instanceof Error ? e.message : e);
@@ -138,16 +178,30 @@ export async function main(argv: string[]): Promise<void> {
       console.log("dashboard     → not built (pnpm --filter @maya-ai/dashboard build)");
     }
     console.log("Ctrl-C to stop (unloads every model instance).");
+    let shuttingDown = false;
     const shutdown = (): void => {
-      console.log("\nshutting down…");
+      if (shuttingDown) {
+        console.log("\nforced exit.");
+        process.exit(130);
+      }
+      shuttingDown = true;
+      console.log("\nshutting down… (Ctrl-C again to force)");
       server.close();
+      // Kill keep-alive + SSE sockets so close() resolves now, not when the
+      // last open dashboard tab lets go (which is never).
+      (server as { closeAllConnections?: () => void }).closeAllConnections?.();
       dashServer?.close();
-      void Promise.allSettled([
-        manager.unloadAll(),
-        sidecar?.stop() ?? Promise.resolve(),
-        orch?.close() ?? Promise.resolve(),
-        busServer?.close() ?? Promise.resolve(),
-      ]).then(() => process.exit(0));
+      dashServer?.closeAllConnections();
+      void (async () => {
+        const unload = Promise.allSettled([manager.unloadAll(), sidecar?.stop() ?? Promise.resolve()]);
+        // Drain the orchestrator BEFORE the bus goes down — detach revokes each
+        // agent's bus token over bus HTTP and posts the "team pausing" notice,
+        // both of which need the bus alive.
+        await orch?.close().catch(() => {});
+        await busServer?.close().catch(() => {});
+        await unload;
+        process.exit(0);
+      })();
       setTimeout(() => process.exit(0), 8_000).unref?.();
     };
     process.on("SIGINT", shutdown);
@@ -186,7 +240,7 @@ export async function main(argv: string[]): Promise<void> {
       return;
     }
     if (sub === "run" || sub === "stop") {
-      // One-shot control against a running `maya serve`, else direct.
+      // One-shot control against a running `maya serve` (errors if it's down).
       const name = rest[0];
       if (!name) return void console.error(`usage: maya models ${sub} <name>`);
       const model = (name.startsWith("local/") ? name : `local/${name}`) as ModelId;
@@ -218,8 +272,8 @@ export async function main(argv: string[]): Promise<void> {
     };
     try {
       if (sub === "create") {
-        const name = argv.slice(2).find((a) => !a.startsWith("--"));
-        if (!name) return void console.error("usage: maya team create <name> [--worker <model>] [--cwd <dir>] [--tools Write,Edit] [--budget N]");
+        const name = positionalArg(argv, 2);
+        if (!name) return void console.error("usage: maya team create <name> [--worker <model>] [--cwd <dir>] [--tools Write,Edit] [--budget N] [--max-turns N]");
         let worker = flag("worker");
         if (!worker) {
           const catalog = (await (await fetch(`http://127.0.0.1:${cfg2.gateway.port}/api/models`)).json()) as Array<{ id: string; toolCalling?: boolean; quants?: Array<{ bytes: number }> }>;
@@ -239,10 +293,12 @@ export async function main(argv: string[]): Promise<void> {
         return;
       }
       if (sub === "list" || sub === undefined) {
-        // ?live=1 → server returns only standing teams (per-run teams are history).
-        const teams = (await (await fetch(`${base}/teams?live=1`)).json()) as Array<{ id: string; name: string; state: string; tokensUsed?: number; tokenBudget?: number | null }>;
+        // ?live=1 → server returns only live standing teams (per-run teams are
+        // history). Belt-and-braces: honor the per-team `live` flag too, in
+        // case the server ever returns a drained team.
+        const teams = (await (await fetch(`${base}/teams?live=1`)).json()) as Array<{ id: string; name: string; state: string; live?: boolean; tokensUsed?: number; tokenBudget?: number | null }>;
         if (!teams.length) return void console.log("no live teams — maya team create <name>");
-        for (const t of teams) console.log(`${t.id}  🟢 ${t.name}  ${t.tokensUsed ?? 0}${t.tokenBudget ? `/${t.tokenBudget}` : ""} tok`);
+        for (const t of teams) console.log(`${t.id}  ${t.live === false ? "⚪" : "🟢"} ${t.name}  ${t.tokensUsed ?? 0}${t.tokenBudget ? `/${t.tokenBudget}` : ""} tok`);
         return;
       }
       if (sub === "drain") {
@@ -278,7 +334,7 @@ export async function main(argv: string[]): Promise<void> {
 
   if (cmd === "loop") {
     const cfg2 = loadConfig();
-    const goal = argv.slice(1).find((a) => !a.startsWith("--"));
+    const goal = positionalArg(argv, 1);
     if (!goal) return void console.error("usage: maya loop \"<goal>\" [--worker local/…] [--lead local/…] [--cwd dir] [--tools Write,Edit] [--max-turns N]");
     const flag = (name: string): string | undefined => {
       const i = argv.indexOf(`--${name}`);
@@ -364,9 +420,22 @@ export async function main(argv: string[]): Promise<void> {
       // fall through to polling
     }
     let lastPrinted = 0;
+    let pollFailures = 0;
     for (;;) {
       await new Promise((r) => setTimeout(r, 3000));
-      const runs = (await (await fetch(`http://127.0.0.1:${cfg2.orchestrator.port}/api/runs`)).json()) as Array<{ runId: string; state: string; report?: { outcome?: string; team?: { id?: string; channelId?: string; tokensUsed?: number }; tasks?: Array<{ state: string }> } }>;
+      let runs: Array<{ runId: string; state: string; report?: { outcome?: string; team?: { id?: string; channelId?: string; tokensUsed?: number }; tasks?: Array<{ state: string }> } }>;
+      try {
+        runs = (await (await fetch(`http://127.0.0.1:${cfg2.orchestrator.port}/api/runs`)).json()) as typeof runs;
+        pollFailures = 0;
+      } catch {
+        // Transient orchestrator hiccup — the run keeps going server-side.
+        if (++pollFailures >= 10) {
+          console.error("\norchestrator unreachable for ~30s — stopped following (the run may still finish; check `maya runs`)");
+          process.exitCode = 1;
+          return;
+        }
+        continue;
+      }
       const run = runs.find((r) => r.runId === runId);
       if (!run) continue;
       const chan = run.report?.team?.channelId;
@@ -537,12 +606,36 @@ export async function main(argv: string[]): Promise<void> {
     const { availableRam } = await import("@maya-ai/model-runtime");
     const ram = await availableRam();
     const gb = (n: number): string => `${(n / 1024 ** 3).toFixed(1)}GB`;
-    console.log(`node          ${process.version}  ${process.version >= "v22.5" ? "✓" : "✗ need ≥22.5"}`);
+    // Numeric semver compare — string compare says "v22.10" < "v22.5".
+    const [nodeMaj = 0, nodeMin = 0] = process.versions.node.split(".").map(Number);
+    const nodeOk = nodeMaj > 22 || (nodeMaj === 22 && nodeMin >= 5);
+    console.log(`node          ${process.version}  ${nodeOk ? "✓" : "✗ need ≥22.5"}`);
     console.log(`llama-server  ${llama.installed ? `✓ ${llama.binPath} (${llama.version})` : `✗ ${llama.installHint}`}`);
+    // Every team/agent flow spawns the claude CLI — surface its absence here
+    // instead of at first spawn.
+    const { execFile } = await import("node:child_process");
+    const claudeVersion = await new Promise<string | null>((resolve) => {
+      execFile("claude", ["--version"], { timeout: 10_000 }, (err, stdout) => {
+        resolve(err ? null : stdout.trim().split(/\s+/)[0] ?? "");
+      });
+    });
+    console.log(`claude        ${claudeVersion !== null ? `✓ ${claudeVersion} (agents/teams enabled)` : "✗ npm install -g @anthropic-ai/claude-code (agents/teams need it)"}`);
     console.log(`ram           ${gb(ram.availableBytes)} available of ${gb(ram.totalBytes)} (guardrail floor ${gb(defaultGuardrails().minFreeRamBytes)})`);
     console.log(`models dir    ${cfg.modelsDir} (${scanModels(cfg.modelsDir).length} installed)`);
     const sy = await detectSwitchyard();
     console.log(`switchyard    ${sy.installed ? `✓ ${sy.version} (Anthropic-API agents enabled)` : `✗ ${sy.installHint}`}`);
+    // Port availability — held ports usually just mean `maya serve` is up.
+    const portNames: Array<[string, number]> = [
+      ["gateway", cfg.gateway.port],
+      ["dashboard", cfg.dashboard.port],
+      ["bus", cfg.bus.port],
+      ["orchestrator", cfg.orchestrator.port],
+    ];
+    const holders = await Promise.all(portNames.map(async ([label, port]) => [label, port, await portHolder(port)] as const));
+    const held = holders.filter(([, , pid]) => pid !== null);
+    console.log(`ports         ${held.length === 0
+      ? `✓ ${portNames.map(([, p]) => `:${p}`).join(" ")} free`
+      : held.map(([label, port, pid]) => `:${port} (${label}) held by pid ${pid}`).join(", ") + " — a `maya serve` may already be running"}`);
     return;
   }
 

@@ -27,9 +27,15 @@ importers:
       '@maya-ai/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@maya-ai/dashboard':
+        specifier: workspace:*
+        version: link:../dashboard
       '@maya-ai/gateway':
         specifier: workspace:*
         version: link:../../packages/gateway
+      '@maya-ai/mcp':
+        specifier: workspace:*
+        version: link:../../packages/mcp
       '@maya-ai/model-runtime':
         specifier: workspace:*
         version: link:../../packages/model-runtime

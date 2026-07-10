@@ -1,5 +1,24 @@
 // Bundle-adjacent assets: dashboard SPA + model-runtime chat templates.
 import fs from "node:fs";
+import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+// apps/dashboard/dist is gitignored — on a fresh clone (or after a clean) it
+// doesn't exist. Build it here rather than fail with ENOENT or, worse,
+// silently pack a stale/missing web UI into the npm tarball.
+const dashIndex = new URL("../../dashboard/dist/index.html", import.meta.url);
+if (!fs.existsSync(dashIndex)) {
+  console.log("dashboard not built — running `pnpm --filter @maya-ai/dashboard build`…");
+  execSync("pnpm --filter @maya-ai/dashboard build", {
+    cwd: fileURLToPath(new URL("../../..", import.meta.url)),
+    stdio: "inherit",
+  });
+  if (!fs.existsSync(dashIndex)) {
+    console.error("dashboard build produced no dist/index.html — refusing to package a broken web UI");
+    process.exit(1);
+  }
+}
+
 const cp = (src, dst) => { fs.rmSync(dst, { recursive: true, force: true }); fs.cpSync(src, dst, { recursive: true }); };
 cp(new URL("../../dashboard/dist", import.meta.url), new URL("../web", import.meta.url));
 cp(new URL("../../../packages/model-runtime/templates", import.meta.url), new URL("../templates", import.meta.url));

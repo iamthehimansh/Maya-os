@@ -53,9 +53,20 @@ export function serveDashboard(distDir: string, port: number, gatewayPort: numbe
         },
       );
       upstream.on("error", () => {
+        // Mid-stream upstream failure (e.g. SSE peer reset during shutdown):
+        // headers are gone already — writeHead would throw and take down the
+        // whole serve process. Just drop the client.
+        if (res.headersSent) {
+          res.destroy();
+          return;
+        }
         res.writeHead(502, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: toBus ? "bus unreachable" : toOrchestrator ? "orchestrator unreachable" : "gateway unreachable", type: "maya_dashboard_proxy" } }));
       });
+      // Browser gone (tab closed, EventSource dropped) → abort upstream, so
+      // orchestrator SSE subscriptions / agent-output iterators get canceled
+      // instead of buffering forever.
+      res.on("close", () => upstream.destroy());
       req.pipe(upstream);
       return;
     }
