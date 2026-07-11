@@ -146,6 +146,17 @@ export interface AppProps {
   rows?: number;
   /** Enter the alternate screen buffer (real TTY only). */
   fullscreen?: boolean;
+  /** Where alt-screen / mouse-mode escapes go. Injectable so tests can assert
+   *  exactly which modes we turn on (Ink's own stdout never sees these). */
+  term?: TermWriter;
+  /** Start with mouse capture on (wheel scroll) instead of off (drag-select). */
+  mouseCapture?: boolean;
+}
+
+/** The bit of stdout the App drives directly for terminal modes. */
+export interface TermWriter {
+  write(s: string): unknown;
+  isTTY?: boolean;
 }
 
 /** A message queued while a turn is running (may carry attachments). */
@@ -175,6 +186,25 @@ interface PickerState {
 /** Default clipboard sink — created once so every copy shares the same stdout. */
 const defaultClipboard = createClipboard();
 
+// ── mouse capture ──
+// 1000 = report button press/release (this is what gives us the wheel), 1006 =
+// SGR extended coordinates. There is no mouse mode that reports the wheel while
+// leaving click-drag to the terminal: once ANY reporting mode is on, the
+// terminal routes drags to us and native selection stops. 1002/1003 add motion
+// tracking and are strictly worse (1003 defeats even the modifier bypass), so we
+// never ask for them.
+export const MOUSE_ON = '\x1b[?1000h\x1b[?1006h';
+export const MOUSE_OFF = '\x1b[?1006l\x1b[?1000l';
+
+/** The selection hint — its own row, on screen in both states. Which mode owns
+ *  the mouse decides whether a drag selects or scrolls, and "why can't I select?"
+ *  has to be answerable from the screen alone. Sized to fit an 80-col row. */
+export function mouseHint(on: boolean): string {
+  return on
+    ? 'mouse on — wheel scrolls · hold ⌥ and drag to select · Ctrl+G turns off'
+    : 'mouse off — drag to select, ⌘C copies · PgUp/PgDn scroll · Ctrl+G wheel';
+}
+
 /** Keep a picker hint on one row. */
 function shortHint(s: string, max = 52): string {
   return s.length <= max ? s : s.slice(0, max - 1) + '…';
@@ -201,9 +231,11 @@ const KEYS_HELP =
   '       Ctrl+P/N focus a tool — →/Enter expand · ← collapse · y copies it\n' +
   'copy:  Ctrl+Space = COPY MODE — ↑/↓ or j/k move · v select · a all · y copy\n' +
   '       /copy [last|all|tool|mode] — OSC 52: works fullscreen AND over SSH\n' +
-  'mouse: wheel scrolls; capture blocks native drag-select — so Shift-drag\n' +
-  '       (iTerm2/xterm/kitty) or Option-drag (Terminal.app), or /mouse to stop\n' +
-  '       capturing the mouse entirely.';
+  'mouse: OFF by default — just drag to select, ⌘C/Ctrl+Shift+C to copy.\n' +
+  '       Ctrl+G (or /mouse) turns capture ON for wheel-scroll; while ON the\n' +
+  '       terminal owns no drags, so hold ⌥ (Option) and drag to select —\n' +
+  '       works in Terminal.app and iTerm2. Shift-drag does the same on\n' +
+  '       xterm/kitty. Ctrl+G again to get plain drag-select back.';
 
 const defaultListDir: DirLister = (dir) => {
   return readdirSync(dir).map((name) => {
@@ -243,6 +275,8 @@ export function App(props: AppProps): React.ReactElement {
     listDir = defaultListDir,
     attachFs = { statSync, readFileSync },
     fullscreen = true,
+    term: termOut = process.stdout,
+    mouseCapture = false,
   } = props;
   const { exit } = useApp();
   const { stdin } = useStdin();
@@ -252,9 +286,9 @@ export function App(props: AppProps): React.ReactElement {
   // effect instead — which runs after the first paint — left frame #1 on the
   // normal buffer, so the alt screen stayed blank until a keypress forced a
   // repaint. Exit is paired in the cleanup effect below.
-  const altScreen = fullscreen && !!process.stdout.isTTY;
+  const altScreen = fullscreen && !!termOut.isTTY;
   useState(() => {
-    if (altScreen) process.stdout.write('\x1b[?1049h\x1b[H');
+    if (altScreen) termOut.write('\x1b[?1049h\x1b[H');
     return null;
   });
 
@@ -284,14 +318,15 @@ export function App(props: AppProps): React.ReactElement {
   const cols = props.cols ?? term.cols;
   const rows = props.rows ?? term.rows;
   const width = Math.max(20, cols - 2);
-  // Reserve rows for the header (3), input line, hint, and breathing room.
-  const viewportHeight = Math.max(3, rows - 9);
+  // Reserve rows for the header (3), input line, both hint rows (the second is
+  // the mouse/selection state), and breathing room.
+  const viewportHeight = Math.max(3, rows - 10);
 
   // ── core transcript + session state ──
   const [entries, setEntries] = useState<Entry[]>(
     initialEntries && initialEntries.length
       ? initialEntries
-      : [{ kind: 'notice', tone: 'info', text: 'maya code — type a message, or /help. PgUp/PgDn or mouse-wheel scroll · Ctrl+P/N focus a tool call.' }],
+      : [{ kind: 'notice', tone: 'info', text: 'maya code — type a message, or /help. Drag to select text, ⌘C to copy · PgUp/PgDn scroll (Ctrl+G swaps to mouse-wheel) · Ctrl+P/N focus a tool call.' }],
   );
   const [snap, setSnap] = useState<SessionState>({ ...session.state });
   const [busy, setBusy] = useState(false);
@@ -325,7 +360,9 @@ export function App(props: AppProps): React.ReactElement {
   // Copy mode is NOT a modal: it runs inside the main key handler (below) so it
   // can move the same viewport the transcript already scrolls.
   const [copy, setCopy] = useState<CopyState | null>(null);
-  const [mouseOn, setMouseOn] = useState(true);
+  // Off unless the caller asks otherwise — see the mouse-mode effect below. The
+  // choice lives here for the whole session: nothing resets it but the user.
+  const [mouseOn, setMouseOn] = useState(mouseCapture);
 
   // ── modals ──
   const [pending, setPending] = useState<PendingPermission | null>(null);
@@ -363,25 +400,30 @@ export function App(props: AppProps): React.ReactElement {
   useEffect(() => {
     if (!altScreen) return;
     return () => {
-      process.stdout.write('\x1b[?1049l');
+      termOut.write('\x1b[?1049l');
     };
-  }, [altScreen]);
+  }, [altScreen, termOut]);
 
-  // Mouse reporting (real TTY only): 1000 = button events (incl. wheel), 1006 =
-  // SGR extended coordinates. We ask for button events ONLY — never 1002/1003
-  // motion tracking — so the terminal still owns click-drag, and the standard
-  // Shift-drag / Option-drag bypass keeps working for native selection.
+  // Mouse reporting (real TTY only). Default is OFF: capture buys wheel-scroll
+  // but costs plain drag-select, and being unable to select is the worse deal —
+  // PgUp/PgDn still scroll, whereas nothing brings drag-select back except this.
+  // Ctrl+G / `/mouse` opts into the wheel.
   //
-  // Terminals differ on how much they hand over, so `/mouse` flips `mouseOn` and
-  // this effect tears the modes back down: capture off, native selection back,
-  // guaranteed, everywhere. Also off on unmount.
+  // When off we still write the disable escapes rather than doing nothing: a
+  // previous run killed without cleanup leaves the terminal reporting mouse
+  // events, and that stale mode eats drag-select in OUR window. Writing them
+  // unconditionally makes the guarantee hold even after someone else's crash.
   useEffect(() => {
-    if (!altScreen || !mouseOn) return;
-    process.stdout.write('\x1b[?1000h\x1b[?1006h');
+    if (!altScreen) return;
+    if (!mouseOn) {
+      termOut.write(MOUSE_OFF);
+      return;
+    }
+    termOut.write(MOUSE_ON);
     return () => {
-      process.stdout.write('\x1b[?1006l\x1b[?1000l');
+      termOut.write(MOUSE_OFF);
     };
-  }, [altScreen, mouseOn]);
+  }, [altScreen, mouseOn, termOut]);
 
   // ── rendered line buffer + reconcile scroll on change ──
   const expandedForRender = useMemo(() => {
@@ -572,6 +614,22 @@ export function App(props: AppProps): React.ReactElement {
     if (lines.length === 0) { notice('info', 'nothing to copy yet'); return; }
     setCopy(enterCopy(scroll, lines.length, viewportHeight));
   }, [lines.length, scroll, viewportHeight, notice]);
+
+  /** Hand the mouse to the app (wheel) or back to the terminal (drag-select).
+   *  Shared by Ctrl+G and `/mouse` so the two can never disagree. */
+  const toggleMouse = useCallback(() => {
+    // Read `mouseOn` from the closure rather than a functional updater: `notice`
+    // appends to the transcript, and a state updater must stay side-effect free
+    // (React may run it more than once, which would double the notice).
+    const next = !mouseOn;
+    setMouseOn(next);
+    notice(
+      'ok',
+      next
+        ? 'mouse capture ON — wheel scrolls. To select text now, hold ⌥ (Option) and drag (Terminal.app/iTerm2; Shift-drag on xterm/kitty). Ctrl+G or /mouse to turn it back off.'
+        : 'mouse capture OFF — drag to select and ⌘C to copy, like any terminal. PgUp/PgDn scroll. Ctrl+G or /mouse re-enables wheel-scroll.',
+    );
+  }, [mouseOn, notice]);
 
   /** Copy the tool block under Ctrl+P/N focus (falling back to the last one focused,
    *  then to the newest call) — from the ENTRY, so the copy carries the full output
@@ -789,19 +847,11 @@ export function App(props: AppProps): React.ReactElement {
         doCopy(lastAssistantText(entries), 'the last reply');
         break;
       }
-      case 'mouse': {
-        const next = !mouseOn;
-        setMouseOn(next);
-        notice(
-          'ok',
-          next
-            ? 'mouse capture ON — wheel scrolls. Shift-drag / Option-drag to select natively.'
-            : 'mouse capture OFF — native click-drag selection works. PgUp/PgDn still scroll; /mouse to re-enable.',
-        );
+      case 'mouse':
+        toggleMouse();
         break;
-      }
     }
-  }, [notice, exit, session, refreshSnap, gate, applyModel, applyProvider, applyAuth, openModelPicker, openResumePicker, doResume, tasks, cmdHistory, cwd, context, runAgent, runWorkflow, mcpStatus, editMemory, mcpAdd, mcpRemove, skillsStatus, installSkill, skillsSearch, skillsRemove, entries, doCopy, openCopyMode, copyFocusedTool, mouseOn]);
+  }, [notice, exit, session, refreshSnap, gate, applyModel, applyProvider, applyAuth, openModelPicker, openResumePicker, doResume, tasks, cmdHistory, cwd, context, runAgent, runWorkflow, mcpStatus, editMemory, mcpAdd, mcpRemove, skillsStatus, installSkill, skillsSearch, skillsRemove, entries, doCopy, openCopyMode, copyFocusedTool, toggleMouse]);
 
   // ── submit / queue ──
   // `override` lets a caller submit a value other than the live input (e.g. the
@@ -935,6 +985,11 @@ export function App(props: AppProps): React.ReactElement {
 
     // ctrl+space enters copy mode (Ink surfaces the NUL byte as ctrl + '`').
     if (key.ctrl && (ch === '`' || ch === ' ' || ch === '\0')) { openCopyMode(); return; }
+
+    // ctrl+g hands the mouse back and forth. Deliberately a bare keybinding and
+    // not just a slash command: when capture is eating your drags, the fix has to
+    // be reachable without typing a line into a prompt you can't select out of.
+    if (key.ctrl && ch === 'g') { toggleMouse(); return; }
 
     // ── paste / drag (Ink delivers a paste or dropped path as one multi-char
     // chunk). A dropped file path → attachment; a big multi-line paste → a
@@ -1150,6 +1205,9 @@ export function App(props: AppProps): React.ReactElement {
           <Text color={theme.muted}>
             {confirmExit ? 'press ctrl+c again to exit' : below ? '▼ new output below — PgDn/Esc to jump' : busy ? 'streaming — Esc interrupts · type to queue' : '/help · PgUp/PgDn scroll · Ctrl+P focus tool · Ctrl+Space copy mode · /copy last reply · ctrl+c exit'}
           </Text>
+          {/* Its own row: the selection story has to be readable at a glance in
+              every state, not only when the hint above happens to be idle. */}
+          <Text color={theme.muted}>{mouseHint(mouseOn)}</Text>
         </Box>
       )}
     </Box>

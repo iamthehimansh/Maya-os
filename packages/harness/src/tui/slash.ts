@@ -51,7 +51,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: 'mcp', usage: '[add <spec> | remove <name>]', description: 'Show MCP servers, or add/remove one live' },
   { name: 'skills', usage: '[add <owner/repo> | search <q> | remove <name>]', description: 'List skills, or add/search/remove (skills.sh-compatible)' },
   { name: 'copy', usage: '[last|all|tool|mode]', description: 'Copy the last reply / transcript / tool block' },
-  { name: 'mouse', description: 'Toggle mouse capture (off = native drag-select)' },
+  { name: 'mouse', description: 'Toggle mouse capture — same as Ctrl+G (off = drag to select)' },
   { name: 'help', aliases: ['?'], description: 'List slash commands' },
   { name: 'quit', aliases: ['exit', 'q'], description: 'Exit the harness' },
 ];

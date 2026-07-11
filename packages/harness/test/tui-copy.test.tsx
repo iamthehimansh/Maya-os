@@ -308,20 +308,25 @@ describe('focused-tool copy + /copy', () => {
   });
 });
 
-describe('/mouse releases mouse capture for native drag-selection', () => {
-  it('toggles capture off and back on, telling the user what changed', async () => {
+// Capture now starts OFF (drag-select is the default; the wheel is opt-in), so
+// the first `/mouse` turns it ON. See tui-mouse.test.tsx for the escape bytes.
+describe('/mouse hands the mouse between the app and the terminal', () => {
+  it('toggles capture on and back off, telling the user what changed', async () => {
     const { stdin, lastFrame } = renderApp(makeSession(endTurn), { rows: 24 });
     await delay();
+    // The notices are long enough to wrap in the transcript, so match against a
+    // whitespace-flattened frame — we care about the words, not the line breaks.
+    const flat = (): string => (lastFrame() ?? '').replace(/\s+/g, ' ');
 
     await typeSeq(stdin, ['/mouse', KEY.enter], 30);
     await delay(60);
-    expect(lastFrame()).toContain('mouse capture OFF');
-    expect(lastFrame()).toContain('native click-drag selection works');
+    expect(flat()).toContain('mouse capture ON');
+    expect(flat()).toContain('hold ⌥ (Option) and drag');
 
     await typeSeq(stdin, ['/mouse', KEY.enter], 30);
     await delay(60);
-    expect(lastFrame()).toContain('mouse capture ON');
-    expect(lastFrame()).toContain('Shift-drag / Option-drag');
+    expect(flat()).toContain('mouse capture OFF');
+    expect(flat()).toContain('drag to select');
   });
 });
 
