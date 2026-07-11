@@ -1,0 +1,57 @@
+{
+  "name": "@maya-os/code",
+  "version": "0.1.0",
+  "description": "maya code (mayac) — the coding agent of Maya OS. A provider-agnostic agent loop over the official Anthropic + OpenAI SDKs (API key or subscription), with a full-screen Ink TUI, skills, MCP, sub-agents and workflows. CLI: mayac.",
+  "keywords": [
+    "maya",
+    "maya-os",
+    "coding-agent",
+    "agent",
+    "cli",
+    "tui",
+    "ink",
+    "anthropic",
+    "openai",
+    "claude",
+    "mcp",
+    "skills",
+    "ai"
+  ],
+  "author": "Maya OS",
+  "license": "MIT",
+  "homepage": "https://www.npmjs.com/package/@maya-os/code",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "bin": {
+    "mayac": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "ink": "^6.4.0",
+    "openai": "^6.10.0",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "^19.0.0",
+    "ink-testing-library": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  }
+}
