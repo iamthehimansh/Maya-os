@@ -54,14 +54,29 @@ export interface LlamaServerArgs {
   draftPath?: string;
   /** Override the GGUF's embedded chat template (--chat-template-file) — see TEMPLATE_QUIRKS. */
   chatTemplateFile?: string;
+  /**
+   * GPU layers to offload. OMITTED by default so llama.cpp AUTO-FITS the layer
+   * count to free device memory.
+   *
+   * We used to hardcode 999 ("all layers on GPU"). That is fine while a model
+   * fits — but the moment it doesn't, llama.cpp REFUSES to auto-fit
+   * ("failed to fit params to free device memory: n_gpu_layers already set by
+   * user to 999, abort"), loads anyway, and dies in a loop of
+   * `kIOGPUCommandBufferCallbackErrorOutOfMemory` / `decode() failed: Compute
+   * error.` — e.g. a 16B model on a 16GB Mac with other apps open. Letting
+   * llama.cpp fit means it still puts EVERY layer on the GPU when they fit, and
+   * gracefully offloads the remainder to CPU when they don't. Set explicitly
+   * only to force a count.
+   */
+  nGpuLayers?: number;
   /** Extra raw args appended last (model profiles / power users). */
   extra?: string[];
 }
 
 /**
- * Argument builder for llama-server with Metal-sane defaults:
- * all layers on GPU, mmap on (default), no browser UI, metrics endpoint on.
- * Kept as a pure function so tests can assert exact argv.
+ * Argument builder for llama-server with Metal-sane defaults: GPU layers
+ * auto-fit to free memory (see nGpuLayers), mmap on (default), no browser UI,
+ * metrics endpoint on. Kept as a pure function so tests can assert exact argv.
  */
 export function llamaServerArgs(a: LlamaServerArgs): string[] {
   return [
@@ -70,7 +85,7 @@ export function llamaServerArgs(a: LlamaServerArgs): string[] {
     "--port", String(a.port),
     "--host", "127.0.0.1",
     "--ctx-size", String(a.contextLength),
-    "--n-gpu-layers", "999",
+    ...(a.nGpuLayers !== undefined ? ["--n-gpu-layers", String(a.nGpuLayers)] : []),
     "--jinja", // chat-template engine: required for native tool-calling (agents send tools)
     // q8 KV cache: halves context RAM for negligible accuracy loss — the
     // difference between 16k and 32k context on the same low-RAM Mac.

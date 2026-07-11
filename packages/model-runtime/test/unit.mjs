@@ -47,11 +47,17 @@ assert.equal(planFit(files, "Q8_0", 8192, 1 * GIB, quantLadderFrom), null);
 const args = llamaServerArgs({ modelPath: "/m.gguf", port: 41100, contextLength: 4096, alias: "local/m" });
 assert.deepEqual(args, [
   "--model", "/m.gguf", "--alias", "local/m", "--port", "41100", "--host", "127.0.0.1",
-  "--ctx-size", "4096", "--n-gpu-layers", "999", "--jinja",
+  "--ctx-size", "4096", "--jinja",
   "--flash-attn", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
   "--no-webui", "--metrics",
 ]);
 assert(!llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 1 }).includes("--alias"), "alias optional");
+// --n-gpu-layers is OMITTED by default so llama.cpp auto-fits layers to free
+// memory. Hardcoding 999 made it refuse to fit and OOM on Metal for a model
+// bigger than free VRAM. Still passed through when set explicitly.
+assert(!args.includes("--n-gpu-layers"), "n-gpu-layers omitted by default (llama.cpp auto-fits)");
+const pinned = llamaServerArgs({ modelPath: "/m.gguf", port: 1, contextLength: 1, nGpuLayers: 24 });
+assert.deepEqual(pinned.slice(pinned.indexOf("--n-gpu-layers"), pinned.indexOf("--n-gpu-layers") + 2), ["--n-gpu-layers", "24"], "explicit nGpuLayers honored");
 
 console.log("UNIT PASS ✅ (12 assertions)");
 
