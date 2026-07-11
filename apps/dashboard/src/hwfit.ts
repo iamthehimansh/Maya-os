@@ -22,7 +22,9 @@ export interface Suggestion {
   arch?: string;
   fitLevel: FitLevel;
   runMode: RunMode;
-  format?: Format;
+  /** `null` when no artifact resolved for the chosen quant — the gateway sends
+   * the key regardless, so the view must be able to hold the null. */
+  format?: Format | null;
   quant: string;
   context: number;
   requiredGb: number;
@@ -33,25 +35,49 @@ export interface Suggestion {
    * for the chosen quant, or null when it couldn't be resolved. The gateway
    * serves GGUF only, so a null `gguf` means the pick is not runnable here. */
   sources: { gguf: string | null; mlx: string | null; hfRepo?: string };
+  /** False = discovered on HF with no verified lineage: it is not in the curated
+   * seed, and the repo owner is not the upstream org. The engine already refuses
+   * to pay it reputation bonuses (score.ts), but a demoted model is still a
+   * *visible* model — and once its uploader is allowlisted it gets a working
+   * Download button. So the card must say so. Absent = the server doesn't send
+   * it yet; we badge nothing rather than guess. */
+  verified?: boolean;
   /** Cross-referenced against the models dir server-side. */
   installed?: boolean;
+  /** The gateway's verdict on "can Maya pull AND serve this today?" — it knows
+   * what `pullModel` will accept, so it outranks our client-side guess. */
+  runnable?: boolean;
+  notRunnableReason?: string;
   reasons?: string[];
 }
 
+/** Field-for-field the engine's `SystemInfo` (packages/hwfit/src/types.ts): the
+ * gateway puts it on the wire verbatim, so any rename here silently breaks the
+ * header. `hwfit.contract.test.ts` makes tsc enforce that. */
 export interface SystemInfo {
-  chip: string;
-  backend: "metal" | "cuda" | "cpu";
-  cores?: number;
-  ramTotalGb: number;
-  ramAvailableGb: number;
-  bandwidthGbs?: number;
   platform?: string;
-  arch?: string;
+  chip: string;
+  isAppleSilicon?: boolean;
+  cpuCores: number;
+  gpuCores?: number;
+  totalRamGb: number;
+  availableRamGb: number;
+  memoryBandwidthGbs?: number;
+  backend: "metal" | "cuda" | "cpu";
+  vramGb?: number;
 }
 
 export interface SuggestResponse {
   system: SystemInfo;
-  catalog?: { source: "hf+seed" | "seed"; count: number; stale?: boolean };
+  catalog?: {
+    source: "hf+seed" | "seed";
+    count: number;
+    stale?: boolean;
+    /** Picks withheld because their HF owner isn't on the gateway's allowlist.
+     * A filter the user can't see is a filter they can't overrule — so the panel
+     * says how many vanished and offers to show them. */
+    untrustedHidden?: number;
+  };
   useCase?: UseCase;
   results: Suggestion[];
 }
@@ -65,6 +91,9 @@ export interface SuggestOptions {
   search?: string;
   quant?: string;
   fitOnly?: boolean;
+  /** `false` asks the gateway for unvetted uploaders too (`trusted=0`). Only
+   * ever set from an explicit user action — the default must stay closed. */
+  trusted?: boolean;
 }
 
 export const USE_CASES: UseCase[] = ["coding", "chat", "reasoning"];
@@ -90,8 +119,12 @@ const FITTING: ReadonlySet<FitLevel> = new Set<FitLevel>(["perfect", "good", "ma
 export const fits = (s: Suggestion): boolean => FITTING.has(s.fitLevel);
 
 /** The gateway pulls and serves GGUF via llama-server; there is no MLX serving
- * path. A pick with no resolved .gguf is informational, not actionable. */
-export const isRunnable = (s: Suggestion): boolean => Boolean(s.sources?.gguf) && s.fitLevel !== "no_fit";
+ * path. A pick with no resolved .gguf is informational, not actionable.
+ *
+ * The gateway ships its own `runnable` — it knows what `pullModel` accepts — so
+ * trust it when present and keep the local rule as the offline fallback. */
+export const isRunnable = (s: Suggestion): boolean =>
+  (typeof s.runnable === "boolean" ? s.runnable : Boolean(s.sources?.gguf)) && s.fitLevel !== "no_fit";
 
 /** Trailing version in a name ("qwen2.5-coder-7b" → 2.5), for a stable,
  * newest-wins tiebreak between models the scorer rated identically. */
@@ -130,13 +163,61 @@ export function filterSuggestions(list: Suggestion[], opts: { search?: string; f
   });
 }
 
-export const fmtGb = (n: number): string => `${n.toFixed(1)} GB`;
-export const fmtTps = (n: number): string => `~${Math.round(n)} tok/s`;
-export const fmtParams = (b: number): string => `${b % 1 === 0 ? b.toFixed(0) : b.toFixed(1)}B`;
-export const fmtCtx = (n: number): string => (n >= 1024 ? `${Math.round(n / 1024)}K ctx` : `${n} ctx`);
+// A missing number is a wire-contract bug, not a user-facing crash: render "—"
+// so one absent field can't take the whole Models tab down with a TypeError.
+const num = (n: number | undefined): n is number => typeof n === "number" && Number.isFinite(n);
+
+export const fmtGb = (n: number | undefined): string => (num(n) ? `${n.toFixed(1)} GB` : "—");
+export const fmtTps = (n: number | undefined): string => (num(n) ? `~${Math.round(n)} tok/s` : "—");
+export const fmtParams = (b: number | undefined): string => (num(b) ? `${b % 1 === 0 ? b.toFixed(0) : b.toFixed(1)}B` : "—");
+export const fmtCtx = (n: number | undefined): string => (num(n) ? (n >= 1024 ? `${Math.round(n / 1024)}K ctx` : `${n} ctx`) : "—");
+
+/** Who published the artifact this card would download — `bartowski`, `Qwen`,
+ * or some anonymous account.
+ *
+ * "Download & serve" fetches a binary from HuggingFace and feeds it to
+ * llama-server. Live discovery surfaces repos from every kind of uploader —
+ * upstream orgs, career quantizers, and anonymous accounts alike — and a repo
+ * NAME is not evidence of what is inside it. So the one fact a user needs
+ * before clicking — *whose* binary is this — must be on the card, not one click
+ * away. Note this is a provenance question, never a quality verdict: an unknown
+ * owner may well be shipping something excellent. Derived from the repo the
+ * server resolved; we do NOT re-implement the gateway's allowlist here, or it
+ * would drift from it. */
+export const publisherOf = (s: Suggestion): string | null => {
+  const repo = s.sources?.hfRepo ?? s.sources?.gguf ?? s.sources?.mlx ?? null;
+  if (!repo) return null;
+  const owner = repo.replace(/^hf:/, "").split("/")[0];
+  return owner || null;
+};
+
+/** The artifact to actually pull for a pick.
+ *
+ * Today the gateway only serves GGUF, so this is almost always `sources.gguf`.
+ * But `format` is the server's own statement of which artifact it resolved, and
+ * an MLX serving backend is planned (`RuntimeBackend` in core already spells
+ * `'llama.cpp' | 'mlx'`). Selecting by `format` means the day MLX flips to
+ * runnable, the Download button pulls the MLX repo instead of passing a `null`
+ * gguf source — rather than this being found in production. */
+export const pullSourceFor = (s: Suggestion): string | null =>
+  (s.format === "mlx" ? s.sources?.mlx : s.sources?.gguf) ?? s.sources?.gguf ?? null;
+
+/** A pick the engine says fits, but which won't load until memory is freed.
+ *
+ * The engine budgets against `totalRamGb` on purpose (see `fit.ts:budgetGb`) so
+ * rankings stay stable — but the runtime guardrail checks memory that is free
+ * *now*. Between them sits a card that says "perfect fit" and a Serve button
+ * that fails with "cannot fit". This is that gap, surfaced. */
+export const tightNow = (s: Suggestion, sys: SystemInfo | undefined): boolean =>
+  Boolean(sys) &&
+  Number.isFinite(sys!.availableRamGb) &&
+  Number.isFinite(s.requiredGb) &&
+  fits(s) &&
+  s.requiredGb > sys!.availableRamGb;
 
 /** "Apple M4 Pro, 16GB" */
-export const systemLabel = (sys: SystemInfo): string => `${sys.chip}, ${Math.round(sys.ramTotalGb)}GB`;
+export const systemLabel = (sys: SystemInfo): string =>
+  num(sys.totalRamGb) ? `${sys.chip}, ${Math.round(sys.totalRamGb)}GB` : sys.chip;
 
 export function getSuggestions(opts: SuggestOptions = {}, signal?: AbortSignal): Promise<SuggestResponse> {
   const q = new URLSearchParams();
@@ -145,6 +226,8 @@ export function getSuggestions(opts: SuggestOptions = {}, signal?: AbortSignal):
   if (opts.search) q.set("search", opts.search);
   if (opts.quant) q.set("quant", opts.quant);
   if (opts.fitOnly) q.set("fitOnly", "true");
+  // Only ever sent as an explicit opt-out; omitting it leaves the gate closed.
+  if (opts.trusted === false) q.set("trusted", "0");
   return fetch(`/api/models/suggest?${q}`, signal ? { signal } : {}).then((r) => {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json() as Promise<SuggestResponse>;

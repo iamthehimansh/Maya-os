@@ -69,6 +69,17 @@ const ARCH_BONUS: Record<string, number> = {
   phi4: 3,
 };
 
+/**
+ * How much of its estimated capability an UNVERIFIED model keeps.
+ *
+ * Not a punishment — a confidence interval. We have no evals and no provenance
+ * for it, so the number is a guess, and a guess should not outrank a
+ * measurement at equal size. Modest on purpose: enough that a verified model
+ * wins a tie, not so much that a genuinely good new release is buried. Seeding
+ * the model (which verifies its repo and filenames) removes the discount.
+ */
+const UNVERIFIED_CONFIDENCE = 0.9;
+
 export function fitScore(level: FitLevel): number {
   switch (level) {
     case "perfect":
@@ -97,22 +108,56 @@ export function speedScore(tps: number, useCase: UseCase): number {
 /**
  * Model capability, 0–100, as served at `quant`.
  *
- * The quant multiplier is the key coupling: it means a 14B squeezed to Q3 can
- * score BELOW a 7B at Q4. That is the honest answer — a heavily-quantised big
- * model is often worse than a comfortable smaller one, and a recommender that
- * ignored this would push users toward the biggest thing that technically fits.
+ * The quant multiplier discounts capability for fidelity lost to quantisation,
+ * but it does NOT on its own out-weigh parameter count: a 14B at Q3 still
+ * out-qualities a 7B at Q4, which matches practice — down to about Q3, a bigger
+ * model at a lower quant generally beats a smaller one at a higher quant.
+ *
+ * What stops the recommender pushing users toward the biggest thing that
+ * technically fits is the COMPOSITE, not this subscore: the 14B is slower
+ * (fewer tok/s, more bytes per token) and tighter (worse fit band), so on a
+ * 16 GB M2 Pro the 7B at Q4 wins the ranking outright. Quality is the argument
+ * FOR the big model; speed and fit are the argument against, and they are
+ * weighted to win when the machine is small. See rank.test.ts.
  */
 export function qualityScore(model: CatalogModel, quant: Quant, useCase: UseCase): number {
-  const base =
-    paramTier(model.paramsB) +
-    (PROVIDER_BONUS[model.provider] ?? 0) +
-    (ARCH_BONUS[model.arch] ?? 0) +
-    codingAdjustment(model, useCase);
+  // Reputation is EARNED, not claimed.
+  //
+  // `provider` and `arch` are parsed from the repo NAME, and a name is a string
+  // anyone can type. Paying the family and recency bonuses on an unverified
+  // model means `mradermacher/Qwen3-53B-TOTAL-RECALL-MASTER-CODER` collects
+  // Qwen's +6/+5 for *calling itself* Qwen, and `yuxinlu1/gemma-4-12B-…`
+  // collects Google's for a model Google never made. That is how a stranger's
+  // merge out-scored the real Qwen2.5-Coder 14B.
+  //
+  // So an unverified model ranks on what we can actually observe — its size and
+  // whether it's code-tuned — and inherits nobody else's reputation. It can
+  // still win; it just has to do it on its own merits.
+  const vouched = model.verified === true;
+  const reputation = vouched
+    ? (PROVIDER_BONUS[model.provider] ?? 0) + (ARCH_BONUS[model.arch] ?? 0)
+    : 0;
+
+  const base = paramTier(model.paramsB) + reputation + codingAdjustment(model, useCase);
+
+  // Withholding the bonus is not enough on its own, because `paramTier` treats
+  // parameter count AS capability — which is only true for a model someone
+  // actually trained and evaluated. `Jackrong/Qwopus3.5-9B-Coder-MTP` claims no
+  // famous family (provider=community, arch=unknown), so it never had a bonus to
+  // strip, and it still out-ranked verified models on size alone.
+  //
+  // For an unvouched model, our quality number is a GUESS: we have no evals, no
+  // provenance, and no reason to believe 9B of unknown merge is worth 9B of
+  // Qwen. Ranking is about expected value, so an honest estimate has to price
+  // that uncertainty in — not pretend the guess is as good as a measurement.
+  // The discount is deliberately modest: a genuinely good model from a new
+  // uploader is under-ranked, not buried, and seeding it removes the discount.
+  const confidence = vouched ? 1 : UNVERIFIED_CONFIDENCE;
 
   // QUANT_QUALITY is model-runtime's perplexity-derived table (1 = lossless) —
   // reused rather than duplicated so the two packages can't drift apart.
   const fidelity = QUANT_QUALITY[quant] ?? 0.9;
-  return clamp(Math.round(base * fidelity), 0, 100);
+  return clamp(Math.round(base * fidelity * confidence), 0, 100);
 }
 
 /** Code-tuned models earn their keep on coding, and cost a little elsewhere. */

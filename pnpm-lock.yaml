@@ -33,6 +33,9 @@ importers:
       '@maya-ai/gateway':
         specifier: workspace:*
         version: link:../../packages/gateway
+      '@maya-ai/hwfit':
+        specifier: workspace:*
+        version: link:../../packages/hwfit
       '@maya-ai/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
@@ -70,6 +73,9 @@ importers:
         specifier: ^19.0.0
         version: 19.2.7(react@19.2.7)
     devDependencies:
+      '@maya-ai/gateway':
+        specifier: workspace:*
+        version: link:../../packages/gateway
       '@testing-library/dom':
         specifier: ^10.4.1
         version: 10.4.1
@@ -218,6 +224,9 @@ importers:
         specifier: ^4.12.28
         version: 4.12.28
     devDependencies:
+      '@maya-ai/hwfit':
+        specifier: workspace:*
+        version: link:../hwfit
       '@types/node':
         specifier: ^22
         version: 22.20.0

@@ -17,7 +17,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:smoke": "node test/smoke.mjs",
-    "test": "node test/unit.mjs && node test/suggest.mjs"
+    "test": "node test/unit.mjs && node test/suggest.mjs && node test/suggest-live.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.8",
@@ -27,6 +27,7 @@
   },
   "devDependencies": {
     "@types/node": "^22",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "@maya-ai/hwfit": "workspace:*"
   }
 }

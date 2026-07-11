@@ -4,6 +4,7 @@ import { RuntimeManager, pullModel, scanModels, detectLlamaCpp, tuneModel, write
 import type { DraftOption, TuneResult } from "@maya-ai/model-runtime";
 import type { Quant } from "@maya-ai/core";
 import { detectSwitchyard, provisionSwitchyard, startGateway, startSwitchyard, type SidecarHandle } from "@maya-ai/gateway";
+import { detectHardware, loadCatalog, loadCatalogSnapshot, rankModels } from "@maya-ai/hwfit";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
@@ -113,6 +114,13 @@ export async function main(argv: string[]): Promise<void> {
       anthropicSidecarPort: () => sidecar?.port,
       providers: cfg.providers,
       onCatalogChange: () => void sidecar?.refresh().catch((e) => console.error("[switchyard] refresh failed:", e)),
+      // The hardware-aware recommender. `maya serve` is the composition root:
+      // the gateway declares the engine it needs but never imports it, so
+      // without this key /api/models/suggest 501s and the dashboard's
+      // "Suggested for your machine" panel has nothing to render.
+      // `loadCatalogSnapshot` is what lets the panel say "curated list, HF
+      // unreachable" instead of silently claiming live results while offline.
+      hwfit: { detectHardware, loadCatalog, loadCatalogSnapshot, rankModels },
     });
     console.log(`maya gateway  → http://127.0.0.1:${cfg.gateway.port}/v1  (llama.cpp ${llama.version ?? "?"})`);
     console.log(`models        → ${scanModels(cfg.modelsDir).map((m) => `local/${m.name}`).join(", ") || "none — maya models pull hf:…"}`);

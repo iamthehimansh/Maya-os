@@ -74,10 +74,47 @@ export interface CatalogModel {
    * guessed — a guessed name is a download button that 404s.
    */
   ggufFiles: Partial<Record<Quant, string>>;
-  /** MLX repo (Apple Silicon native), when one exists. */
+  /**
+   * MLX repo (Apple Silicon native), when one exists. The preferred one —
+   * 4-bit if published, since that's the config anyone actually runs.
+   */
   mlxRepo?: string;
+  /**
+   * Quant → MLX repo id. Unlike GGUF (many quants in ONE repo, selected by
+   * filename), MLX ships one repo PER quant
+   * (`…-Instruct-MLX-4bit`, `…-MLX-8bit`), so this maps to repo ids, not files.
+   *
+   * MLX bit-widths are mapped onto Maya's GGUF quant ladder by nearest
+   * bits-per-weight (4bit→Q4_K_M, 8bit→Q8_0…). That keeps the wire type stable
+   * — `Recommendation.quant` stays a `Quant`, which the gateway and dashboard
+   * both have compile-time contracts against — at the cost of a slightly
+   * approximate memory estimate. The alternative was widening `quant` to a free
+   * string, which would have broken both downstream layers for a rounding error.
+   */
+  mlxQuants?: Partial<Record<Quant, string>>;
   /** ISO date of release — the version-aware tiebreak between equal scores. */
   releasedAt?: string;
+  /**
+   * Whether we can vouch for this model's LINEAGE — i.e. it is what it says it
+   * is. True for the curated seed, and for repos owned by the upstream org
+   * itself (`Qwen/…`, `google/…`). False for anything discovered from a repo
+   * whose owner is a stranger.
+   *
+   * This exists because `provider` and `arch` are parsed from the repo NAME,
+   * and a name is a string anyone can type. `mradermacher/Qwen3-53B-TOTAL-
+   * RECALL-MASTER-CODER` parses as provider=qwen, arch=qwen3 and would collect
+   * Qwen's reputation bonus for calling itself Qwen; `yuxinlu1/gemma-4-12B-…`
+   * collects Google's for a model Google never made ("Gemma 4" does not exist).
+   * Reputation must be EARNED, not claimed — so score.ts pays the family and
+   * recency bonuses only when this is true. Unverified models rank on size and
+   * coding alone.
+   *
+   * Orthogonal to the gateway's `TRUSTED_OWNERS` gate: that one asks "whose
+   * binary am I downloading" (supply chain), this one asks "do we have any
+   * reason to think this model is good" (epistemic). A reputable quantizer
+   * shipping a slop merge passes the first and must still fail the second.
+   */
+  verified?: boolean;
 }
 
 /** The four axes behind the composite score, each 0–100. */
@@ -100,6 +137,15 @@ export interface Recommendation {
   arch: string;
   fitLevel: FitLevel;
   runMode: RunMode;
+  /**
+   * Whether we can vouch for this model's lineage (see `CatalogModel.verified`).
+   * On the wire because the UI must be able to SAY it: an unverified pick has
+   * had its quality discounted for uncertainty, and the user deserves to know
+   * that the number in front of them is a guess rather than a measurement.
+   * Distinct from the gateway's trust gate, which is about the binary, not the
+   * model.
+   */
+  verified: boolean;
   /** The quant we'd actually serve — one of Maya's ladder, not a free string. */
   quant: Quant;
   /** Context we could actually serve at this quant, after any halving. */

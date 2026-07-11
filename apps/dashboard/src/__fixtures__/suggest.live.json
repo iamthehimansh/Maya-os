@@ -1,0 +1,136 @@
+{
+  "system": {
+    "platform": "darwin",
+    "chip": "Apple M2 Pro",
+    "isAppleSilicon": true,
+    "cpuCores": 10,
+    "gpuCores": 16,
+    "totalRamGb": 16,
+    "availableRamGb": 5.3,
+    "memoryBandwidthGbs": 200,
+    "backend": "metal"
+  },
+  "catalog": {
+    "source": "hf+seed",
+    "count": 36,
+    "stale": false,
+    "untrustedHidden": 9
+  },
+  "useCase": "coding",
+  "results": [
+    {
+      "name": "qwen2.5-coder-7b",
+      "id": "local/qwen2.5-coder-7b",
+      "displayName": "Qwen2.5-Coder 7B",
+      "provider": "qwen",
+      "paramsB": 7.6,
+      "isMoe": false,
+      "arch": "qwen2.5",
+      "fitLevel": "perfect",
+      "runMode": "gpu",
+      "verified": true,
+      "quant": "Q5_K_M",
+      "context": 8192,
+      "requiredGb": 5.89,
+      "speedTps": 29.9,
+      "score": 90,
+      "subscores": {
+        "quality": 80,
+        "speed": 100,
+        "fit": 100,
+        "context": 100
+      },
+      "sources": {
+        "gguf": "hf:Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/qwen2.5-coder-7b-instruct-q5_k_m.gguf",
+        "mlx": "hf:mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+        "hfRepo": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"
+      },
+      "reasons": [
+        "Needs ~5.89 GB at Q5_K_M — leaves ~6.9 GB free",
+        "~29.9 tok/s estimated on Apple M2 Pro (200 GB/s)"
+      ],
+      "installed": true,
+      "format": "gguf",
+      "runnable": true,
+      "trusted": true,
+      "publisher": "Qwen"
+    },
+    {
+      "name": "yi-coder-9b-chat",
+      "id": "local/yi-coder-9b-chat",
+      "displayName": "Yi Coder 9B Chat",
+      "provider": "community",
+      "paramsB": 9,
+      "isMoe": false,
+      "arch": "unknown",
+      "fitLevel": "perfect",
+      "runMode": "gpu",
+      "verified": true,
+      "quant": "Q4_K_M",
+      "context": 8192,
+      "requiredGb": 5.94,
+      "speedTps": 29.6,
+      "score": 89.3,
+      "subscores": {
+        "quality": 79,
+        "speed": 99,
+        "fit": 100,
+        "context": 100
+      },
+      "sources": {
+        "gguf": "hf:MaziyarPanahi/Yi-Coder-9B-Chat-GGUF/Yi-Coder-9B-Chat.Q4_K_M.gguf",
+        "mlx": null,
+        "hfRepo": "MaziyarPanahi/Yi-Coder-9B-Chat-GGUF"
+      },
+      "reasons": [
+        "Needs ~5.94 GB at Q4_K_M — leaves ~6.9 GB free",
+        "~29.6 tok/s estimated on Apple M2 Pro (200 GB/s)"
+      ],
+      "installed": false,
+      "format": "gguf",
+      "runnable": true,
+      "trusted": true,
+      "publisher": "MaziyarPanahi"
+    },
+    {
+      "name": "gemma-4-12b-coder-fable5-composer2.5",
+      "id": "local/gemma-4-12b-coder-fable5-composer2.5",
+      "displayName": "gemma 4 12b coder fable5 composer2.5",
+      "provider": "google",
+      "paramsB": 12,
+      "isMoe": false,
+      "arch": "unknown",
+      "fitLevel": "good",
+      "runMode": "gpu",
+      "verified": false,
+      "quant": "Q4_K_M",
+      "context": 8192,
+      "requiredGb": 7.75,
+      "speedTps": 22.2,
+      "score": 78.1,
+      "subscores": {
+        "quality": 71,
+        "speed": 74,
+        "fit": 85,
+        "context": 100
+      },
+      "sources": {
+        "gguf": null,
+        "mlx": "hf:mlx-community/gemma-4-12b-coder-fable5-composer2.5-4bit",
+        "hfRepo": "mlx-community/gemma-4-12b-coder-fable5-composer2.5-8bit"
+      },
+      "reasons": [
+        "Needs ~7.75 GB at Q4_K_M — leaves ~5.1 GB free",
+        "~22.2 tok/s estimated on Apple M2 Pro (200 GB/s)",
+        "MLX-only (Apple Silicon native) — Maya serves GGUF today, so this is info-only",
+        "Unverified upload (mlx-community) — quality is an estimate, scored conservatively"
+      ],
+      "installed": false,
+      "format": "mlx",
+      "runnable": false,
+      "notRunnableReason": "MLX-only — Maya serves GGUF via llama-server today, so this can't be installed yet",
+      "trusted": true,
+      "publisher": "mlx-community"
+    }
+  ]
+}

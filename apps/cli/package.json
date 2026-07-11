@@ -38,6 +38,7 @@
     "@maya-ai/core": "workspace:*",
     "@maya-ai/dashboard": "workspace:*",
     "@maya-ai/gateway": "workspace:*",
+    "@maya-ai/hwfit": "workspace:*",
     "@maya-ai/mcp": "workspace:*",
     "@maya-ai/model-runtime": "workspace:*",
     "@maya-ai/orchestrator": "workspace:*"

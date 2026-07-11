@@ -52,10 +52,14 @@ function bestConfig(
   targetContext: number,
   pinnedQuant?: Quant,
 ): Recommendation | null {
-  const available = Object.keys(model.ggufFiles) as Quant[];
-  // Quants the repo actually publishes; if we know of none, still reason over
-  // the ladder so the model can be shown (with a null source — see below).
-  const pool = available.length ? available : QUANT_LADDER;
+  const gguf = Object.keys(model.ggufFiles) as Quant[];
+  const mlx = Object.keys(model.mlxQuants ?? {}) as Quant[];
+  // GGUF decides the quant whenever it exists, because GGUF is what Maya can
+  // actually serve today. An MLX-only model still gets planned and shown — over
+  // its published bit-widths, not the whole ladder — but with a null gguf source,
+  // which is what makes the gateway mark it `runnable: false` instead of
+  // offering a Download that `llamacpp.ts` could never load.
+  const pool = gguf.length ? gguf : mlx.length ? mlx : QUANT_LADDER;
   const quants = pinnedQuant ? pool.filter((q) => q === pinnedQuant) : pool;
   if (!quants.length) return null;
 
@@ -92,6 +96,9 @@ function bestConfig(
       arch: model.arch,
       fitLevel: plan.fitLevel,
       runMode: plan.runMode,
+      // Default false: a model with no lineage claim is not vouched for. Absent
+      // must never read as "fine" — that's the direction that ships slop.
+      verified: model.verified === true,
       quant,
       context: plan.context,
       requiredGb: plan.requiredGb,
@@ -103,7 +110,9 @@ function bestConfig(
         // quant. Null (not a guess) when the repo has no file for it — a
         // guessed name is a download button that 404s.
         gguf: file ? `hf:${model.hfRepo}/${file}` : null,
-        mlx: model.mlxRepo ? `hf:${model.mlxRepo}` : null,
+        // MLX ships one repo PER quant, so point at the repo for the quant we
+        // actually chose; fall back to the model's preferred (4-bit) repo.
+        mlx: mlxRepoFor(model, quant),
         hfRepo: model.hfRepo,
       },
       reasons: explain(model, plan, tps, system),
@@ -112,6 +121,12 @@ function bestConfig(
   }
 
   return winner;
+}
+
+/** The MLX repo for this exact quant, else the model's preferred one, else null. */
+function mlxRepoFor(model: CatalogModel, quant: Quant): string | null {
+  const exact = model.mlxQuants?.[quant] ?? model.mlxRepo;
+  return exact ? `hf:${exact}` : null;
 }
 
 /** Short, honest sentences for the card — why this landed where it did. */
@@ -145,6 +160,20 @@ function explain(
   }
   if (tps > 0) {
     reasons.push(`~${tps} tok/s estimated on ${system.chip} (${system.memoryBandwidthGbs} GB/s)`);
+  }
+  // Say it plainly rather than let a card imply an install it can't deliver:
+  // Maya's only backend is llama.cpp (GGUF), so an MLX-only model is something
+  // to know about, not something to download yet.
+  if (!Object.keys(model.ggufFiles).length && model.mlxRepo) {
+    reasons.push("MLX-only (Apple Silicon native) — Maya serves GGUF today, so this is info-only");
+  }
+  // Say the quiet part: this model's quality number is an estimate we can't back
+  // with provenance, and we've discounted it for that. Better on the card than
+  // buried in a scorer.
+  if (model.verified !== true) {
+    reasons.push(
+      `Unverified upload (${model.hfRepo.split("/")[0]}) — quality is an estimate, scored conservatively`,
+    );
   }
   return reasons;
 }

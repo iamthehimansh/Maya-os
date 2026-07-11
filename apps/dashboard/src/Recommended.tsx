@@ -15,8 +15,11 @@ import {
   fmtTps,
   getSuggestions,
   isRunnable,
+  publisherOf,
+  pullSourceFor,
   sortSuggestions,
   systemLabel,
+  tightNow,
 } from "./hwfit";
 
 export interface RecommendedProps {
@@ -40,16 +43,20 @@ export function Recommended({ models, live, busy, onPull, onLoad, onUnload, fetc
   const [sortBy, setSortBy] = useState<SortBy>("score");
   const [search, setSearch] = useState("");
   const [fitOnly, setFitOnly] = useState(false);
+  // Starts closed and stays closed unless the user opts in, every render.
+  const [showUnverified, setShowUnverified] = useState(false);
   const fetchRef = useRef(fetchSuggestions);
   fetchRef.current = fetchSuggestions;
 
-  // Re-rank server-side only when the use case changes; search/sort/fit are
-  // client-side over the returned set, so typing never round-trips.
+  // Re-rank server-side when the use case changes, or when the user asks to see
+  // unvetted uploaders (that one has to round-trip — the gateway does the
+  // filtering, and we deliberately don't keep a copy of its allowlist).
+  // search/sort/fit stay client-side, so typing never round-trips.
   useEffect(() => {
     const ac = new AbortController();
     setLoading(true);
     fetchRef
-      .current({ useCase, limit: 24 }, ac.signal)
+      .current({ useCase, limit: 24, ...(showUnverified ? { trusted: false } : {}) }, ac.signal)
       .then((d) => {
         setData(d);
         setError(null);
@@ -60,9 +67,10 @@ export function Recommended({ models, live, busy, onPull, onLoad, onUnload, fetc
       })
       .finally(() => setLoading(false));
     return () => ac.abort();
-  }, [useCase]);
+  }, [useCase, showUnverified]);
 
   const installedIds = useMemo(() => new Set((models ?? []).map((m) => m.id)), [models]);
+  const hidden = data?.catalog?.untrustedHidden ?? 0;
 
   const shown = useMemo(() => {
     const list = filterSuggestions(data?.results ?? [], { search, fitOnly });
@@ -88,9 +96,9 @@ export function Recommended({ models, live, busy, onPull, onLoad, onUnload, fetc
           <div className="sub">
             {data ? (
               <>
-                {data.system.backend} · {data.system.cores ? `${data.system.cores} cores · ` : ""}
-                {fmtGb(data.system.ramAvailableGb)} free
-                {data.system.bandwidthGbs ? ` · ${Math.round(data.system.bandwidthGbs)} GB/s` : ""}
+                {data.system.backend} · {data.system.cpuCores ? `${data.system.cpuCores} cores · ` : ""}
+                {fmtGb(data.system.availableRamGb)} free
+                {data.system.memoryBandwidthGbs ? ` · ${Math.round(data.system.memoryBandwidthGbs)} GB/s` : ""}
                 {data.catalog?.source === "seed" && <span className="reco-stale"> · offline catalog (curated seed only)</span>}
               </>
             ) : (
@@ -136,6 +144,27 @@ export function Recommended({ models, live, busy, onPull, onLoad, onUnload, fetc
           Couldn't rank models for this machine — {error}. Is <code>maya serve</code> running?
         </div>
       )}
+
+      {/* A filter the user can't see is a filter they can't overrule. The gateway
+          withholds picks from uploaders it doesn't vet; say how many, and let
+          them be shown deliberately — never silently, and never by default. */}
+      {!showUnverified && hidden > 0 && (
+        <div className="reco-hidden">
+          {hidden} {hidden === 1 ? "model" : "models"} hidden — published by uploaders Maya doesn't vet.{" "}
+          <button className="linkish" onClick={() => setShowUnverified(true)}>
+            Show them anyway
+          </button>
+        </div>
+      )}
+      {showUnverified && (
+        <div className="reco-warn" role="alert">
+          Showing unverified uploaders. <strong>Download &amp; serve</strong> fetches that account's binary and runs it — check the
+          publisher on each card first.{" "}
+          <button className="linkish" onClick={() => setShowUnverified(false)}>
+            Hide them
+          </button>
+        </div>
+      )}
       {loading && !data && <div className="empty">Detecting your hardware and ranking models…</div>}
       {data && !shown.length && (
         <div className="empty">
@@ -150,6 +179,8 @@ export function Recommended({ models, live, busy, onPull, onLoad, onUnload, fetc
           const runnable = isRunnable(s);
           const name = s.name;
           const isBusy = busy === name;
+          const pullSource = pullSourceFor(s);
+          const publisher = publisherOf(s);
           return (
             <article key={name} className="reco-card">
               <header className="reco-card-head">
@@ -166,6 +197,22 @@ export function Recommended({ models, live, busy, onPull, onLoad, onUnload, fetc
                 {s.provider}
                 {s.isMoe && <span className="reco-tag" title="mixture of experts — fewer active params per token">MoE</span>}
                 {s.arch && <span className="reco-tag">{s.arch}</span>}
+                {/* Says what we don't know, never what the model is. Maya cannot
+                    trace this artifact to an upstream release — which is a gap in
+                    OUR knowledge, not a defect in the model. It may be excellent. */}
+                {s.verified === false && (
+                  <span
+                    className="reco-unverified"
+                    title="Maya can't trace this build back to an upstream release, so it isn't scored on reputation — only on what we can measure. It may still be very good; we just can't vouch for it."
+                  >
+                    unverified lineage
+                  </span>
+                )}
+                {publisher && (
+                  <span className="reco-pub" title={`Download & serve fetches this binary from huggingface.co/${publisher}`}>
+                    by {publisher}
+                  </span>
+                )}
               </div>
 
               <dl className="reco-meta">
@@ -207,13 +254,25 @@ export function Recommended({ models, live, busy, onPull, onLoad, onUnload, fetc
 
               {s.reasons?.length ? <div className="reco-why">{s.reasons.join(" · ")}</div> : null}
 
+              {/* Fit is scored against the machine's memory, not whatever is free this
+                  second (that would reshuffle the list every reload). So a "perfect"
+                  pick can still exceed free RAM right now — and the runtime guardrail
+                  will refuse to load it. Say so here rather than let Serve fail. */}
+              {tightNow(s, data?.system) && (
+                <div className="reco-tight" title="Ranking uses your machine's total memory; loading needs it free right now.">
+                  needs {fmtGb(s.requiredGb)} — only {fmtGb(data!.system.availableRamGb)} free right now
+                </div>
+              )}
+
               <footer className="reco-actions">
                 {!runnable ? (
                   <span className="reco-note" title={s.sources.mlx ? "the gateway serves GGUF via llama-server; there is no MLX serving path yet" : badge.hint}>
-                    {s.fitLevel === "no_fit" ? `needs ${fmtGb(s.requiredGb)} — more than this machine has` : "no GGUF build — not runnable here"}
+                    {s.fitLevel === "no_fit"
+                      ? `needs ${fmtGb(s.requiredGb)} — more than this machine has`
+                      : (s.notRunnableReason ?? "no GGUF build — not runnable here")}
                   </span>
                 ) : !installed ? (
-                  <button className="act" disabled={isBusy} onClick={() => onPull(s.sources.gguf!, name)}>
+                  <button className="act" disabled={isBusy || !pullSource} onClick={() => pullSource && onPull(pullSource, name)}>
                     {isBusy ? "…" : "Download & serve"}
                   </button>
                 ) : (

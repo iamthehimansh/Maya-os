@@ -9,6 +9,7 @@ import {
   fmtTps,
   getSuggestions,
   isRunnable,
+  pullSourceFor,
   sortSuggestions,
   systemLabel,
 } from "./hwfit";
@@ -95,6 +96,31 @@ describe("isRunnable", () => {
     expect(isRunnable(model({ name: "tight", fitLevel: "too_tight" }))).toBe(true);
     expect(fits(model({ name: "tight", fitLevel: "too_tight" }))).toBe(false); // but fitOnly hides it
   });
+
+  it("defers to the gateway's `runnable` when it sends one", () => {
+    // The server knows what `pullModel` accepts; our GGUF rule is the fallback.
+    expect(isRunnable(model({ name: "mlx", sources: { gguf: null, mlx: "mlx-community/x" }, runnable: true }))).toBe(true);
+    expect(isRunnable(model({ name: "vetoed", runnable: false }))).toBe(false);
+  });
+});
+
+describe("pullSourceFor", () => {
+  it("pulls the GGUF while llama.cpp is the only backend", () => {
+    expect(pullSourceFor(model({ name: "q" }))).toMatch(/\.gguf$/);
+  });
+
+  // `RuntimeBackend` in core is already `'llama.cpp' | 'mlx'`, and only
+  // backends/llamacpp.ts exists. When the MLX backend lands, the gateway will
+  // start marking MLX picks runnable — and the Download button must pull the
+  // MLX repo, not hand `pullModel` the null gguf source it used to.
+  it("pulls the MLX repo once the server resolves a pick as MLX", () => {
+    const mlx = model({ name: "m", format: "mlx", sources: { gguf: null, mlx: "hf:mlx-community/Qwen2.5-Coder-7B-4bit" }, runnable: true });
+    expect(pullSourceFor(mlx)).toBe("hf:mlx-community/Qwen2.5-Coder-7B-4bit");
+  });
+
+  it("is null when nothing resolved, so the button disables instead of pulling `null`", () => {
+    expect(pullSourceFor(model({ name: "none", sources: { gguf: null, mlx: null } }))).toBeNull();
+  });
 });
 
 describe("formatters", () => {
@@ -105,7 +131,19 @@ describe("formatters", () => {
     expect(fmtParams(7.6)).toBe("7.6B");
     expect(fmtCtx(32768)).toBe("32K ctx");
     expect(fmtCtx(512)).toBe("512 ctx");
-    expect(systemLabel({ chip: "Apple M4 Pro", backend: "metal", ramTotalGb: 16, ramAvailableGb: 9.2 })).toBe("Apple M4 Pro, 16GB");
+    expect(systemLabel({ chip: "Apple M4 Pro", backend: "metal", cpuCores: 12, totalRamGb: 16, availableRamGb: 9.2 })).toBe(
+      "Apple M4 Pro, 16GB",
+    );
+  });
+
+  // A field the server didn't send used to reach `.toFixed()` and take the whole
+  // Models tab down with a TypeError. Missing data must degrade, not crash.
+  it("renders an em dash instead of throwing when a number is missing", () => {
+    expect(fmtGb(undefined)).toBe("—");
+    expect(fmtTps(undefined)).toBe("—");
+    expect(fmtParams(undefined)).toBe("—");
+    expect(fmtCtx(undefined)).toBe("—");
+    expect(systemLabel({ chip: "Apple M4 Pro", backend: "metal", cpuCores: 12 } as never)).toBe("Apple M4 Pro");
   });
 });
 

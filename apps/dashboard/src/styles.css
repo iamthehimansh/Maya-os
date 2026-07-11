@@ -185,6 +185,12 @@ button.act.primary:disabled, .act.primary:disabled { opacity: 0.5; cursor: defau
 .reco-score-bar .fill { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--accent); }
 .reco-score-num { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-secondary); min-width: 22px; text-align: right; }
 .reco-why { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+.reco-tight { font-size: 11px; color: var(--status-warning); line-height: 1.4; }
+.reco-pub { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+.reco-unverified { font-size: 10px; color: var(--status-warning); border: 1px solid var(--status-warning); border-radius: 4px; padding: 0 5px; text-transform: uppercase; letter-spacing: 0.04em; }
+.reco-hidden { font-size: 12px; color: var(--text-secondary); padding: 8px 10px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 6px; }
+.reco-warn { font-size: 12px; color: var(--status-warning); padding: 8px 10px; margin-bottom: 10px; border: 1px solid var(--status-warning); border-radius: 6px; }
+.linkish { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; }
 .reco-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 2px; }
 .reco-note { font-size: 11px; color: var(--text-muted); }
 

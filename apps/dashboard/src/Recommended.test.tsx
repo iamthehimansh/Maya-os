@@ -27,10 +27,10 @@ const model = (over: Partial<Suggestion> & { name: string }): Suggestion => ({
 const SYSTEM: SuggestResponse["system"] = {
   chip: "Apple M4 Pro",
   backend: "metal",
-  cores: 20,
-  ramTotalGb: 16,
-  ramAvailableGb: 9.2,
-  bandwidthGbs: 273,
+  cpuCores: 20,
+  totalRamGb: 16,
+  availableRamGb: 9.2,
+  memoryBandwidthGbs: 273,
 };
 
 /** What the engine should say on a 16 GB Mac: 7B is comfortable, 14B is tight,
@@ -134,6 +134,131 @@ describe("Recommended", () => {
     expect(screen.queryByRole("button", { name: "Download & serve" })).toBeNull();
     expect(screen.getByText("needs 42.0 GB — more than this machine has")).toBeTruthy();
     expect(screen.getByText("no GGUF build — not runnable here")).toBeTruthy();
+  });
+
+  // @hwfit is adding live MLX discovery, so the gateway will start emitting
+  // MLX-only picks with its own verdict (`suggest.ts:enrich()` sets
+  // runnable:false + notRunnableReason). Pin that payload now: an MLX-only
+  // model is real information, but its Download button would hand `pullModel` a
+  // repo with no .gguf, which `download.ts` rejects outright.
+  it("shows the gateway's own reason for an MLX-only pick, and no button", async () => {
+    const reason = "MLX-only — Maya serves GGUF via llama-server today, so this can't be installed yet";
+    render(
+      <Recommended
+        {...props({
+          fetchSuggestions: respond([
+            model({
+              name: "qwen2.5-coder-14b-mlx",
+              displayName: "Qwen2.5-Coder 14B (MLX)",
+              fitLevel: "good",
+              format: "mlx",
+              sources: { gguf: null, mlx: "hf:mlx-community/Qwen2.5-Coder-14B-4bit" },
+              runnable: false,
+              notRunnableReason: reason,
+            }),
+          ]),
+        })}
+      />,
+    );
+    await screen.findByText("Qwen2.5-Coder 14B (MLX)");
+
+    // The server's wording wins over our generic client-side fallback.
+    expect(screen.getByText(reason)).toBeTruthy();
+    expect(screen.queryByText("no GGUF build — not runnable here")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Download & serve" })).toBeNull();
+  });
+
+  // Live HF discovery surfaced runnable picks from accounts nobody has vetted,
+  // each with a working one-click Download pointing at a stranger's binary. The
+  // gateway now gates them by uploader.
+  //
+  // Careful about WHY: we are gating on *provenance*, not on our opinion of the
+  // model. Three of us confidently called these repos "fabricated slop" because
+  // we'd never heard of them — and we were flatly wrong (google/gemma-4-12B-it
+  // is a real Google release with millions of downloads; it postdates our
+  // training). A cutoff is a fact about the reader, not the world. The honest
+  // claim is "we can't vouch for who built this", which stays true either way.
+  //
+  // A gate the user can't see is one they can't overrule, so the panel must say
+  // how many vanished — and only reveal them on a deliberate click.
+  describe("unverified uploaders", () => {
+    const withHidden = (n: number) =>
+      vi.fn().mockResolvedValue({
+        system: SYSTEM,
+        catalog: { source: "hf+seed", count: 25, untrustedHidden: n },
+        useCase: "coding",
+        results: RESULTS,
+      } as SuggestResponse);
+
+    it("says how many were withheld, instead of hiding them silently", async () => {
+      render(<Recommended {...props({ fetchSuggestions: withHidden(11) })} />);
+      expect(await screen.findByText(/11 models hidden — published by uploaders Maya doesn't vet/)).toBeTruthy();
+    });
+
+    it("says nothing when the gateway withheld nothing", async () => {
+      render(<Recommended {...props({ fetchSuggestions: withHidden(0) })} />);
+      await screen.findByText("Recommended for your Apple M4 Pro, 16GB");
+      expect(screen.queryByText(/hidden/)).toBeNull();
+    });
+
+    it("asks the gateway for them only after a deliberate click, and warns while they show", async () => {
+      const fetchSuggestions = withHidden(11);
+      render(<Recommended {...props({ fetchSuggestions })} />);
+      await screen.findByText(/11 models hidden/);
+
+      // Closed by default: the first request must not opt out of the gate.
+      expect(fetchSuggestions.mock.calls[0]![0]).not.toHaveProperty("trusted");
+
+      fireEvent.click(screen.getByRole("button", { name: "Show them anyway" }));
+
+      // Only now do we ask for the unvetted set — the gateway does the filtering;
+      // we deliberately keep no copy of its allowlist to drift from.
+      await waitFor(() => expect(fetchSuggestions.mock.calls[1]![0]).toMatchObject({ trusted: false }));
+      expect(await screen.findByText(/Showing unverified uploaders/)).toBeTruthy();
+    });
+  });
+
+  // The engine demotes unverified models but still SHOWS them, and the moment
+  // their uploader is allowlisted they get a working Download button. A demoted
+  // model that looks identical to a real one is still a trap, so the card says
+  // so. Badge only on an explicit `false` — absent means the server doesn't send
+  // the flag yet, and we badge nothing rather than guess.
+  describe("unverified lineage badge", () => {
+    it("badges a pick the engine could not vouch for", async () => {
+      render(
+        <Recommended
+          {...props({
+            fetchSuggestions: respond([
+              model({ name: "qwopus3.5-9b-coder", displayName: "Qwopus3.5 9B", verified: false, score: 85.3 }),
+            ]),
+          })}
+        />,
+      );
+      const title = await screen.findByText("Qwopus3.5 9B");
+      expect(within(title.closest("article")!).getByText("unverified lineage")).toBeTruthy();
+    });
+
+    it("does not badge a verified model, nor one where the server omitted the flag", async () => {
+      render(
+        <Recommended
+          {...props({
+            fetchSuggestions: respond([
+              model({ name: "qwen2.5-coder-7b", displayName: "Qwen2.5-Coder 7B", verified: true }),
+              model({ name: "legacy-7b", displayName: "Legacy 7B" }), // flag absent
+            ]),
+          })}
+        />,
+      );
+      await screen.findByText("Qwen2.5-Coder 7B");
+      expect(screen.queryByText("unverified lineage")).toBeNull();
+    });
+  });
+
+  it("names the publisher on the card — you should know whose binary you're about to run", async () => {
+    render(<Recommended {...props()} />);
+    await screen.findByText("Qwen2.5-Coder 7B");
+    // sources.gguf is `hf:Qwen/…` in the fixture.
+    expect(screen.getAllByText("by Qwen").length).toBeGreaterThan(0);
   });
 
   it("filters to what actually fits", async () => {
