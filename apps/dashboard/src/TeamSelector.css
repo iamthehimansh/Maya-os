@@ -1,0 +1,75 @@
+/* Team/channel selector — custom dropdown (search + paginated finished list).
+   Every color routes through a role token from styles.css, so it themes with the
+   rest of the app in both light and dark. */
+
+.tsel { position: relative; display: inline-block; }
+
+.tsel-trigger {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 260px; font: inherit; font-size: 13px;
+  padding: 4px 8px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--surface-0);
+  color: var(--text-primary); cursor: pointer;
+}
+.tsel-trigger:hover { border-color: var(--accent); }
+.tsel-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tsel-suffix { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.tsel-caret { font-size: 10px; color: var(--text-muted); margin-left: 2px; }
+.tsel-dot { color: var(--status-good); font-size: 9px; line-height: 1; }
+
+.tsel-panel {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+  width: 320px; max-height: min(60vh, 420px);
+  display: flex; flex-direction: column;
+  padding: 6px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-1); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+
+.tsel-search {
+  font: inherit; font-size: 13px; width: 100%; box-sizing: border-box;
+  padding: 7px 10px; margin-bottom: 4px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--surface-0); color: var(--text-primary);
+}
+.tsel-search:focus { outline: none; border-color: var(--accent); }
+
+/* The list scrolls INSIDE the panel — the panel never grows past the viewport. */
+.tsel-list { flex: 1; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
+
+.tsel-row { display: flex; align-items: center; gap: 2px; margin: 0; border-radius: 7px; }
+.tsel-row.active { background: var(--accent-soft); }
+
+.tsel-pick {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px;
+  font: inherit; font-size: 13px; text-align: left;
+  padding: 7px 8px; border: none; border-radius: 7px;
+  background: none; color: var(--text-primary); cursor: pointer;
+}
+.tsel-row.done .tsel-pick { color: var(--text-secondary); }
+.tsel-mark { width: 12px; flex: none; color: var(--accent); font-size: 11px; }
+.tsel-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tsel-tag { margin-left: auto; flex: none; font-size: 11px; color: var(--text-muted); }
+.tsel-row.new .tsel-pick { font-weight: 600; }
+
+.tsel-archive {
+  flex: none; font: inherit; font-size: 11px; padding: 4px 6px;
+  border: none; border-radius: 6px; background: none;
+  color: var(--text-muted); cursor: pointer; opacity: 0;
+}
+.tsel-row:hover .tsel-archive, .tsel-row.active .tsel-archive { opacity: 1; }
+.tsel-archive:hover { background: var(--surface-3); color: var(--status-critical); }
+
+.tsel-none { padding: 10px 8px; font-size: 12px; color: var(--text-muted); }
+
+.tsel-pager {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--border);
+}
+.tsel-page {
+  font: inherit; font-size: 12px; padding: 4px 9px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--surface-0); color: var(--text-secondary); cursor: pointer;
+}
+.tsel-page:hover:not(:disabled) { border-color: var(--accent); color: var(--text-primary); }
+.tsel-page:disabled { opacity: 0.4; cursor: default; }
+.tsel-count { font-size: 11px; color: var(--text-muted); }

@@ -4,6 +4,7 @@ import { highlightMentions, renderMarkdown } from "./md";
 import { AgentSetupForm, newAgentDraft, toSpawnInput, draftReady, type AgentDraft } from "./AgentSetupForm";
 import { TeamBuilder } from "./TeamBuilder";
 import { TerminalPanel } from "./TerminalPanel";
+import { TeamSelector, isLive } from "./TeamSelector";
 import {
   answerRun,
   attachmentUrl,
@@ -225,9 +226,6 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   });
 
   const online = 1 + agents.filter((a) => a.state === "live" || a.state === "working").length;
-  const isLive = (t: Team): boolean => t.live ?? t.state !== "closed";
-  const liveTeams = teamList.filter(isLive);
-  const closedTeams = teamList.filter((t) => !isLive(t));
   // Liveness of the OPEN team comes from the polled list, not the click-time
   // snapshot — a team that drains (or rehydrates) while open updates the badge,
   // the composer, and the send guard within one poll.
@@ -538,40 +536,13 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
       <div className="cchat-main">
         <header className="cchat-head">
           <div className="cchat-title">
-            <select
-              className="cchat-switch"
-              value={openTeam?.id ?? ""}
-              onChange={(e) => switchTeam(e.target.value)}
-              title="Switch between the front door and any team"
-            >
-              <option value="">＋ New chat (front door)</option>
-              {/* A team we just closed+archived is gone from the list but its
-                  channel stays open as history — keep it selectable so the
-                  switcher's value still matches (no blank dropdown). */}
-              {openTeam && !teamList.some((t) => t.id === openTeam.id) && (
-                <option value={openTeam.id} style={{ color: "var(--text-muted)" }}>
-                  {openTeam.name} {archived ? "(archived)" : ""}
-                </option>
-              )}
-              {liveTeams.length > 0 && (
-                <optgroup label="Live teams">
-                  {liveTeams.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              {closedTeams.length > 0 && (
-                <optgroup label="Finished teams">
-                  {closedTeams.slice(0, 40).map((t) => (
-                    <option key={t.id} value={t.id} style={{ color: "var(--text-muted)" }}>
-                      {t.name} (finished)
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-            </select>
+            <TeamSelector
+              teams={teamList}
+              openTeam={openTeam}
+              archived={archived}
+              onSelect={switchTeam}
+              onArchive={(id) => void archiveTeam(id)}
+            />
             {openTeam ? (
               <>
                 <strong>{openTeam.name}</strong>
