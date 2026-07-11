@@ -25,8 +25,9 @@ import "./SoloView.css";
  * composes with the same endpoints team-chat uses.
  */
 
-const AGENT_TYPES = ["claude-code", "codex", "opencode"] as const;
-type AgentType = (typeof AGENT_TYPES)[number];
+// Single source of truth — a second copy here would silently drift out of sync
+// with the Type picker every other spawn surface uses.
+import { AGENT_TYPES, AGENT_TYPE_LABELS, type AgentType } from "./AgentSetupForm";
 interface Session {
   teamId: string;
   channelId: string;
@@ -244,7 +245,7 @@ export function SoloView(): React.JSX.Element {
               <select value={type} onChange={(e) => setType(e.target.value as AgentType)}>
                 {AGENT_TYPES.map((t) => (
                   <option key={t} value={t}>
-                    {t}
+                    {AGENT_TYPE_LABELS[t]}
                   </option>
                 ))}
               </select>

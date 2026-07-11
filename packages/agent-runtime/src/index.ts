@@ -9,10 +9,12 @@
 import type { AgentAdapter, AgentHandle, AgentSpawnSpec } from '@maya-ai/core';
 import { ClaudeCodeAdapter, type ClaudeCodeAdapterOptions } from './adapters/claude-code.js';
 import { CodexAdapter, type CodexAdapterOptions } from './adapters/codex.js';
+import { MayacAdapter, type MayacAdapterOptions } from './adapters/mayac.js';
 import { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencode.js';
 
 export { ClaudeCodeAdapter, type ClaudeCodeAdapterOptions, listCldzProfiles } from './adapters/claude-code.js';
 export { CodexAdapter, type CodexAdapterOptions } from './adapters/codex.js';
+export { MayacAdapter, type MayacAdapterOptions, type MayacProvider } from './adapters/mayac.js';
 export { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencode.js';
 export { AgentBusBridge, type BusBridgeOptions, type AttachOptions } from './bus-bridge.js';
 export { EventLog } from './events.js';
@@ -29,6 +31,8 @@ export class AgentRuntime {
   constructor(opts: AgentRuntimeOptions) {
     this.register(new ClaudeCodeAdapter({ gatewayBaseUrl: opts.gatewayBaseUrl }));
     this.register(new CodexAdapter({ gatewayBaseUrl: opts.gatewayBaseUrl }));
+    // maya code — Maya's own harness (@maya-os/code) as a first-class agent type.
+    this.register(new MayacAdapter({ gatewayBaseUrl: opts.gatewayBaseUrl }));
     this.register(new OpenCodeAdapter({ gatewayBaseUrl: opts.gatewayBaseUrl }));
   }
 

@@ -27,7 +27,7 @@ import type { ModelId } from "./models.js";
  */
 export interface AgentSpec {
   handle: string; // "@backend", "@qa" — unique within the team
-  type: AdapterId; // "claude-code" | "codex" | "opencode"
+  type: AdapterId; // "claude-code" | "codex" | "opencode" | "mayac" (maya code)
   model: ModelId; // served via the gateway; prefer toolCalling=true for workers
   cwd: string; // working directory
   role?: "lead" | "worker"; // default "worker"; exactly one "lead" per team
@@ -37,10 +37,16 @@ export interface AgentSpec {
    * Opus/Sonnet) instead of the local gateway. The profile NAME only (e.g.
    * "god"); credentials are resolved server-side and never leave the machine. */
   cldzProfile?: string;
-  /** Run the agent as INTERACTIVE claude in a real PTY (the actual Claude TUI,
-   * watchable live in the dashboard terminal) instead of headless stream-json.
-   * Messages are typed into the terminal; chat output flows via the outbox file. */
+  /** Run the agent's NATIVE interactive TUI in a real PTY (watchable live in the
+   * dashboard terminal) instead of the headless one-shot path. Messages are typed
+   * into the terminal; chat output flows via the outbox file. Supported by
+   * "claude-code" and "mayac" — the two types with a real TUI. */
   pty?: boolean;
+  /** Run the agent on the OWNER's own subscription login instead of the Maya
+   * gateway (adapter-side seam, same as cldzProfile): `claude login` creds for
+   * "claude-code", `codex login` for "codex", and for "mayac" its own
+   * `--auth subscription` resolution (~/.claude or ~/.codex, per provider). */
+  auth?: "claude-subscription" | "codex-subscription" | "mayac-subscription";
 }
 
 /** A team = one lead + N workers, all persistent + parallel, sharing a channel. */

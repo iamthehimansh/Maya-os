@@ -1,12 +1,13 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getModels, getCldzProfiles, type CatalogEntry, type CldzProfile } from "./api";
-import { renderMarkdown } from "./md";
+import { highlightMentions, renderMarkdown } from "./md";
 import { AgentSetupForm, newAgentDraft, toSpawnInput, draftReady, type AgentDraft } from "./AgentSetupForm";
 import { TeamBuilder } from "./TeamBuilder";
 import { TerminalPanel } from "./TerminalPanel";
 import {
   answerRun,
   attachmentUrl,
+  closeTeam,
   createTeam,
   deleteTeam,
   drainTeam,
@@ -93,8 +94,15 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   const [killConfirm, setKillConfirm] = useState<string | null>(null); // rail: agent awaiting inline kill-confirm
   const [killing, setKilling] = useState<string | null>(null); // rail: kill request in flight
   const [pendingAtts, setPendingAtts] = useState<PendingAtt[]>([]); // composer attachment chips
+  const [closeConfirm, setCloseConfirm] = useState(false); // header: close+archive awaiting inline confirm
+  const [closing, setClosing] = useState(false); // close+archive request in flight
+  const [archived, setArchived] = useState(false); // this channel was just closed → read-only history
+  const [mentionOpen, setMentionOpen] = useState(false); // @-autocomplete dropdown visible
+  const [mentionQuery, setMentionQuery] = useState(""); // partial word after the '@'
+  const [mentionIndex, setMentionIndex] = useState(0); // highlighted suggestion
   const attKey = useRef(1);
   const fileInput = useRef<HTMLInputElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const nextId = useRef(1);
   const unsub = useRef<() => void>(() => {});
   const agentPoll = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -134,6 +142,11 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     setKillConfirm(null);
     setKilling(null);
     setPendingAtts([]); // uploads belong to the OLD team's store — don't carry them over
+    setCloseConfirm(false);
+    setClosing(false);
+    setArchived(false); // a fresh channel starts from its real liveness, not the old close
+    setMentionOpen(false);
+    setDraft(""); // the composer belongs to the OLD channel — don't carry a half-typed line over
     lastSeq.current = 0;
     pinnedToBottom.current = true;
     if (chanPoll.current) {
@@ -193,6 +206,17 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     return [...set];
   }, [msgs]);
 
+  // KNOWN team handles for @mention highlighting — the rail roster + the lead +
+  // whoever's actually spoken. Matching against this set (not a blanket @word)
+  // keeps stray emails/typos from being styled as mentions. Chat-only.
+  const knownHandles = useMemo(() => {
+    const s = new Set<string>([LEAD]);
+    for (const a of agents) s.add(a.handle);
+    for (const h of handles) s.add(h);
+    return [...s];
+  }, [agents, handles]);
+  const renderChat = (text: string): string => highlightMentions(renderMarkdown(text), knownHandles);
+
   const shown = msgs.filter((m) => {
     if (m.who === "system") return false; // manager housekeeping — not part of the conversation
     if (filter === "All") return true;
@@ -208,7 +232,98 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   // snapshot — a team that drains (or rehydrates) while open updates the badge,
   // the composer, and the send guard within one poll.
   const polledOpen = openTeam ? teamList.find((t) => t.id === openTeam.id) : undefined;
-  const openLive = openTeam ? (polledOpen ? isLive(polledOpen) : openTeam.live) : false;
+  // `archived` wins: once WE close+archive the open team it vanishes from the
+  // polled list (deleted), so `polledOpen` would be undefined and we'd fall back
+  // to the stale click-time `openTeam.live === true`. Force read-only instead.
+  const openLive = !archived && openTeam ? (polledOpen ? isLive(polledOpen) : openTeam.live) : false;
+
+  // @-autocomplete candidates: the team's agent handles (same source as the rail),
+  // filtered by whatever's typed after the '@'. On a live team an "all" broadcast
+  // pseudo-handle leads the list — posting undirected wakes every agent's monitor.
+  const mentionCandidates = useMemo(() => {
+    const q = mentionQuery.toLowerCase();
+    const base: string[] = [];
+    if (openTeam && openLive && agents.length > 0) base.push("all");
+    for (const a of agents) base.push(a.handle.replace(/^@/, ""));
+    const seen = new Set<string>();
+    return base.filter((h) => {
+      const k = h.toLowerCase();
+      if (seen.has(k) || !k.includes(q)) return false;
+      seen.add(k);
+      return true;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents, openTeam?.id, openLive, mentionQuery]);
+
+  // Auto-grow the composer as it fills; CSS caps the height (then it scrolls).
+  useEffect(() => {
+    const ta = composer.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, 140)}px`;
+  }, [draft]);
+
+  // Recompute the @-autocomplete from the caret: open when it sits right after an
+  // '@' + optional partial word; close otherwise. Called on every edit/caret move.
+  function syncMention(el: HTMLTextAreaElement): void {
+    if (composerDisabled) {
+      setMentionOpen(false);
+      return;
+    }
+    const upto = el.value.slice(0, el.selectionStart ?? el.value.length);
+    const m = /(^|\s)@([\w-]*)$/.exec(upto);
+    if (m) {
+      setMentionQuery(m[2] ?? "");
+      setMentionIndex(0);
+      setMentionOpen(true);
+    } else {
+      setMentionOpen(false);
+    }
+  }
+
+  // Replace the "@partial" before the caret with "@handle " (never sends).
+  function insertMention(handle: string): void {
+    const el = composer.current;
+    const caret = el ? el.selectionStart ?? draft.length : draft.length;
+    const before = draft.slice(0, caret);
+    const after = draft.slice(caret);
+    const m = /(^|\s)@([\w-]*)$/.exec(before);
+    const start = m ? before.length - (m[2]?.length ?? 0) - 1 : before.length; // index of '@'
+    const insert = `@${handle} `;
+    setDraft(before.slice(0, start) + insert + after);
+    setMentionOpen(false);
+    const pos = start + insert.length;
+    requestAnimationFrame(() => {
+      const ta = composer.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(pos, pos);
+      }
+    });
+  }
+
+  // Close + archive a LIVE team in one call (drain then archive). The channel
+  // stays open as read-only history — its bus messages outlive the team row.
+  async function closeAndArchive(id: string): Promise<void> {
+    if (closing) return;
+    setClosing(true);
+    setError(null);
+    try {
+      await closeTeam(id);
+      setArchived(true);
+      setCloseConfirm(false);
+      setAgents([]);
+      if (agentPoll.current) {
+        clearInterval(agentPoll.current);
+        agentPoll.current = null;
+      }
+      refreshTeams();
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setClosing(false);
+    }
+  }
 
   function push(m: Omit<Msg, "id">): void {
     setMsgs((prev) => [...prev, { ...m, id: nextId.current++ }]);
@@ -349,8 +464,10 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
       setError(null);
       setSending(true);
       // Only a mention of a REAL team agent counts — "foo@gmail.com" or a typo'd
-      // handle must still fall back to waking the lead, or nobody replies.
-      const mentionsSomeone = agents.some((a) => mentionsAgent(text, a.handle));
+      // handle must still fall back to waking the lead, or nobody replies. "@all"
+      // is a broadcast: leave it undirected so EVERY agent's monitor picks it up.
+      const broadcast = /(^|\s)@all(?![\w-])/i.test(text);
+      const mentionsSomeone = broadcast || agents.some((a) => mentionsAgent(text, a.handle));
       const wake = mentionsSomeone ? undefined : (agents.find((a) => a.role === "lead") ?? agents[0])?.handle;
       void sendTeamMessage(openTeam.id, text, wake, true, readyAtts)
         .catch((e) => setError(String(e instanceof Error ? e.message : e)))
@@ -411,7 +528,9 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   const placeholder = openTeam
     ? openLive
       ? `Message ${openTeam.name}… (type @handle to wake an agent)`
-      : "This team is finished — read-only"
+      : archived
+        ? "This team is archived — read-only history"
+        : "This team is finished — read-only"
     : "Message the channel…";
 
   return (
@@ -426,6 +545,14 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
               title="Switch between the front door and any team"
             >
               <option value="">＋ New chat (front door)</option>
+              {/* A team we just closed+archived is gone from the list but its
+                  channel stays open as history — keep it selectable so the
+                  switcher's value still matches (no blank dropdown). */}
+              {openTeam && !teamList.some((t) => t.id === openTeam.id) && (
+                <option value={openTeam.id} style={{ color: "var(--text-muted)" }}>
+                  {openTeam.name} {archived ? "(archived)" : ""}
+                </option>
+              )}
               {liveTeams.length > 0 && (
                 <optgroup label="Live teams">
                   {liveTeams.map((t) => (
@@ -449,7 +576,32 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
               <>
                 <strong>{openTeam.name}</strong>
                 {openLive ? (
-                  <span className="cchat-live">● LIVE</span>
+                  <>
+                    <span className="cchat-live">● LIVE</span>
+                    {!closeConfirm ? (
+                      <button
+                        className="act cchat-close"
+                        onClick={() => setCloseConfirm(true)}
+                        title="Stop every agent on this team and archive it"
+                      >
+                        Close &amp; archive
+                      </button>
+                    ) : (
+                      <span className="cchat-close-confirm" role="alertdialog" aria-label={`Confirm closing ${openTeam.name}`}>
+                        <span>
+                          Stop all agents &amp; archive <strong>{openTeam.name}</strong>?
+                        </span>
+                        <button className="act cchat-close-yes" disabled={closing} onClick={() => void closeAndArchive(openTeam.id)}>
+                          {closing ? "Closing…" : "Yes, close it"}
+                        </button>
+                        <button className="act" disabled={closing} onClick={() => setCloseConfirm(false)}>
+                          Cancel
+                        </button>
+                      </span>
+                    )}
+                  </>
+                ) : archived ? (
+                  <span className="chip cchat-archived">📦 archived</span>
                 ) : (
                   <>
                     <span className="chip">read-only</span>
@@ -541,7 +693,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
                     <span className="cmsg-head">
                       <span className="cavatar you">You</span>
                     </span>
-                    <div className="cmsg-text md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }} />
+                    <div className="cmsg-text md" dangerouslySetInnerHTML={{ __html: renderChat(m.text) }} />
                     {openTeam && (m.attachments?.length ?? 0) > 0 && (
                       <div className="cmsg-atts">
                         {m.attachments!.map((a) => (
@@ -561,7 +713,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
                       <span className={`chandle h-${hashColor(m.handle)}`}>{m.handle}</span>
                       {m.kind && <span className="ckind">{ICON[m.kind]}</span>}
                     </span>
-                    <div className="cmsg-text md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }} />
+                    <div className="cmsg-text md" dangerouslySetInnerHTML={{ __html: renderChat(m.text) }} />
                     {openTeam && (m.attachments?.length ?? 0) > 0 && (
                       <div className="cmsg-atts">
                         {m.attachments!.map((a) => (
@@ -617,19 +769,74 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
               ))}
             </div>
           )}
-          <textarea
-            rows={1}
-            value={draft}
-            disabled={composerDisabled}
-            placeholder={placeholder}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                send();
-              }
-            }}
-          />
+          <div className="cchat-input-wrap">
+            {mentionOpen && mentionCandidates.length > 0 && (
+              <ul className="cmention-menu" role="listbox" aria-label="Mention an agent">
+                {mentionCandidates.map((h, i) => (
+                  <li key={h} role="option" aria-selected={i === mentionIndex}>
+                    <button
+                      type="button"
+                      className={`cmention-item ${i === mentionIndex ? "active" : ""}`}
+                      // mousedown, not click: keep focus on the textarea so the caret restore lands
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        insertMention(h);
+                      }}
+                      onMouseEnter={() => setMentionIndex(i)}
+                    >
+                      <span className="cmention-at">@{h}</span>
+                      {h === "all" && <span className="cmention-hint">everyone on the channel</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <textarea
+              ref={composer}
+              rows={1}
+              value={draft}
+              disabled={composerDisabled}
+              placeholder={placeholder}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                syncMention(e.currentTarget);
+              }}
+              onClick={(e) => syncMention(e.currentTarget)}
+              onKeyUp={(e) => {
+                if (mentionOpen && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) return;
+                syncMention(e.currentTarget);
+              }}
+              onBlur={() => setMentionOpen(false)}
+              onKeyDown={(e) => {
+                if (mentionOpen && mentionCandidates.length > 0) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setMentionIndex((i) => (i + 1) % mentionCandidates.length);
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setMentionIndex((i) => (i - 1 + mentionCandidates.length) % mentionCandidates.length);
+                    return;
+                  }
+                  if (e.key === "Enter" || e.key === "Tab") {
+                    e.preventDefault(); // accept the suggestion — never sends on this Enter
+                    insertMention(mentionCandidates[mentionIndex] ?? mentionCandidates[0]!);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setMentionOpen(false);
+                    return;
+                  }
+                }
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+            />
+          </div>
           <div className="cchat-composer-foot">
             <span className="cchat-foot-left">
               {openTeam && openLive && (
@@ -645,7 +852,13 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
                   </button>
                 </>
               )}
-              <span className="muted">💡 Tip: type @handle to wake a specific agent</span>
+              <span
+                className="cchat-md-hint"
+                title="Markdown: **bold**, *italic*, `code`, ``` fences ```, - lists, [links](url), tables"
+              >
+                Markdown supported
+              </span>
+              {openTeam && openLive && <span className="muted cchat-tip-mention">· @ to mention</span>}
             </span>
             <button className="csend" onClick={send} disabled={sendDisabled} aria-label="Send">
               ↑

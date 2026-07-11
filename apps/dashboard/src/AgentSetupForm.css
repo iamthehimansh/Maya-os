@@ -34,6 +34,9 @@
   padding: 0;
 }
 
+/* "Run as" explainer under the form (cldz profile / native subscription note). */
+.agent-setup .muted.small { font-size: 11px; line-height: 1.45; margin: 0; }
+
 /* TeamBuilder: the stack of lead + member setup cards + actions. */
 .team-builder { display: flex; flex-direction: column; gap: 12px; }
 .team-builder-actions { display: flex; gap: 10px; align-items: center; }

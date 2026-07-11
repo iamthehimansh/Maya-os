@@ -438,15 +438,25 @@ export class TeamManager {
       const outboxPath = join(ioDir, 'out.jsonl');
       writeFileSync(inboxPath, '');
       writeFileSync(outboxPath, '');
-      const isPty = spec.type === 'claude-code' && spec.pty !== false;
-      const walkieHint = isPty
+      // A standing agent must stay ALIVE between turns, which only a native TUI in
+      // a pty does: claude-code and mayac (maya code) both have one. codex/opencode
+      // are headless one-shot, so they keep the piped path.
+      const isPty = (spec.type === 'claude-code' || spec.type === 'mayac') && spec.pty !== false;
+      // Self-driven means the agent runs /maya-team and pumps its OWN inbox. That
+      // skill installs as a CLAUDE CODE slash command (~/.claude/commands), which
+      // mayac cannot see — it has no slash commands at all, only `.skills/`
+      // discovery. So a mayac pty agent is BRIDGE-driven instead: the bridge types
+      // directed messages into its TUI, and it replies via the outbox file (the
+      // generic walkie hint below spells that contract out).
+      const selfDriven = isPty && spec.type === 'claude-code';
+      const walkieHint = selfDriven
         ? // Self-driven (himansh's walkie-talkie architecture): the agent runs
           // /maya-team — ITS OWN Monitor on the inbox wakes it per message
           // (untagged included); the bridge never types messages in.
           `You are a persistent agent on a Maya team channel. Run /maya-team NOW to start your loop — it wires your Monitor to $MAYA_AGENT_INBOX (every channel message wakes you) and teaches you to speak via $MAYA_AGENT_OUTBOX. If the command is unavailable: read new JSON lines from ${inboxPath} on a 1s Monitor loop and append replies to ${outboxPath} (plain text or {"text":"…","to":"@who"}). Keep running forever.`
         : `You are a persistent agent on a shared team channel. INCOMING: new channel messages are appended as JSON lines to the file at ${inboxPath} — read it to see who said what. OUTGOING: to say ANYTHING on the channel, APPEND a line to the file at ${outboxPath} (plain text, or a JSON line {"text":"…","to":"@who"} to direct it) — the system posts it for you. You may append several lines over time (e.g. with sleep between them) and message on your own initiative; you don't have to wait to be asked. Use your Read/Write/Bash tools on those two absolute paths. Keep running.`;
       const systemPrompt = [spec.systemPrompt, walkieHint].filter(Boolean).join('\n\n');
-      if (isPty) ensureMayaTeamSkill(); // idempotent — /maya-team available to the spawned TUI
+      if (selfDriven) ensureMayaTeamSkill(); // idempotent — /maya-team available to the spawned TUI
       // Standing LEAD agents get Maya's own MCP server (spawn_agent/send_to/…)
       // via a per-team --mcp-config file, when the serve enabled it.
       let mcpConfigPath: string | undefined;
@@ -475,6 +485,12 @@ export class TeamManager {
           ),
         );
       }
+      // Native-subscription auth (the owner's own `claude login` / `codex login`
+      // creds) rides adapter-side via options.auth — the same seam as
+      // cldzProfile. Carried on the AgentSpec as an optional field the adapters
+      // read; threaded here so a standing agent can run on the owner's own
+      // subscription instead of the local gateway.
+      const auth = spec.auth;
       const spawnSpec: AgentSpawnSpec = {
         adapter: spec.type as AgentSpawnSpec['adapter'],
         model: spec.model as AgentSpawnSpec['model'],
@@ -487,9 +503,11 @@ export class TeamManager {
           ...(spec.allowedTools !== undefined ? { allowedTools: spec.allowedTools } : {}),
           ...(systemPrompt ? { appendSystemPrompt: systemPrompt } : {}),
           ...(spec.cldzProfile !== undefined ? { cldzProfile: spec.cldzProfile } : {}),
-          // PTY is the DEFAULT for standing agents (himansh: the real Claude
-          // TUI, watchable live) — opt OUT with pty:false, never opt in.
-          ...(spec.pty !== false ? { pty: true } : {}),
+          ...(auth !== undefined ? { auth } : {}),
+          // PTY is the DEFAULT for standing agents on the types that HAVE a TUI
+          // (himansh: the real Claude/mayac TUI, watchable live) — opt OUT with
+          // pty:false, never opt in.
+          ...(isPty ? { pty: true } : {}),
           ...(mcpConfigPath !== undefined ? { mcpConfig: mcpConfigPath } : {}),
         },
       };
@@ -506,9 +524,10 @@ export class TeamManager {
         label: handle,
         inboxPath,
         outboxPath,
-        // pty agents run /maya-team: their own Monitor reads the inbox (tagged
-        // AND untagged) — the bridge must not also type messages in.
-        ...(isPty ? { selfDriven: true } : {}),
+        // Self-driven agents run /maya-team: their own Monitor reads the inbox
+        // (tagged AND untagged) — the bridge must not also type messages in.
+        // A mayac pty agent is NOT self-driven, so the bridge types for it.
+        ...(selfDriven ? { selfDriven: true } : {}),
       });
       if (lt.draining || !this.live.has(teamId)) {
         await this.opts.bridge.detach(agentHandle.id).catch(() => {});
@@ -516,8 +535,11 @@ export class TeamManager {
         throw new Error(`team ${teamId} drained while spawning ${handle}`);
       }
       // Bootstrap the self-driven loop: the ONE line the bridge ever types into
-      // a pty agent — /maya-team starts its Monitor + outbox discipline.
-      if (isPty) void adapter.send(agentHandle.id, '/maya-team').catch(() => {});
+      // a claude-code pty agent — /maya-team starts its Monitor + outbox
+      // discipline. A mayac agent gets its inbox/outbox contract from the persona
+      // preamble the adapter types as turn 0 (mayac has no --append-system-prompt),
+      // so there is nothing to bootstrap here.
+      if (selfDriven) void adapter.send(agentHandle.id, '/maya-team').catch(() => {});
       const entry: PersistentAgent = {
         spec,
         agentId: agentHandle.id,

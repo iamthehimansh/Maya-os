@@ -10,10 +10,12 @@ import { MayaClient, type MayaClientConfig } from "./client.js";
  * MAYA_TEAM_ID. Each tool is a thin proxy to Maya's own HTTP APIs.
  */
 
-// Standing (interactive) spawns only work on claude-code today — the codex and
-// opencode adapters are one-shot and throw on a prompt-less spawn, so offering
-// them here would just hand the lead a guaranteed "spawn failed: … one-shot".
-const AGENT_TYPES = ["claude-code"] as const;
+// Standing (interactive) spawns need an agent that STAYS ALIVE between turns —
+// i.e. a native TUI we can run in a pty. claude-code and mayac (maya code) both
+// have one; the codex and opencode adapters are one-shot and throw on a
+// prompt-less spawn, so offering them here would just hand the lead a guaranteed
+// "spawn failed: … one-shot".
+const AGENT_TYPES = ["claude-code", "mayac"] as const;
 
 const text = (s: string): { content: Array<{ type: "text"; text: string }> } => ({ content: [{ type: "text", text: s }] });
 
@@ -25,7 +27,7 @@ export function buildServer(client: MayaClient): McpServer {
     "Spawn a new agent into your team. Pick a tool-capable model for workers that must edit files.",
     {
       handle: z.string().describe("addressable handle, e.g. @backend"),
-      type: z.enum(AGENT_TYPES).describe('coding-agent type ("claude-code" only — codex/opencode cannot yet run as standing teammates)'),
+      type: z.enum(AGENT_TYPES).describe('coding-agent type: "claude-code", or "mayac" (maya code — Maya\'s own harness). codex/opencode cannot yet run as standing teammates.'),
       model: z.string().describe('gateway ModelId, e.g. "local/qwen2.5-7b-instruct"'),
       cwd: z.string().describe("working directory for the agent"),
       role: z.enum(["lead", "worker"]).optional(),
@@ -33,6 +35,10 @@ export function buildServer(client: MayaClient): McpServer {
       allowedTools: z.array(z.string()).optional().describe("tool scope YOU grant this agent, e.g. [\"Write\",\"Edit\",\"Bash\"]"),
       allowAllTools: z.boolean().optional().describe("give the agent ALL tools (full freedom) — overrides allowedTools"),
       cldzProfile: z.string().optional().describe('auth profile for REAL cloud Claude (e.g. "ak" = pay-per-use API key) — use with an anthropic/* model when local models are too weak'),
+      auth: z
+        .enum(["claude-subscription", "codex-subscription", "mayac-subscription"])
+        .optional()
+        .describe('run on the OWNER\'s own logged-in subscription instead of the local gateway ("claude-subscription" = their `claude login`; "codex-subscription" = their `codex login`; "mayac-subscription" = maya code on those same Claude credentials)'),
     },
     async (args) => {
       try {
@@ -47,6 +53,9 @@ export function buildServer(client: MayaClient): McpServer {
           // Real cloud Claude always tool-calls; skip the local-model capability
           // gate (it can't measure a cloud model) so the spawn isn't refused.
           ...(args.cldzProfile ? { cldzProfile: args.cldzProfile, allowNonToolCalling: true } : {}),
+          // Native subscription (owner's own login) — threaded to the adapter
+          // (options.auth) so it uses those creds, not the gateway.
+          ...(args.auth ? { auth: args.auth } : {}),
         };
         const r = await client.spawnAgent(agent);
         return text(`spawned ${args.handle} (${args.type} on ${args.model}) — ${JSON.stringify(r)}`);

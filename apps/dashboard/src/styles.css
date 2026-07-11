@@ -197,6 +197,11 @@ button.act.primary:disabled, .act.primary:disabled { opacity: 0.5; cursor: defau
 .cmsg-text.md li { margin: 2px 0; }
 .cmsg-text.md h1, .cmsg-text.md h2, .cmsg-text.md h3 { font-size: 15px; margin: 8px 0 4px; }
 .cmsg-text.md a { color: inherit; text-decoration: underline; }
+/* @mention pill (chat-only, added after renderMarkdown by highlightMentions). */
+.cmsg-text.md .mention { display: inline-block; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 0 4px; white-space: nowrap; }
+/* On "my" (accent-bg) bubbles the accent-on-accent-soft pill would vanish — flip
+   to a translucent light chip so it stays legible on the blue background. */
+.cmsg.you .cmsg-text.md .mention { color: #fff; background: rgba(255, 255, 255, 0.24); }
 .cmsg-text.md code { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; background: rgba(127, 127, 127, 0.16); padding: 1px 5px; border-radius: 4px; }
 .cmsg-text.md pre { background: rgba(127, 127, 127, 0.13); padding: 8px 10px; border-radius: 8px; overflow-x: auto; }
 .cmsg-text.md pre code { background: none; padding: 0; }
@@ -218,7 +223,26 @@ button.act.primary:disabled, .act.primary:disabled { opacity: 0.5; cursor: defau
 .cchat-composer textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-0); color: var(--text-primary); resize: none; max-height: 140px; }
 .cchat-composer textarea::placeholder { color: var(--text-muted); }
 .cchat-composer-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; gap: 10px; }
-.cchat-foot-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cchat-foot-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.cchat-md-hint { font-size: 12px; color: var(--text-muted); cursor: help; border-bottom: 1px dotted var(--border); }
+.cchat-tip-mention { white-space: nowrap; }
+
+/* ── @-autocomplete: dropdown floats just above the composer ── */
+.cchat-input-wrap { position: relative; }
+.cmention-menu { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); margin: 0; padding: 4px; list-style: none; max-height: 220px; overflow-y: auto; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18); z-index: 20; }
+.cmention-menu li { margin: 0; }
+.cmention-item { display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left; font: inherit; font-size: 13px; padding: 7px 10px; border: none; border-radius: 7px; background: none; color: var(--text-primary); cursor: pointer; }
+.cmention-item.active, .cmention-item:hover { background: var(--accent-soft); }
+.cmention-at { font-weight: 600; color: var(--accent); }
+.cmention-hint { font-size: 11px; color: var(--text-muted); }
+
+/* ── Header: Close & archive a LIVE team (inline two-step confirm) ── */
+.cchat-close { color: var(--text-secondary); }
+.cchat-close:hover { border-color: var(--status-critical); color: var(--status-critical); }
+.cchat-close-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); padding: 4px 8px; border: 1px solid var(--status-critical); border-radius: 8px; background: var(--surface-0); }
+.cchat-close-yes { border-color: var(--status-critical); color: var(--status-critical); }
+.cchat-close-yes:hover { border-color: var(--status-critical); }
+.cchat-archived { color: var(--text-secondary); border: 1px solid var(--border); border-radius: 999px; padding: 1px 9px; font-size: 11px; }
 
 /* ── Chat attachments (composer chips + bubble links) ── */
 .catt-pick { font: inherit; font-size: 15px; background: var(--surface-0); border: 1px solid var(--border); border-radius: 8px; color: var(--text-secondary); cursor: pointer; padding: 3px 9px; flex: none; }

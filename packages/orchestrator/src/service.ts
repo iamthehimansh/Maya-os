@@ -18,8 +18,9 @@
  * configured (same pattern as the gateway's control API).
  */
 
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { createReadStream, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -121,6 +122,51 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
   // secrets) — powers the web "run this agent on <profile>" picker.
   app.get('/api/cldz/profiles', (c) => c.json(listCldzProfiles()));
 
+  // Which "Run as" identities the owner can spawn an agent under: native Claude
+  // Code subscription (own `claude login`), native Codex/ChatGPT subscription
+  // (own `codex login`), plus the cldz saved profiles. `available` = the owner
+  // is actually logged in on THIS machine. `claude login` stores its token at
+  // ~/.claude/.credentials.json (Linux / when the OS keychain is unavailable) OR
+  // the macOS login keychain ("Claude Code-credentials"); `codex login` stores
+  // ~/.codex/auth.json.
+  const claudeCredsPath = join(homedir(), '.claude', '.credentials.json');
+  const codexAuthPath = join(homedir(), '.codex', 'auth.json');
+  const claudeSubscriptionAvailable = (): boolean => {
+    try {
+      if (existsSync(claudeCredsPath)) return true;
+    } catch {
+      /* fs error — fall through to the keychain probe */
+    }
+    if (process.platform === 'darwin') {
+      try {
+        // Metadata-only lookup (no -w): confirms the login item EXISTS without
+        // reading the secret, so it never triggers a keychain-unlock prompt.
+        execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials'], {
+          stdio: 'ignore',
+          timeout: 2000,
+        });
+        return true;
+      } catch {
+        /* not stored in the keychain either → not logged in */
+      }
+    }
+    return false;
+  };
+  const codexSubscriptionAvailable = (): boolean => {
+    try {
+      return existsSync(codexAuthPath);
+    } catch {
+      return false;
+    }
+  };
+  app.get('/api/auth-methods', (c) =>
+    c.json({
+      claudeSubscription: { available: claudeSubscriptionAvailable() },
+      codexSubscription: { available: codexSubscriptionAvailable() },
+      cldzProfiles: listCldzProfiles(),
+    }),
+  );
+
   // Standing agents on a team (the persistent Lead + workers). This is the
   // contract 02's MCP `list_agents`/`spawn_agent`/`stop_agent` call.
   app.get('/api/teams/:id/agents', (c) => c.json(teams.listAgents(c.req.param('id'))));
@@ -135,6 +181,12 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     const agent = (raw && typeof raw === 'object' && 'agent' in raw ? raw.agent : raw) as AgentSpec | undefined;
     if (!agent?.handle || !agent.type || !agent.model || !agent.cwd) {
       return c.json({ error: 'agent { handle, type, model, cwd } required' }, 400);
+    }
+    // Optional native-subscription auth — the frontend's "Run as → Claude/Codex
+    // subscription" choice. Rides on the agent spec into spawnAgent (options.auth).
+    const auth = (agent as { auth?: unknown }).auth;
+    if (auth !== undefined && auth !== 'claude-subscription' && auth !== 'codex-subscription') {
+      return c.json({ error: 'auth must be "claude-subscription" or "codex-subscription"' }, 400);
     }
     try {
       return c.json(await teams.spawnAgent(id, agent), 201);
@@ -409,6 +461,18 @@ export async function startOrchestratorService(opts: OrchestratorServiceOptions)
     if (teams.isLive(id)) return c.json({ error: 'team is live — drain it first' }, 409);
     if (!db.team(id)) return c.json({ error: 'unknown team' }, 404);
     db.deleteTeam(id);
+    return c.json({ ok: true });
+  });
+
+  // Close + archive in one call: DRAIN a live team (stop/kill its agents — the
+  // SAME internal drain the /drain route uses) THEN archive it (the SAME
+  // hard-delete DELETE /api/teams/:id uses). A non-live team is just archived.
+  // Lets a live channel be closed AND removed from history in a single call.
+  app.post('/api/teams/:id/close', async (c) => {
+    const id = c.req.param('id');
+    if (!db.team(id)) return c.json({ error: 'unknown team' }, 404);
+    if (teams.isLive(id)) await teams.drain(id, 'closed via API'); // stops/kills agents, marks it closed
+    db.deleteTeam(id); // archive — identical to DELETE /api/teams/:id
     return c.json({ ok: true });
   });
   app.get('/api/agents', (c) => c.json(db.agentsAll()));

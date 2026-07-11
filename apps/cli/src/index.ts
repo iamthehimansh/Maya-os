@@ -695,6 +695,13 @@ export async function main(argv: string[]): Promise<void> {
       });
     });
     console.log(`claude        ${claudeVersion !== null ? `✓ ${claudeVersion} (agents/teams enabled)` : "✗ npm install -g @anthropic-ai/claude-code (agents/teams need it)"}`);
+    // maya code (mayac) — Maya's OWN harness, selectable as an agent type. Probe
+    // with --help: mayac has no --version, and an unknown flag falls through to
+    // the interactive TUI, which would hang doctor forever.
+    const mayacOk = await new Promise<boolean>((resolve) => {
+      execFile("mayac", ["--help"], { timeout: 10_000 }, (err, stdout) => resolve(!err && /mayac/i.test(stdout)));
+    });
+    console.log(`mayac         ${mayacOk ? "✓ installed (maya code agents enabled)" : "✗ npm install -g @maya-os/code (needed for \"maya code\" agents)"}`);
     console.log(`ram           ${gb(ram.availableBytes)} available of ${gb(ram.totalBytes)} (guardrail floor ${gb(defaultGuardrails().minFreeRamBytes)})`);
     console.log(`models dir    ${cfg.modelsDir} (${scanModels(cfg.modelsDir).length} installed)`);
     const sy = await detectSwitchyard();

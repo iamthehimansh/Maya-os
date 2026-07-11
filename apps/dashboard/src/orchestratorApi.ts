@@ -120,6 +120,49 @@ export async function createTeam(input: CreateTeamInput): Promise<Team> {
 export const drainTeam = (teamId: string): Promise<Response> =>
   fetch(`/api/teams/${encodeURIComponent(teamId)}/drain`, { method: "POST" });
 
+/** Close + archive a LIVE team in one call: the server DRAINS it (stops every
+ * agent) then archives it (deletes the row/tasks/specs), leaving the bus channel
+ * as read-only history. Throws with the server's error text on failure. */
+export async function closeTeam(teamId: string): Promise<void> {
+  const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}/close`, { method: "POST" });
+  if (!res.ok) throw new Error(errText(await res.json().catch(() => null), res.status));
+}
+
+/** A cldz profile as reported by /api/auth-methods (safe view — no secrets). */
+export interface CldzProfileLite {
+  name: string;
+  type: string;
+  default: boolean;
+}
+
+/** What "Run as" options are available: the two native subscriptions (detected
+ * by whether the user is actually logged in) plus the cldz profiles. Served by
+ * the orchestrator at GET /api/auth-methods. */
+export interface AuthMethods {
+  claudeSubscription: { available: boolean };
+  codexSubscription: { available: boolean };
+  cldzProfiles: CldzProfileLite[];
+}
+
+const EMPTY_AUTH_METHODS: AuthMethods = {
+  claudeSubscription: { available: false },
+  codexSubscription: { available: false },
+  cldzProfiles: [],
+};
+
+/** Fetch the available auth methods. Never throws — on any error it resolves to
+ * the empty shape so the spawn form still works (gateway + cldz paths stay live,
+ * both subscriptions just read as "(not logged in)"). */
+export const getAuthMethods = (): Promise<AuthMethods> =>
+  fetch("/api/auth-methods")
+    .then((r) => (r.ok ? (r.json() as Promise<AuthMethods>) : EMPTY_AUTH_METHODS))
+    .then((m) => ({
+      claudeSubscription: { available: m?.claudeSubscription?.available === true },
+      codexSubscription: { available: m?.codexSubscription?.available === true },
+      cldzProfiles: Array.isArray(m?.cldzProfiles) ? m.cldzProfiles : [],
+    }))
+    .catch(() => EMPTY_AUTH_METHODS);
+
 /** Archive a finished team — deletes the team row, its tasks, and its standing-agent
  * specs. The server answers 409 while the team is still live. */
 export async function deleteTeam(teamId: string): Promise<void> {
@@ -133,14 +176,23 @@ export async function deleteTeam(teamId: string): Promise<void> {
 
 export interface SpawnAgentInput {
   handle: string; // "@builder" — unique within the team
-  type: "claude-code" | "codex" | "opencode";
+  type: "claude-code" | "codex" | "opencode" | "mayac";
   model: string; // gateway ModelId, e.g. "local/qwen2.5-7b-instruct"
   cwd: string;
   role?: "lead" | "worker";
   systemPrompt?: string;
   allowedTools?: string[]; // omitted or ["*"] = all tools (full freedom)
   cldzProfile?: string; // cldz auth profile — run on real Claude/Codex (see api.getCldzProfiles)
-  /** Run a real interactive PTY (the actual Claude TUI) instead of headless -p.
+  /** Run this agent on the user's OWN logged-in subscription instead of the local
+   * gateway or a cldz profile:
+   *  • 'claude-subscription' — native `claude` CLI on ~/.claude/.credentials.json
+   *  • 'codex-subscription'  — native `codex` CLI on its own logged-in auth
+   *  • 'mayac-subscription'  — maya code's `--auth subscription`, which resolves
+   *    the SAME ~/.claude credentials (or ~/.codex on its openai provider)
+   * Mutually exclusive with cldzProfile; both absent ⇒ local gateway (default). */
+  auth?: "claude-subscription" | "codex-subscription" | "mayac-subscription";
+  /** Run a real interactive PTY (the native TUI) instead of the headless path.
+   * Supported by claude-code and mayac — the two types with a TUI.
    * Omitted = server default (PTY for standing agents); false opts out. */
   pty?: boolean;
 }

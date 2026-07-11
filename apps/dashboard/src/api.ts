@@ -63,6 +63,12 @@ export const getCldzProfiles = (): Promise<CldzProfile[]> =>
     .then((r) => (r.ok ? (r.json() as Promise<CldzProfile[]>) : []))
     .catch(() => []);
 
+/** Available "Run as" auth methods (native subscriptions + cldz profiles) — the
+ * spawn form reads this to offer Claude/Codex-subscription options and mark ones
+ * the user isn't logged into. Implemented against the orchestrator; re-exported
+ * here so the setup form imports every "run as" client from one module. */
+export { getAuthMethods, type AuthMethods, type CldzProfileLite } from "./orchestratorApi";
+
 /** Real models available for a cldz profile, listed via the provider's models
  * API with that profile's credential (server-side). Empty on any error. */
 export interface CloudModel {

@@ -187,12 +187,13 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   }
 
   /** The model name the claude CLI should see. Gateway-backed agents pass the
-   * Maya ModelId verbatim (the gateway resolves it); a cldz-profile agent talks
-   * to the REAL Anthropic API, where `anthropic/claude-x` is not a model —
-   * strip the provider prefix or the TUI errors "model may not exist". */
+   * Maya ModelId verbatim (the gateway resolves it); a cldz-profile agent AND a
+   * native-subscription agent (auth:'claude-subscription') both talk to the REAL
+   * Anthropic API, where `anthropic/claude-x` is not a model — strip the
+   * provider prefix or the TUI errors "model may not exist". */
   private cliModel(spec: AgentSpawnSpec): string {
     const cldz = spec.options?.['cldzProfile'];
-    const onRealApi = cldz !== undefined && cldz !== false;
+    const onRealApi = (cldz !== undefined && cldz !== false) || spec.options?.['auth'] === 'claude-subscription';
     return onRealApi && spec.model.startsWith('anthropic/') ? spec.model.slice('anthropic/'.length) : spec.model;
   }
 
@@ -254,16 +255,37 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // CLAUDECODE / AI_AGENT session-identity vars — inheriting them makes the
     // spawned worker behave as a NESTED child (observed: it silently declined
     // to write the file). Strip that identity so behavior is reproducible.
+    // Native subscription auth (auth:'claude-subscription'): the spawned agent
+    // uses the OWNER's OWN `claude login` credentials — stored at
+    // ~/.claude/.credentials.json (Linux / when the OS keychain is unavailable)
+    // or the macOS login keychain ("Claude Code-credentials") — NOT the gateway
+    // and NOT a cldz profile. In that mode the launcher's CLAUDE_CODE_OAUTH_TOKEN
+    // must SURVIVE the strip below (it IS the subscription credential, not a
+    // nested-session identity marker).
+    const claudeSubscription = spec.options?.['auth'] === 'claude-subscription';
     const env: Record<string, string | undefined> = {};
     for (const [k, v] of Object.entries(process.env)) {
-      if (/^CLAUDE_CODE_/.test(k) || k === 'CLAUDECODE' || k === 'AI_AGENT' || k === 'CLAUDE_EFFORT') continue;
+      if (k === 'CLAUDE_CODE_OAUTH_TOKEN') {
+        if (!claudeSubscription) continue; // gateway/cldz: drop the launcher's personal token
+      } else if (/^CLAUDE_CODE_/.test(k) || k === 'CLAUDECODE' || k === 'AI_AGENT' || k === 'CLAUDE_EFFORT') {
+        continue;
+      }
       env[k] = v;
     }
     // Auth (set AFTER the strip loop so a profile's CLAUDE_CODE_OAUTH_TOKEN
-    // survives): a cldz saved profile → the OWNER's real Claude (cloud
-    // Opus/Sonnet for work a local model can't do), else Maya's local gateway.
+    // survives): native subscription → the owner's own login; a cldz saved
+    // profile → the OWNER's real Claude (cloud Opus/Sonnet for work a local
+    // model can't do); else Maya's local gateway.
     const cldzProfile = spec.options?.['cldzProfile'];
-    if (cldzProfile !== undefined && cldzProfile !== false) {
+    if (claudeSubscription) {
+      // Do NOT inject a dummy key and do NOT point at the gateway — let the
+      // native CLI resolve its own subscription auth. Drop any gateway pointer /
+      // dummy key inherited from the launcher's env that would shadow it (a
+      // caller-supplied spec.env still wins, applied last).
+      delete env['ANTHROPIC_BASE_URL'];
+      delete env['ANTHROPIC_API_KEY'];
+      Object.assign(env, spec.env, { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' });
+    } else if (cldzProfile !== undefined && cldzProfile !== false) {
       Object.assign(env, spec.env, cldzProfileEnv(typeof cldzProfile === 'string' ? cldzProfile : undefined), {
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       });

@@ -12,8 +12,9 @@
 
 import type { ModelId } from './models.js';
 
-/** Open set: built-ins are literals, plugins register their own ids. */
-export type AdapterId = 'claude-code' | 'codex' | 'opencode' | (string & {});
+/** Open set: built-ins are literals, plugins register their own ids.
+ * `mayac` = maya code, Maya's OWN harness (@maya-os/code). */
+export type AdapterId = 'claude-code' | 'codex' | 'opencode' | 'mayac' | (string & {});
 
 export type AgentState =
   | 'spawning'

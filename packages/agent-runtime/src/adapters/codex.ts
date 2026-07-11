@@ -76,20 +76,25 @@ export class CodexAdapter implements AgentAdapter {
     if (spec.prompt === undefined) {
       throw new Error('codex adapter is one-shot in this slice — spawn with a prompt (resume lands later)');
     }
-    const base = this.opts.gatewayBaseUrl.replace(/\/$/, '');
-    const args = [
-      'exec',
-      '--json',
-      '--skip-git-repo-check',
-      '-c', `model_providers.maya.name=Maya`,
-      '-c', `model_providers.maya.base_url=${base}/v1`,
-      '-c', `model_providers.maya.env_key=MAYA_API_KEY`,
-      // Codex >=0.142 speaks ONLY the Responses API (wire_api=chat was
-      // removed); the gateway serves /v1/responses via Switchyard translation.
-      '-c', `model_providers.maya.wire_api=responses`,
-      '-c', `model_provider=maya`,
-      '-m', spec.model,
-    ];
+    // Native subscription (auth:'codex-subscription'): let `codex` use the
+    // OWNER's OWN logged-in ChatGPT/Codex creds (~/.codex/auth.json) via its
+    // DEFAULT provider — DON'T inject the Maya gateway provider at all, so its
+    // native auth is untouched.
+    const codexSubscription = spec.options?.['auth'] === 'codex-subscription';
+    const args = ['exec', '--json', '--skip-git-repo-check'];
+    if (!codexSubscription) {
+      const base = this.opts.gatewayBaseUrl.replace(/\/$/, '');
+      args.push(
+        '-c', `model_providers.maya.name=Maya`,
+        '-c', `model_providers.maya.base_url=${base}/v1`,
+        '-c', `model_providers.maya.env_key=MAYA_API_KEY`,
+        // Codex >=0.142 speaks ONLY the Responses API (wire_api=chat was
+        // removed); the gateway serves /v1/responses via Switchyard translation.
+        '-c', `model_providers.maya.wire_api=responses`,
+        '-c', `model_provider=maya`,
+      );
+    }
+    args.push('-m', spec.model);
     if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--dangerously-bypass-approvals-and-sandbox');
     args.push(spec.prompt);
     return args;
@@ -108,10 +113,16 @@ export class CodexAdapter implements AgentAdapter {
       if (/^CLAUDE_CODE_/.test(k) || k === 'CLAUDECODE' || k === 'AI_AGENT' || k === 'CLAUDE_EFFORT') continue;
       env[k] = v;
     }
-    Object.assign(env, spec.env, {
-      // Dummy key satisfies the provider's env_key against the localhost gateway.
-      MAYA_API_KEY: spec.env?.['MAYA_API_KEY'] ?? 'maya-gateway',
-    });
+    // Native subscription: don't inject the gateway dummy key or override any
+    // native auth env — `codex` reads the owner's ~/.codex/auth.json itself.
+    if (spec.options?.['auth'] === 'codex-subscription') {
+      Object.assign(env, spec.env);
+    } else {
+      Object.assign(env, spec.env, {
+        // Dummy key satisfies the provider's env_key against the localhost gateway.
+        MAYA_API_KEY: spec.env?.['MAYA_API_KEY'] ?? 'maya-gateway',
+      });
+    }
 
     const cwd = resolveCwd(spec.cwd); // expand ~ + ensure the dir exists (else spawn ENOENTs)
     const child = spawn(this.bin(), this.buildArgs(spec), {

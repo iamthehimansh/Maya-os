@@ -6,7 +6,7 @@
 
 export interface AgentSpecInput {
   handle: string;
-  type: "claude-code" | "codex" | "opencode";
+  type: "claude-code" | "codex" | "opencode" | "mayac";
   model: string;
   cwd: string;
   role?: "lead" | "worker";
