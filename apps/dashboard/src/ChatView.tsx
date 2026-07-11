@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getModels, getCldzProfiles, type CatalogEntry, type CldzProfile } from "./api";
 import { renderMarkdown } from "./md";
 import { AgentSetupForm, newAgentDraft, toSpawnInput, draftReady, type AgentDraft } from "./AgentSetupForm";
@@ -100,7 +100,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
   const agentPoll = useRef<ReturnType<typeof setInterval> | null>(null);
   const chanPoll = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastSeq = useRef(0); // channel poll cursor — only fetch messages newer than this
-  const nearBottom = useRef(true); // is the reader at (or near) the end of the stream?
+  const pinnedToBottom = useRef(true); // is the reader at (or near) the end of the stream?
   const stream = useRef<HTMLDivElement>(null);
 
   // Mount: model catalog (for the front-door setup) + the team list (for the switcher).
@@ -135,7 +135,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     setKilling(null);
     setPendingAtts([]); // uploads belong to the OLD team's store — don't carry them over
     lastSeq.current = 0;
-    nearBottom.current = true;
+    pinnedToBottom.current = true;
     if (chanPoll.current) {
       clearInterval(chanPoll.current);
       chanPoll.current = null;
@@ -169,11 +169,20 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openTeam?.channelId]);
 
-  // Follow new messages only when the reader is already at the bottom — never
-  // yank someone who scrolled up to read history. `msgs` only changes when
-  // content actually arrived (the poll bails on empty diffs).
-  useEffect(() => {
-    if (nearBottom.current) stream.current?.scrollTo({ top: stream.current.scrollHeight, behavior: "smooth" });
+  // Follow new messages ONLY when the reader is pinned to the bottom — never
+  // yank someone who scrolled up to read history. Two things make this robust
+  // where the old version failed: (1) useLayoutEffect fires BEFORE paint, so the
+  // jump is atomic and can't race the user's own scroll between paint and effect;
+  // (2) INSTANT (scrollTop=), not smooth — a smooth animation during active
+  // multi-agent chat emits its own scroll events and physically fights an
+  // upward scroll, dragging the reader back down. Only fires when the message
+  // COUNT grew (real new content), never on an unrelated re-render.
+  const prevMsgCount = useRef(0);
+  useLayoutEffect(() => {
+    const el = stream.current;
+    const grew = msgs.length > prevMsgCount.current;
+    prevMsgCount.current = msgs.length;
+    if (el && grew && pinnedToBottom.current) el.scrollTop = el.scrollHeight;
   }, [msgs]);
 
 
@@ -507,7 +516,7 @@ export function ChatView({ openTeam, onOpenChat, onNewChat }: ChatViewProps): Re
           ref={stream}
           onScroll={(e) => {
             const el = e.currentTarget;
-            nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+            pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
           }}
         >
           {shown.length === 0 ? (
