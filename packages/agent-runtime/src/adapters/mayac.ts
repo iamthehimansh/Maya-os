@@ -48,6 +48,7 @@ import type {
 } from '@maya-ai/core';
 import { EventLog } from '../events.js';
 import { resolveCwd } from '../cwd.js';
+import { loadPty } from '../pty.js';
 
 export interface MayacAdapterOptions {
   /** Maya gateway base, e.g. "http://127.0.0.1:4100". Anthropic-compat at the
@@ -392,7 +393,7 @@ export class MayacAdapter implements AgentAdapter {
     env: Record<string, string | undefined>,
   ): Promise<AgentHandle> {
     // Lazy native-module load — keeps agent-runtime import-safe in the bundled CLI.
-    const { spawn: ptySpawn } = await import('node-pty');
+    const { spawn: ptySpawn } = await loadPty();
     const p = ptySpawn(this.ptyBin(), this.buildPtyArgs(spec), {
       name: 'xterm-256color',
       cols: 120,

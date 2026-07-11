@@ -28,6 +28,7 @@ import { homedir } from 'node:os';
 // pty spawn does. (tsup also marks node-pty external so it loads from node_modules.)
 import type { IPty } from 'node-pty';
 import { resolveCwd } from '../cwd.js';
+import { loadPty } from '../pty.js';
 import { join } from 'node:path';
 import type {
   AgentAdapter,
@@ -403,7 +404,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   ): Promise<AgentHandle> {
     this.preTrustWorkspace(cwd ?? spec.cwd);
     // Lazy native-module load — keeps agent-runtime import-safe in the bundled CLI.
-    const { spawn: ptySpawn } = await import('node-pty');
+    const { spawn: ptySpawn } = await loadPty();
     const p = ptySpawn(this.ptyBin(), this.buildPtyArgs(spec), {
       name: 'xterm-256color',
       cols: 120,
