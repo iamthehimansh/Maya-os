@@ -27,6 +27,8 @@ export const KEY = {
   ctrlP: '\x10',
   ctrlN: '\x0e',
   ctrlC: '\x03',
+  /** Ctrl+Space arrives as NUL; Ink surfaces it as ctrl + '`'. */
+  ctrlSpace: '\x00',
   backspace: '\x7f',
 };
 

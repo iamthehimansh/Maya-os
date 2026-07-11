@@ -18,6 +18,8 @@ export interface PickerProps {
   options: readonly PickerOption[];
   /** Index to start highlighted (e.g. the current value). */
   initialIndex?: number;
+  /** Key hint under the list. Defaults to the select/cancel line. */
+  footer?: string;
   onSelect(value: string): void;
   onCancel(): void;
   active?: boolean;
@@ -27,6 +29,7 @@ export function Picker({
   title,
   options,
   initialIndex = 0,
+  footer = '↑/↓ move · enter select · esc cancel',
   onSelect,
   onCancel,
   active = true,
@@ -52,15 +55,17 @@ export function Picker({
       </Text>
       {options.map((opt, i) => {
         const selected = i === idx;
+        // Keyed by index, not value: a registry can return two skills that share
+        // one `owner/repo`, and duplicate keys would drop rows.
         return (
-          <Text key={opt.value} {...(selected ? { color: theme.accent } : {})}>
+          <Text key={i} {...(selected ? { color: theme.accent } : {})}>
             {selected ? '❯ ' : '  '}
             {opt.label}
             {opt.hint ? <Text color={theme.muted}> {opt.hint}</Text> : null}
           </Text>
         );
       })}
-      <Text color={theme.muted}>↑/↓ move · enter select · esc cancel</Text>
+      <Text color={theme.muted}>{footer}</Text>
     </Box>
   );
 }

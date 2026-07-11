@@ -19,10 +19,24 @@ export interface ScrollViewProps {
   /** Number of CONTENT rows (the status row is rendered in addition). */
   height: number;
   scroll: ScrollState;
+  /** Inclusive row range to paint as selected (copy mode). */
+  selection?: { from: number; to: number } | undefined;
+  /** Row the copy cursor sits on — marked with a caret in the gutter. */
+  cursorRow?: number | undefined;
 }
 
-function LineRow({ line }: { line: Line }): React.ReactElement {
+function LineRow({ line, selected, cursor }: { line: Line; selected?: boolean; cursor?: boolean }): React.ReactElement {
   const joined = line.segs.map((s) => s.text).join('');
+  // A selected row is painted inverse end-to-end (blank rows included) so the
+  // selection reads as one contiguous block, the way a terminal's own does.
+  if (selected) {
+    return (
+      <Text>
+        <Text color={theme.accent}>{cursor ? '❯' : ' '}</Text>
+        <Text inverse>{joined.length ? joined : ' '}</Text>
+      </Text>
+    );
+  }
   if (joined.length === 0) return <Text> </Text>;
   return (
     <Text>
@@ -43,7 +57,7 @@ function LineRow({ line }: { line: Line }): React.ReactElement {
   );
 }
 
-export function ScrollView({ lines, height, scroll }: ScrollViewProps): React.ReactElement {
+export function ScrollView({ lines, height, scroll, selection, cursorRow }: ScrollViewProps): React.ReactElement {
   const h = Math.max(1, height);
   const visible = windowSlice(lines, scroll, h);
   const pad = Math.max(0, h - visible.length);
@@ -53,9 +67,18 @@ export function ScrollView({ lines, height, scroll }: ScrollViewProps): React.Re
 
   return (
     <Box flexDirection="column">
-      {visible.map((line, i) => (
-        <LineRow key={scroll.top + i} line={line} />
-      ))}
+      {visible.map((line, i) => {
+        const row = scroll.top + i;
+        const selected = !!selection && row >= selection.from && row <= selection.to;
+        return (
+          <LineRow
+            key={row}
+            line={line}
+            {...(selected ? { selected: true } : {})}
+            {...(row === cursorRow ? { cursor: true } : {})}
+          />
+        );
+      })}
       {Array.from({ length: pad }, (_, i) => (
         <Text key={`pad${i}`}> </Text>
       ))}

@@ -11,8 +11,11 @@ async function typeSeq(stdin: { write(s: string): void }, seqs: string[], each =
 }
 
 describe('/help', () => {
+  // rows: 40 — /help now carries a commands list, the agent-callable tools, and a
+  // keys/copy/mouse section, which is taller than a 24-row window. It scrolls like
+  // any other output (▲ PgUp); the test just wants a window that shows it whole.
   it('lists slash commands and the agent-callable tools', async () => {
-    const { stdin, lastFrame } = renderApp(makeSession(endTurn), { rows: 24 });
+    const { stdin, lastFrame } = renderApp(makeSession(endTurn), { rows: 40 });
     await delay();
     await typeSeq(stdin, ['/help', KEY.enter], 30);
     await delay(60);

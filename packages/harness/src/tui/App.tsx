@@ -57,6 +57,21 @@ import {
 } from './viewport.js';
 import { messagesToEntries } from './transcript.js';
 import { theme, SPINNER_FRAMES } from './theme.js';
+import { createClipboard, type ClipboardWriter } from './clipboard.js';
+import {
+  copyRange,
+  enterCopy,
+  lastAssistantText,
+  linesToText,
+  moveCopy,
+  revealRow,
+  selectAll,
+  toggleAnchor,
+  toolBlockText,
+  transcriptText,
+  type CopyState,
+} from './copy.js';
+import { hitLabel, parseSkillHits } from './skillsSearch.js';
 import {
   type Attachment,
   type FileAttachment,
@@ -119,6 +134,8 @@ export interface AppProps {
   /** Remove an installed skill from `.skills/` (`/skills remove <name>`). */
   skillsRemove?: (name: string) => Promise<string>;
   // ── injectable I/O (tests) ──
+  /** Clipboard sink for copy mode / `/copy` (OSC 52 + pbcopy by default). */
+  copyToClipboard?: ClipboardWriter;
   fetchModels?: typeof defaultFetchModels;
   resolveCred?: (provider: ProviderId, mode: AuthMode) => Promise<Credential>;
   listDir?: DirLister;
@@ -147,12 +164,20 @@ function resolveDroppedPath(p: string, cwd: string): string {
   return isAbsolute(x) ? x : resolvePathJoin(cwd, x);
 }
 
-type PickerKind = 'model' | 'provider' | 'auth' | 'resume';
+type PickerKind = 'model' | 'provider' | 'auth' | 'resume' | 'skill';
 interface PickerState {
   kind: PickerKind;
   loading: boolean;
   options: PickerOption[];
   initialIndex: number;
+}
+
+/** Default clipboard sink — created once so every copy shares the same stdout. */
+const defaultClipboard = createClipboard();
+
+/** Keep a picker hint on one row. */
+function shortHint(s: string, max = 52): string {
+  return s.length <= max ? s : s.slice(0, max - 1) + '…';
 }
 
 const HELP_TEXT = SLASH_COMMANDS.map(
@@ -169,6 +194,16 @@ const AGENT_TOOLS_HELP =
   '  mcp_connect — configure + connect an MCP server live\n' +
   '  skill         — load a discovered skill (SKILL.md) into context on demand\n' +
   '  install_skill — add/search a skills.sh skill the agent needs';
+
+/** Keys — kept to a handful of rows so /help still fits a short terminal. */
+const KEYS_HELP =
+  'keys:  PgUp/PgDn scroll · Esc interrupt/jump · Tab completion\n' +
+  '       Ctrl+P/N focus a tool — →/Enter expand · ← collapse · y copies it\n' +
+  'copy:  Ctrl+Space = COPY MODE — ↑/↓ or j/k move · v select · a all · y copy\n' +
+  '       /copy [last|all|tool|mode] — OSC 52: works fullscreen AND over SSH\n' +
+  'mouse: wheel scrolls; capture blocks native drag-select — so Shift-drag\n' +
+  '       (iTerm2/xterm/kitty) or Option-drag (Terminal.app), or /mouse to stop\n' +
+  '       capturing the mouse entirely.';
 
 const defaultListDir: DirLister = (dir) => {
   return readdirSync(dir).map((name) => {
@@ -202,6 +237,7 @@ export function App(props: AppProps): React.ReactElement {
     skillsAdd,
     skillsSearch,
     skillsRemove,
+    copyToClipboard = defaultClipboard,
     fetchModels = defaultFetchModels,
     resolveCred = (p, m) => resolveAuth(p, m),
     listDir = defaultListDir,
@@ -280,6 +316,16 @@ export function App(props: AppProps): React.ReactElement {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const autoIdRef = useRef<string | null>(null);
   const manualRef = useRef<Set<string>>(new Set());
+  // The last block the user focused, remembered AFTER focus exits: typing `/copy
+  // tool` drops tool focus on the first keystroke, so without this the command
+  // could never see the block it is named for.
+  const lastToolRef = useRef<string | null>(null);
+
+  // ── copy mode + mouse capture ──
+  // Copy mode is NOT a modal: it runs inside the main key handler (below) so it
+  // can move the same viewport the transcript already scrolls.
+  const [copy, setCopy] = useState<CopyState | null>(null);
+  const [mouseOn, setMouseOn] = useState(true);
 
   // ── modals ──
   const [pending, setPending] = useState<PendingPermission | null>(null);
@@ -321,16 +367,21 @@ export function App(props: AppProps): React.ReactElement {
     };
   }, [altScreen]);
 
-  // mouse-wheel reporting (real TTY only): 1000 = button events (incl. wheel),
-  // 1006 = SGR extended coordinates. Off on unmount so the terminal returns to
-  // normal text selection.
+  // Mouse reporting (real TTY only): 1000 = button events (incl. wheel), 1006 =
+  // SGR extended coordinates. We ask for button events ONLY — never 1002/1003
+  // motion tracking — so the terminal still owns click-drag, and the standard
+  // Shift-drag / Option-drag bypass keeps working for native selection.
+  //
+  // Terminals differ on how much they hand over, so `/mouse` flips `mouseOn` and
+  // this effect tears the modes back down: capture off, native selection back,
+  // guaranteed, everywhere. Also off on unmount.
   useEffect(() => {
-    if (!altScreen) return;
+    if (!altScreen || !mouseOn) return;
     process.stdout.write('\x1b[?1000h\x1b[?1006h');
     return () => {
       process.stdout.write('\x1b[?1006l\x1b[?1000l');
     };
-  }, [altScreen]);
+  }, [altScreen, mouseOn]);
 
   // ── rendered line buffer + reconcile scroll on change ──
   const expandedForRender = useMemo(() => {
@@ -490,20 +541,72 @@ export function App(props: AppProps): React.ReactElement {
       setSessionId(id);
       manualRef.current = new Set();
       autoIdRef.current = null;
+      lastToolRef.current = null;
+      setSelectedTool(null);
+      setCopy(null);
       setExpanded(new Set());
       setScroll(scrollToBottom(initialScroll, 0, viewportHeight));
       refreshSnap();
     })();
   }, [store, session, notice, refreshSnap, viewportHeight]);
 
+  // ── copy: one sink, four ways in (copy mode, focused tool, /copy, select-all) ──
+  const doCopy = useCallback(
+    (text: string, what: string) => {
+      if (!text.trim()) { notice('warn', `nothing to copy (${what})`); return; }
+      void (async () => {
+        try {
+          const res = await copyToClipboard(text);
+          const n = text.split('\n').length;
+          if (res.ok) notice('ok', `copied ${n} line${n === 1 ? '' : 's'} — ${what}`);
+          else notice('error', `copy failed: ${res.error ?? 'no clipboard sink available'}`);
+        } catch (err) {
+          notice('error', `copy failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      })();
+    },
+    [copyToClipboard, notice],
+  );
+
+  const openCopyMode = useCallback(() => {
+    if (lines.length === 0) { notice('info', 'nothing to copy yet'); return; }
+    setCopy(enterCopy(scroll, lines.length, viewportHeight));
+  }, [lines.length, scroll, viewportHeight, notice]);
+
+  /** Copy the tool block under Ctrl+P/N focus (falling back to the last one focused,
+   *  then to the newest call) — from the ENTRY, so the copy carries the full output
+   *  rather than the viewport's truncated preview. */
+  const copyFocusedTool = useCallback(() => {
+    const ids = toolIdsOf(entries);
+    const id = selectedTool ?? lastToolRef.current ?? ids[ids.length - 1] ?? null;
+    if (!id) { notice('info', 'no tool call to copy — Ctrl+P / Ctrl+N focuses one'); return; }
+    doCopy(toolBlockText(entries, id), `tool ${id}`);
+  }, [selectedTool, entries, doCopy, notice]);
+
+  const installSkill = useCallback(
+    (ref: string) => {
+      if (!skillsAdd) { notice('error', 'installing skills is not wired in this session'); return; }
+      notice('info', `installing skill ${ref}…`);
+      void (async () => {
+        try {
+          const msg = await skillsAdd(ref);
+          notice('ok', msg || `installed ${ref}`);
+        } catch (err) {
+          notice('error', `skills add failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      })();
+    },
+    [skillsAdd, notice],
+  );
+
   const handleSlash = useCallback((line: string) => {
     const parsed = parseSlash(line);
     if (!parsed) return;
     if ('unknown' in parsed) { notice('error', `unknown command /${parsed.unknown} — try /help`); return; }
     switch (parsed.name) {
-      case 'help': notice('info', `commands:\n${HELP_TEXT}\n\n${AGENT_TOOLS_HELP}\n\nkeys: PgUp/PgDn scroll · Ctrl+P/Ctrl+N focus tool · →/Enter expand · ← collapse · Esc interrupt/exit-focus · Tab accept completion`); break;
+      case 'help': notice('info', `commands:\n${HELP_TEXT}\n\n${AGENT_TOOLS_HELP}\n\n${KEYS_HELP}`); break;
       case 'quit': tasks.killAll(); void cmdHistory.flush(); exit(); break;
-      case 'clear': session.clear(); setEntries([{ kind: 'notice', tone: 'ok', text: 'conversation cleared.' }]); manualRef.current = new Set(); autoIdRef.current = null; setExpanded(new Set()); refreshSnap(); break;
+      case 'clear': session.clear(); setEntries([{ kind: 'notice', tone: 'ok', text: 'conversation cleared.' }]); manualRef.current = new Set(); autoIdRef.current = null; lastToolRef.current = null; setSelectedTool(null); setExpanded(new Set()); refreshSnap(); break;
       case 'yolo': { const next = !gate.autoAllow; gate.setAutoAllow(next); setYolo(next); notice('warn', next ? 'YOLO on — writes/bash auto-approved.' : 'YOLO off — writes/bash will prompt.'); break; }
       case 'model': if (parsed.arg) applyModel(parsed.arg); else openModelPicker(); break;
       case 'provider': if (parsed.arg) applyProvider(parsed.arg); else setPicker({ kind: 'provider', loading: false, options: providerOptions(), initialIndex: 0 }); break;
@@ -631,16 +734,7 @@ export function App(props: AppProps): React.ReactElement {
         if (lower.startsWith('add')) {
           const spec = arg.slice(3).trim();
           if (!spec) { notice('error', 'usage: /skills add <owner/repo>'); break; }
-          if (!skillsAdd) { notice('error', 'installing skills is not wired in this session'); break; }
-          notice('info', `installing skill ${spec}…`);
-          void (async () => {
-            try {
-              const msg = await skillsAdd(spec);
-              notice('ok', msg || `installed ${spec}`);
-            } catch (err) {
-              notice('error', `skills add failed: ${err instanceof Error ? err.message : String(err)}`);
-            }
-          })();
+          installSkill(spec);
         } else if (lower.startsWith('search')) {
           const query = arg.slice(6).trim();
           if (!query) { notice('error', 'usage: /skills search <query>'); break; }
@@ -649,7 +743,21 @@ export function App(props: AppProps): React.ReactElement {
           void (async () => {
             try {
               const msg = await skillsSearch(query);
+              // The plain listing stays — it's how `/skills add <owner/repo>` is
+              // discovered. On top of it, every hit we can parse an install ref
+              // out of becomes a Picker row where Enter installs it directly.
               notice('info', msg || `no results for "${query}"`);
+              const hits = parseSkillHits(msg ?? '');
+              if (hits.length === 0) return;
+              setPicker({
+                kind: 'skill',
+                loading: false,
+                options: hits.map((h) => {
+                  const { label, hint } = hitLabel(h);
+                  return { label, value: h.ref, ...(hint ? { hint: shortHint(hint) } : {}) };
+                }),
+                initialIndex: 0,
+              });
             } catch (err) {
               notice('error', `skills search failed: ${err instanceof Error ? err.message : String(err)}`);
             }
@@ -672,8 +780,28 @@ export function App(props: AppProps): React.ReactElement {
         }
         break;
       }
+      case 'copy': {
+        const what = parsed.arg.trim().toLowerCase();
+        if (what === 'mode') { openCopyMode(); break; }
+        if (what === 'tool') { copyFocusedTool(); break; }
+        if (what === 'all' || what === 'transcript') { doCopy(transcriptText(entries), 'the transcript'); break; }
+        if (what && what !== 'last') { notice('error', 'usage: /copy [last|all|tool|mode]'); break; }
+        doCopy(lastAssistantText(entries), 'the last reply');
+        break;
+      }
+      case 'mouse': {
+        const next = !mouseOn;
+        setMouseOn(next);
+        notice(
+          'ok',
+          next
+            ? 'mouse capture ON — wheel scrolls. Shift-drag / Option-drag to select natively.'
+            : 'mouse capture OFF — native click-drag selection works. PgUp/PgDn still scroll; /mouse to re-enable.',
+        );
+        break;
+      }
     }
-  }, [notice, exit, session, refreshSnap, gate, applyModel, applyProvider, applyAuth, openModelPicker, openResumePicker, doResume, tasks, cmdHistory, cwd, context, runAgent, runWorkflow, mcpStatus, editMemory, mcpAdd, mcpRemove, skillsStatus, skillsAdd, skillsSearch, skillsRemove]);
+  }, [notice, exit, session, refreshSnap, gate, applyModel, applyProvider, applyAuth, openModelPicker, openResumePicker, doResume, tasks, cmdHistory, cwd, context, runAgent, runWorkflow, mcpStatus, editMemory, mcpAdd, mcpRemove, skillsStatus, installSkill, skillsSearch, skillsRemove, entries, doCopy, openCopyMode, copyFocusedTool, mouseOn]);
 
   // ── submit / queue ──
   // `override` lets a caller submit a value other than the live input (e.g. the
@@ -718,6 +846,7 @@ export function App(props: AppProps): React.ReactElement {
     else next = Math.max(0, Math.min(ids.length - 1, cur + dir));
     const id = ids[next]!;
     setSelectedTool(id);
+    lastToolRef.current = id;
     revealTool(id);
   }, [entries, selectedTool, notice, revealTool]);
 
@@ -773,10 +902,48 @@ export function App(props: AppProps): React.ReactElement {
     }
     if (confirmExit) setConfirmExit(false);
 
+    // ── COPY MODE (tmux-style) ──
+    // Owns every key while active, so nothing below can steal j/k/v/y. Movement
+    // drags the cursor; the anchor (set with `v`) is what turns it into a range.
+    if (copy) {
+      const total = lines.length;
+      const page = Math.max(1, viewportHeight - 1);
+      const go = (delta: number) => {
+        const next = moveCopy(copy, delta, total);
+        setCopy(next);
+        setScroll((s) => revealRow(s, next.cursor, total, viewportHeight));
+      };
+      if (key.escape) { setCopy(null); notice('info', 'copy mode: cancelled'); return; }
+      if (key.return || ch === 'y') {
+        const { from, to } = copyRange(copy);
+        const text = linesToText(lines, from, to);
+        const n = to - from + 1;
+        setCopy(null);
+        doCopy(text, `${n} line${n === 1 ? '' : 's'} of transcript`);
+        return;
+      }
+      if (ch === 'v' || ch === ' ') { setCopy(toggleAnchor(copy)); return; }
+      if (ch === 'a') { const all = selectAll(total); setCopy(all); setScroll((s) => revealRow(s, all.cursor, total, viewportHeight)); return; }
+      if (key.upArrow || ch === 'k') { go(-1); return; }
+      if (key.downArrow || ch === 'j') { go(1); return; }
+      if (key.pageUp || (key.ctrl && ch === 'b')) { go(-page); return; }
+      if (key.pageDown || (key.ctrl && ch === 'f')) { go(page); return; }
+      if (ch === 'g') { go(-total); return; }
+      if (ch === 'G') { go(total); return; }
+      return; // swallow everything else — no stray typing into the prompt
+    }
+
+    // ctrl+space enters copy mode (Ink surfaces the NUL byte as ctrl + '`').
+    if (key.ctrl && (ch === '`' || ch === ' ' || ch === '\0')) { openCopyMode(); return; }
+
     // ── paste / drag (Ink delivers a paste or dropped path as one multi-char
     // chunk). A dropped file path → attachment; a big multi-line paste → a
     // collapsed chip; a small paste → inserted verbatim (newlines preserved). ──
     if (ch && ch.length > 1 && !key.ctrl && !key.meta && !ch.includes('\x1b')) {
+      // Anything landing in the prompt leaves tool focus — same as typing. Without
+      // this, focus survived the paste and the next Enter expanded the focused
+      // block instead of submitting what was just pasted.
+      if (selectedTool) setSelectedTool(null);
       const paths = parseDroppedPaths(ch);
       const files = paths
         .map((p) => readAttachment(resolveDroppedPath(p, cwd), attachFs))
@@ -824,6 +991,10 @@ export function App(props: AppProps): React.ReactElement {
 
     // tool focus mode
     if (selectedTool) {
+      if (ch === 'y' && !key.ctrl && !key.meta) { copyFocusedTool(); return; }
+      // A prompt with text in it wins Enter — focus only owns Enter (= expand)
+      // while the prompt is empty, so a half-typed message is never swallowed.
+      if (key.return && input) { setSelectedTool(null); submit(); return; }
       if (key.upArrow) { focusTool(-1); return; }
       if (key.downArrow) { focusTool(1); return; }
       if (key.rightArrow || key.return) { toggleExpandSelected(true); return; }
@@ -896,9 +1067,17 @@ export function App(props: AppProps): React.ReactElement {
   const { before, at, after } = cursorSlices(input, cursor);
   const bgCount = bgTasks.filter((t) => t.status === 'running').length;
 
+  const selection = copy ? copyRange(copy) : undefined;
+
   return (
     <Box flexDirection="column" width={cols}>
-      <ScrollView lines={lines} height={viewportHeight} scroll={scroll} />
+      <ScrollView
+        lines={lines}
+        height={viewportHeight}
+        scroll={scroll}
+        selection={selection}
+        cursorRow={copy ? copy.cursor : undefined}
+      />
 
       <Box marginTop={1}>
         <Header state={snap} {...(contextLimit ? { contextLimit } : {})} yolo={yolo} bgCount={bgCount} />
@@ -919,10 +1098,24 @@ export function App(props: AppProps): React.ReactElement {
             title={pickerTitle(picker.kind)}
             options={picker.options}
             initialIndex={picker.initialIndex}
-            onSelect={(v) => { const kind = picker.kind; setPicker(null); if (kind === 'model') applyModel(v); else if (kind === 'provider') applyProvider(v); else if (kind === 'auth') applyAuth(v); else if (kind === 'resume') doResume(v); }}
+            {...(picker.kind === 'skill' ? { footer: '↑/↓ move · enter INSTALLS the highlighted skill · esc dismiss' } : {})}
+            onSelect={(v) => { const kind = picker.kind; setPicker(null); if (kind === 'model') applyModel(v); else if (kind === 'provider') applyProvider(v); else if (kind === 'auth') applyAuth(v); else if (kind === 'resume') doResume(v); else if (kind === 'skill') installSkill(v); }}
             onCancel={() => setPicker(null)}
           />
         )
+      ) : copy ? (
+        <Box flexDirection="column">
+          <Text color={theme.warn} bold>
+            <Text inverse> COPY MODE </Text>
+            <Text color={theme.muted}>
+              {' '}
+              {copy.anchor === null
+                ? `row ${copy.cursor + 1}/${lines.length} — press v to start a selection`
+                : `${selection!.to - selection!.from + 1} rows selected`}
+            </Text>
+          </Text>
+          <Text color={theme.muted}>↑/↓ or j/k move · PgUp/PgDn page · g/G top/bottom · v select · a all · y/enter copy · esc cancel</Text>
+        </Box>
       ) : (
         <Box flexDirection="column">
           {acOpen ? <AutocompleteMenu result={acResult!} index={acIndex} /> : null}
@@ -943,7 +1136,7 @@ export function App(props: AppProps): React.ReactElement {
             </Box>
           ) : null}
           {selectedTool ? (
-            <Text color={theme.accent}>◆ tool focus: {selectedTool} — →/Enter expand · ← collapse · ↑/↓ move · Esc exit</Text>
+            <Text color={theme.accent}>◆ tool focus: {selectedTool} — →/Enter expand · ← collapse · ↑/↓ move · y copy · Esc exit</Text>
           ) : null}
           <Box>
             <Text color={theme.accent}>{busy ? `${SPINNER_FRAMES[spin]} ` : '› '}</Text>
@@ -955,7 +1148,7 @@ export function App(props: AppProps): React.ReactElement {
             </Text>
           </Box>
           <Text color={theme.muted}>
-            {confirmExit ? 'press ctrl+c again to exit' : below ? '▼ new output below — PgDn/Esc to jump' : busy ? 'streaming — Esc interrupts · type to queue' : '/help · PgUp/PgDn scroll · Ctrl+P focus tool · ctrl+c exit'}
+            {confirmExit ? 'press ctrl+c again to exit' : below ? '▼ new output below — PgDn/Esc to jump' : busy ? 'streaming — Esc interrupts · type to queue' : '/help · PgUp/PgDn scroll · Ctrl+P focus tool · Ctrl+Space copy mode · /copy last reply · ctrl+c exit'}
           </Text>
         </Box>
       )}
@@ -964,7 +1157,15 @@ export function App(props: AppProps): React.ReactElement {
 }
 
 function pickerTitle(kind: PickerKind): string {
-  return kind === 'model' ? 'Select model' : kind === 'provider' ? 'Select provider' : kind === 'auth' ? 'Select auth mode' : 'Resume session';
+  return kind === 'model'
+    ? 'Select model'
+    : kind === 'provider'
+      ? 'Select provider'
+      : kind === 'auth'
+        ? 'Select auth mode'
+        : kind === 'skill'
+          ? 'Install a skill'
+          : 'Resume session';
 }
 
 function providerOptions(): PickerOption[] {

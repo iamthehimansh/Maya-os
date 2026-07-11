@@ -27,3 +27,5 @@ export async function runTui(opts: RunTuiOptions): Promise<void> {
 
 export { App } from './App.js';
 export { TuiPermissionGate } from './permission.js';
+export { createClipboard, osc52, type ClipboardWriter, type ClipboardResult } from './clipboard.js';
+export { parseSkillHits, hitLabel, type SkillHit } from './skillsSearch.js';
