@@ -177,6 +177,13 @@ export class RuntimeManager extends EventEmitter {
     const tunedQuant = tuned && local.files.some((f) => f.quant === tuned.quant) ? tuned.quant : undefined;
     const wantQuant = opts.quant ?? tunedQuant;
     const contextLength = opts.contextLength ?? local.contextLength;
+    // An overcommit load must NOT put layers on the GPU. macOS can swap CPU RAM
+    // to SSD (slow), but Metal buffers are wired — they cannot be swapped. So a
+    // force-load that offloads to Metal does not go slow, it dies in a loop of
+    // `kIOGPUCommandBufferCallbackErrorOutOfMemory` / `decode() failed: Compute
+    // error.` (a 16B on a Mac with ~6GB free). Running it CPU-side keeps the
+    // promise below honest: slow, not crash.
+    let overcommit = false;
     let plan = await this.planWithinBudget(local, wantQuant, contextLength);
     if (!plan) {
       // Try reclaiming RAM from idle instances before refusing
@@ -195,6 +202,7 @@ export class RuntimeManager extends EventEmitter {
           estimateBytes: estimateLoadBytes(file0.bytes, contextLength),
           degraded: { quant: false, context: false },
         };
+        overcommit = true;
         this.emitEvent({ type: "ram_pressure", freeBytes: (await availableRam()).availableBytes, action: "none" });
       } else {
         const ram = await availableRam();
@@ -228,6 +236,9 @@ export class RuntimeManager extends EventEmitter {
         port,
         contextLength: plan.contextLength,
         alias: model,
+        // Overcommit → keep every layer off Metal (see `overcommit` above): the
+        // GPU cannot swap, so offloading here is what turns "slow" into a crash.
+        ...(overcommit ? { nGpuLayers: 0 } : {}),
         ...(quirk ? { chatTemplateFile: quirk.templateFile } : {}),
         ...(opts2.draft ? { draftPath: opts2.draft } : {}),
         extra: opts2.noMmap ? [...extra, "--no-mmap"] : extra,
