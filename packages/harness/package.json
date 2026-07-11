@@ -1,6 +1,6 @@
 {
   "name": "@maya-os/code",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "maya code (mayac) — the coding agent of Maya OS. A provider-agnostic agent loop over the official Anthropic + OpenAI SDKs (API key or subscription), with a full-screen Ink TUI, skills, MCP, sub-agents and workflows. CLI: mayac.",
   "keywords": [
     "maya",
