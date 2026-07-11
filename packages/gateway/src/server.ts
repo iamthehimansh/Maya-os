@@ -7,6 +7,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { resolveProvider } from "./providers.js";
+import { buildSuggestions, newSuggestCache, parseSuggestQuery, type HwfitEngine } from "./suggest.js";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +24,13 @@ export interface GatewayDeps {
   onCatalogChange?: () => void;
   /** User provider overrides from ~/.maya/config.json (env vars stay the on/off switch). */
   providers?: ProviderConfig[];
+  /**
+   * The hardware-aware model recommender (@maya-ai/hwfit), injected by the
+   * composition root. Unset = /api/models/suggest reports 501 rather than
+   * pretending; the gateway itself never imports the engine, so it stays
+   * decoupled and the route is testable against a fake.
+   */
+  hwfit?: HwfitEngine;
 }
 
 interface EventSub {
@@ -276,6 +284,37 @@ export function createGateway(deps: GatewayDeps): { app: Hono; subscribers: Set<
   });
 
   app.get("/api/models", (c) => c.json(catalog(deps)));
+
+  // ── "Suggested for your machine" ─────────────────────────────────────────
+  // Rank local models by how well they FIT and RUN on this exact host. The
+  // engine (hwfit) does the detection + math; the gateway adds `installed`
+  // (only it can see modelsDir) and validates the query. A pick is directly
+  // actionable: sources[format] feeds POST /api/models/pull, then :name/load.
+  const hwfitCache = newSuggestCache();
+  app.get("/api/models/suggest", async (c) => {
+    if (!deps.hwfit) {
+      return oaiError("model recommendations need the hwfit engine — it is not wired into this gateway", 501);
+    }
+    const parsed = parseSuggestQuery(c.req.query());
+    if ("error" in parsed) return oaiError(parsed.error, 400);
+    try {
+      return c.json(
+        await buildSuggestions(
+          {
+            hwfit: deps.hwfit,
+            installedIds: () => new Set(scanModels(deps.modelsDir).map((m) => `local/${m.name}`)),
+            cache: hwfitCache,
+          },
+          parsed,
+        ),
+      );
+    } catch (err) {
+      // Reached only when there is nothing truthful to serve (no hardware
+      // read, or a cold catalog that never loaded). A failed refresh over a
+      // warm cache degrades to catalog.stale inside buildSuggestions.
+      return oaiError(`could not rank models: ${err instanceof Error ? err.message : String(err)}`, 503);
+    }
+  });
 
   app.post("/api/models/pull", async (c) => {
     const { source, name } = await c.req.json<{ source?: string; name?: string }>();

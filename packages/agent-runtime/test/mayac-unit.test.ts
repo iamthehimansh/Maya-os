@@ -60,10 +60,22 @@ describe('buildArgs (headless one-shot)', () => {
     expect(() => adapter.buildArgs({ adapter: 'mayac', model: 'maya/x', cwd: '/tmp' })).toThrow(/one-shot/);
   });
 
-  it('gateway agents pass the Maya ModelId verbatim and use --auth api', () => {
-    const args = adapter.buildArgs({ ...baseSpec, model: 'anthropic/claude-opus-4-8' });
-    expect(args).toContain('anthropic/claude-opus-4-8'); // the gateway resolves the prefix
+  it('LOCAL models route through the gateway: ModelId verbatim + --auth api', () => {
+    // baseSpec.model is local/… → the gateway resolves it.
+    const args = adapter.buildArgs(baseSpec);
+    expect(args).toContain('local/qwen2.5-7b-instruct');
     expect(args.slice(args.indexOf('--auth'))[1]).toBe('api');
+  });
+
+  it('a CLOUD model with NO explicit auth defaults to native --auth subscription, NOT the gateway (the @lead 404 fix)', () => {
+    // Regression: routing a cloud model through the gateway 404s
+    // ("No route registered for model claude-opus-4-8"). Cloud → real API.
+    const spec = { ...baseSpec, model: 'anthropic/claude-opus-4-8', options: {} };
+    const args = adapter.buildArgs(spec);
+    expect(args.slice(args.indexOf('--auth'))[1]).toBe('subscription');
+    expect(args).toContain('claude-opus-4-8'); // prefix stripped for the real API
+    expect(args).not.toContain('anthropic/claude-opus-4-8');
+    expect(adapter.buildEnv(spec)['ANTHROPIC_BASE_URL']).toBeUndefined(); // never the gateway
   });
 
   it('native subscription uses --auth subscription and STRIPS the gateway model prefix', () => {
@@ -100,15 +112,16 @@ describe('buildEnv (the gateway seam)', () => {
     expect(env['ANTHROPIC_API_KEY']).toBe('maya-gateway');
   });
 
-  it('the openai provider gets the gateway OpenAI-compat base (/v1)', () => {
-    const env = adapter.buildEnv({ ...baseSpec, model: 'openai/gpt-5.5' });
+  it('the openai provider on a gateway (local) model gets the gateway OpenAI-compat base (/v1)', () => {
+    const env = adapter.buildEnv({ ...baseSpec, options: { provider: 'openai' } });
     expect(env['OPENAI_BASE_URL']).toBe(`${GATEWAY}/v1`);
     expect(env['OPENAI_API_KEY']).toBe('maya-gateway');
   });
 
-  it('native subscription CLEARS an inherited gateway pointer/dummy key, or it would shadow the owner\'s real login', () => {
+  it('native subscription (cloud model) CLEARS an inherited gateway pointer/dummy key, or it would shadow the owner\'s real login', () => {
     const env = adapter.buildEnv({
       ...baseSpec,
+      model: 'anthropic/claude-opus-4-8', // cloud → native
       options: { auth: 'mayac-subscription' },
       env: {},
     });

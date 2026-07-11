@@ -119,3 +119,103 @@ export const setModelProfile = (name: string, patch: { contextLength?: number; d
     headers: { "content-type": "application/json" },
     body: JSON.stringify(patch),
   });
+
+// ── "Suggested for your machine" (GET /api/models/suggest) ──────────────────
+// Local models ranked by how well they FIT and RUN on this exact host. The
+// gateway detects the hardware, scores the catalog (hwfit engine), and marks
+// what's already installed. Every field is camelCase on the wire.
+
+/** The detected machine — what the panel header renders ("your Apple M4 Pro, 16GB"). */
+export interface SystemInfo {
+  platform: "darwin" | "linux" | "win32";
+  chip: string;
+  isAppleSilicon: boolean;
+  cpuCores: number;
+  gpuCores?: number;
+  totalRamGb: number;
+  availableRamGb: number;
+  memoryBandwidthGbs: number;
+  backend: "metal" | "cuda" | "cpu";
+  vramGb?: number;
+}
+
+/** How well a model fits: `perfect` → runs comfortably; `no_fit` → won't load. */
+export type FitLevel = "perfect" | "good" | "marginal" | "too_tight" | "no_fit";
+
+export type UseCase = "coding" | "chat" | "reasoning";
+export type SortBy = "score" | "speed" | "vram" | "params" | "context";
+
+export interface Suggestion {
+  /** Stable slug. Pin the install to it: pullModel(source, name) → local/<name>. */
+  name: string;
+  /** Precomputed `local/<name>` — matches ids from GET /api/models. */
+  id: string;
+  displayName: string;
+  provider: string;
+  paramsB: number;
+  isMoe: boolean;
+  arch: string;
+  fitLevel: FitLevel;
+  /** Where it executes on this host. */
+  runMode: "gpu" | "hybrid" | "cpu" | "none";
+  quant: string;
+  context: number;
+  requiredGb: number;
+  /** Estimated generation speed, from this machine's memory bandwidth. */
+  speedTps: number;
+  score: number;
+  subscores: { quality: number; speed: number; fit: number; context: number };
+  /** `sources[format]` is a pull-ready `hf:owner/repo/file.gguf` — the filename
+   *  resolved for the chosen quant. Null when no concrete file could be resolved. */
+  sources: { gguf: string | null; mlx: string | null; hfRepo: string };
+  /** Which artifact this pick is for; null → info-only card, nothing to pull. */
+  format: "gguf" | "mlx" | null;
+  /** Already on disk → offer Load/Unload instead of Download. */
+  installed: boolean;
+  /** Short human strings, e.g. "fits unified memory with 3.1GB headroom". */
+  reasons: string[];
+}
+
+export interface SuggestResponse {
+  system: SystemInfo;
+  /** `stale` / `source: "seed"` = HuggingFace discovery failed; curated list served. */
+  catalog: { source: "hf+seed" | "seed"; count: number; stale: boolean };
+  useCase: UseCase;
+  results: Suggestion[];
+}
+
+export interface SuggestOpts {
+  useCase?: UseCase;
+  limit?: number;
+  search?: string;
+  quant?: string;
+  /** Hide models that can't actually run on this machine. */
+  fitOnly?: boolean;
+  sortBy?: SortBy;
+  targetContext?: number;
+  /** Bypass the catalog cache and re-query HuggingFace. */
+  refresh?: boolean;
+}
+
+export const getSuggestions = (opts: SuggestOpts = {}): Promise<SuggestResponse> => {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(opts)) {
+    if (v !== undefined && v !== "") qs.set(k, String(v));
+  }
+  const q = qs.toString();
+  return getJson<SuggestResponse>(`/api/models/suggest${q ? `?${q}` : ""}`);
+};
+
+/**
+ * Turn a recommendation into a running model: pull the resolved artifact, pinned
+ * to `s.name` so it installs as `local/<name>` and matches the next listing.
+ * Returns false when the card is info-only (no file resolved — nothing to pull).
+ * Watch `pull_progress` on the runtime-event stream, then loadModel(s.name).
+ */
+export const downloadSuggestion = async (s: Suggestion): Promise<boolean> => {
+  const source = s.format ? s.sources[s.format] : null;
+  if (!source) return false;
+  const res = await pullModel(source, s.name);
+  if (!res.ok) throw new Error(`pull failed: HTTP ${res.status}`);
+  return true;
+};

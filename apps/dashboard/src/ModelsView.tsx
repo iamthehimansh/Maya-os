@@ -11,17 +11,10 @@ import {
   setModelProfile,
   unloadModel,
 } from "./api";
+import { Recommended } from "./Recommended";
 
 const GIB = 1024 ** 3;
 const gb = (n: number): string => `${(n / GIB).toFixed(1)} GB`;
-
-/** Curated, vetted GGUFs. `needBytes` ≈ Q4 weights + headroom; `tools` = measured native tool-calling. */
-const RECOMMENDED: Array<{ name: string; source: string; needBytes: number; note: string; tools: boolean }> = [
-  { name: "qwen2.5-0.5b-instruct", source: "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf", needBytes: 1 * GIB, note: "tiny, fast", tools: true },
-  { name: "qwen2.5-coder-3b", source: "hf:Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf", needBytes: 2.5 * GIB, note: "coder, lead", tools: false },
-  { name: "qwen2.5-3b-instruct", source: "hf:Qwen/Qwen2.5-3B-Instruct-GGUF/qwen2.5-3b-instruct-q4_k_m.gguf", needBytes: 2.5 * GIB, note: "snappy worker", tools: true },
-  { name: "qwen2.5-7b-instruct", source: "hf:Qwen/Qwen2.5-7B-Instruct-GGUF/qwen2.5-7b-instruct-q4_k_m.gguf", needBytes: 5.5 * GIB, note: "quality worker", tools: true },
-];
 
 /** Instance state → status role + label. Label always shown — color never carries meaning alone. */
 const STATE_STATUS: Record<string, { color: string; label: string }> = {
@@ -44,6 +37,10 @@ export function ModelsView(): React.JSX.Element {
   const [events, setEvents] = useState<string[]>([]);
   const [wontFit, setWontFit] = useState<Set<string>>(new Set());
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Models a recommendation card asked to *serve*, not merely download — keyed
+   * by the id the gateway reports on pull events (`local/<name>`). Drained when
+   * the pull hits 100%, which is what makes the button's promise true. */
+  const autoServe = useRef<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
     try {
@@ -67,6 +64,7 @@ export function ModelsView(): React.JSX.Element {
     const poll = setInterval(() => void refresh(), 10_000); // fallback when SSE drops
     const off = onRuntimeEvents((ev: RuntimeEvent) => {
       if (ev.type === "pull_failed") {
+        autoServe.current.delete(ev.model); // don't try to serve a download that died
         setPullPct(null);
         setPullErr(`${ev.model} — ${ev.error}`); // near the form, not just the events feed
         setEvents((prev) => [`${new Date().toLocaleTimeString()}  ✗ pull failed: ${ev.model} — ${ev.error}`, ...prev].slice(0, 50));
@@ -74,7 +72,14 @@ export function ModelsView(): React.JSX.Element {
       }
       if (ev.type === "pull_progress") {
         setPullPct(ev.pct >= 100 || ev.pct < 0 ? null : { model: ev.model, pct: ev.pct });
-        if (ev.pct >= 100) scheduleRefresh();
+        if (ev.pct >= 100) {
+          // "Download & serve" — finish the second half of the promise. The
+          // load route takes the bare name; the event carries `local/<name>`.
+          if (autoServe.current.delete(ev.model)) {
+            void loadModel(ev.model.replace(/^local\//, "")).finally(() => scheduleRefresh());
+          }
+          scheduleRefresh();
+        }
         return;
       }
       setEvents((prev) => [`${new Date().toLocaleTimeString()}  ${describe(ev)}`, ...prev].slice(0, 50));
@@ -95,8 +100,9 @@ export function ModelsView(): React.JSX.Element {
    * rejected POST surfaces right here instead of only in the events feed.
    * `name` pins the installed id to local/<name> so the reco-chip "already
    * installed" check can actually match. */
-  const startPull = (source: string, name?: string): void => {
+  const startPull = (source: string, name?: string, serveWhenDone = false): void => {
     setPullErr(null);
+    if (serveWhenDone && name) autoServe.current.add(`local/${name}`);
     setPullPct({ model: name ?? source, pct: 0 });
     void pullModel(source, name)
       .then(async (res) => {
@@ -160,6 +166,15 @@ export function ModelsView(): React.JSX.Element {
         </div>
       </div>
 
+      <Recommended
+        models={models}
+        live={live}
+        busy={busy}
+        onPull={(source, name) => startPull(source, name, true)}
+        onLoad={(name) => void act(name, loadModel)}
+        onUnload={(name) => void act(name, unloadModel)}
+      />
+
       <section className="panel">
         <h2>Pull a model</h2>
         <form
@@ -181,23 +196,6 @@ export function ModelsView(): React.JSX.Element {
             Pull
           </button>
         </form>
-        <div className="reco">
-          <span className="reco-label">Recommended for your Mac:</span>
-          {RECOMMENDED.filter((r) => !models?.some((m) => m.id === `local/${r.name}`)).map((r) => {
-            const fits = health ? health.ramFreeBytes > r.needBytes : true;
-            return (
-              <button
-                key={r.name}
-                className="reco-chip"
-                title={`${r.note} · ~${gb(r.needBytes)} · ${r.tools ? "tool-capable worker" : "lead-only (no native tools)"}${fits ? "" : " · tight on current free RAM"}`}
-                onClick={() => startPull(r.source, r.name)}
-              >
-                <span className="dot" style={{ background: fits ? "var(--status-good)" : "var(--status-warning)" }} />
-                {r.name} <span className="reco-size">{gb(r.needBytes)}</span>
-              </button>
-            );
-          })}
-        </div>
         {pullErr && (
           <div className="error-banner" role="alert">
             Pull failed: {pullErr}

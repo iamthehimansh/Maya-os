@@ -136,11 +136,32 @@ export class MayacAdapter implements AgentAdapter {
     return result;
   }
 
-  /** True when this agent talks to the REAL provider API (owner's own login)
-   * rather than the Maya gateway. */
-  private nativeSubscription(spec: AgentSpawnSpec): boolean {
+  /** Maya's gateway is only for LOCAL models (`local/…`). Cloud models must talk
+   * to the real provider directly — the gateway has NO route for
+   * `claude-opus-4-8` etc., so routing them through it 404s ("model_not_found").
+   * Explicit `options.gateway === true` can still force a cloud model through it. */
+  private useGateway(spec: AgentSpawnSpec): boolean {
+    if (spec.options?.['gateway'] === true) return true;
+    return /^local\//i.test(spec.model);
+  }
+
+  /** True when this agent talks to the REAL provider (owner's own login or a real
+   * key) rather than the Maya gateway — i.e. every cloud model. */
+  private native(spec: AgentSpawnSpec): boolean {
+    return !this.useGateway(spec);
+  }
+
+  /** Whether mayac runs on the owner's own subscription (`--auth subscription`).
+   * A native (cloud) agent defaults to subscription — what the owner asked for,
+   * and it Just Works off ~/.claude — unless a real API key is supplied or
+   * `options.auth === 'api'` is explicit. Gateway agents are never "subscription". */
+  private useSubscription(spec: AgentSpawnSpec): boolean {
+    if (!this.native(spec)) return false;
     const auth = spec.options?.['auth'];
-    return auth === 'mayac-subscription' || auth === 'subscription';
+    if (auth === 'mayac-subscription' || auth === 'subscription') return true;
+    if (auth === 'api') return false;
+    const key = spec.env?.['ANTHROPIC_API_KEY'] ?? spec.env?.['OPENAI_API_KEY'];
+    return !key; // no real key provided → use the owner's subscription
   }
 
   /**
@@ -161,7 +182,10 @@ export class MayacAdapter implements AgentAdapter {
    * prefix or the SDK 404s. (Same rule as the Claude Code adapter's cliModel.)
    */
   private cliModel(spec: AgentSpawnSpec): string {
-    if (!this.nativeSubscription(spec)) return spec.model;
+    // Gateway agents pass the Maya ModelId verbatim (the gateway resolves it).
+    // Native (cloud) agents hit the real API, where `anthropic/claude-x` is not a
+    // valid id — strip the provider prefix or the SDK 404s.
+    if (this.useGateway(spec)) return spec.model;
     return spec.model.replace(/^(anthropic|openai)\//i, '');
   }
 
@@ -182,7 +206,7 @@ export class MayacAdapter implements AgentAdapter {
       throw new Error('mayac headless mode is one-shot — spawn with a prompt, or pass options.pty for the interactive TUI');
     }
     const args = ['--provider', this.provider(spec), '--model', this.cliModel(spec)];
-    args.push('--auth', this.nativeSubscription(spec) ? 'subscription' : 'api');
+    args.push('--auth', this.useSubscription(spec) ? 'subscription' : 'api');
     if (spec.cwd) args.push('--cwd', spec.cwd);
     // Headless mayac DENIES every gated action (write/bash) unless --yolo — an
     // 'auto' agent without it can read but never edit, the silent half-failure.
@@ -195,7 +219,7 @@ export class MayacAdapter implements AgentAdapter {
   /** Args for the INTERACTIVE TUI (no -p): the real terminal, not headless. */
   buildPtyArgs(spec: AgentSpawnSpec): string[] {
     const args = ['--provider', this.provider(spec), '--model', this.cliModel(spec)];
-    args.push('--auth', this.nativeSubscription(spec) ? 'subscription' : 'api');
+    args.push('--auth', this.useSubscription(spec) ? 'subscription' : 'api');
     if (spec.cwd) args.push('--cwd', spec.cwd);
     if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--yolo');
     return args;
@@ -216,13 +240,20 @@ export class MayacAdapter implements AgentAdapter {
       env[k] = v;
     }
     const provider = this.provider(spec);
-    if (this.nativeSubscription(spec)) {
-      // mayac resolves the owner's own login itself — leave its path clean.
+    if (this.native(spec)) {
+      // Cloud model → talk to the REAL provider, never the gateway. Clear any
+      // inherited gateway base-URL/dummy key so it can't shadow the owner's real
+      // credential; a real key supplied for `--auth api` rides in via spec.env.
       delete env['ANTHROPIC_BASE_URL'];
-      delete env['ANTHROPIC_API_KEY'];
       delete env['OPENAI_BASE_URL'];
+      delete env['ANTHROPIC_API_KEY'];
       delete env['OPENAI_API_KEY'];
       Object.assign(env, spec.env);
+      if (this.useSubscription(spec)) {
+        // Subscription resolves ~/.claude itself — drop any key so it wins.
+        delete env['ANTHROPIC_API_KEY'];
+        delete env['OPENAI_API_KEY'];
+      }
       return env;
     }
     const base = this.opts.gatewayBaseUrl.replace(/\/$/, '');

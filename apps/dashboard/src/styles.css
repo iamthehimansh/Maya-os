@@ -154,12 +154,44 @@ button.act.primary:disabled, .act.primary:disabled { opacity: 0.5; cursor: defau
 .health-item .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .health-label { font-weight: 600; }
 .health-detail { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.reco { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
-.reco-label { font-size: 12px; color: var(--text-secondary); }
-.reco-chip { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-0); color: var(--text-primary); cursor: pointer; }
-.reco-chip:hover { border-color: var(--accent); }
-.reco-chip .dot { width: 8px; height: 8px; border-radius: 50%; }
-.reco-size { color: var(--text-muted); }
+/* ── Hardware-aware recommendations (hwfit) ── */
+.reco-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.reco-head h2 { margin: 0 0 2px; }
+.reco-stale { color: var(--status-warning); }
+.reco-usecase { display: flex; gap: 4px; flex: none; }
+.reco-usecase .tab { text-transform: capitalize; }
+.reco-usecase .tab[aria-checked="true"] { background: var(--surface-1); color: var(--text-primary); font-weight: 600; box-shadow: inset 0 0 0 1px var(--border); }
+.reco-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 14px 0 12px; }
+.reco-search { flex: 1; min-width: 200px; font: inherit; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-0); color: var(--text-primary); }
+.reco-search::placeholder { color: var(--text-muted); }
+.reco-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+.reco-check select { font: inherit; font-size: 12px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-0); color: var(--text-primary); }
+
+.reco-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 12px; }
+.reco-card { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface-0); }
+.reco-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.reco-name { font-weight: 600; font-size: 14px; line-height: 1.3; }
+.reco-fit { flex: none; white-space: nowrap; }
+.reco-fit .dot { width: 8px; height: 8px; border-radius: 50%; }
+.reco-provider { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); }
+.reco-tag { font-size: 11px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-muted); }
+
+.reco-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 10px; margin: 2px 0; }
+.reco-meta dt { font-size: 11px; color: var(--text-muted); }
+.reco-meta dd { margin: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+
+.reco-score { display: flex; align-items: center; gap: 8px; }
+.reco-score-bar { position: relative; flex: 1; height: 6px; border-radius: 3px; background: var(--surface-1); box-shadow: inset 0 0 0 1px var(--border); overflow: hidden; }
+.reco-score-bar .fill { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--accent); }
+.reco-score-num { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-secondary); min-width: 22px; text-align: right; }
+.reco-why { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+.reco-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 2px; }
+.reco-note { font-size: 11px; color: var(--text-muted); }
+
+@media (max-width: 640px) {
+  .reco-grid { grid-template-columns: 1fr; }
+  .reco-controls { flex-direction: column; align-items: stretch; }
+}
 
 /* ── Chat (team-channel layout, lane 01 front door) ── */
 .cchat { display: flex; gap: 16px; height: calc(100vh - 118px); min-height: 460px; }

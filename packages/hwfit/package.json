@@ -1,0 +1,31 @@
+{
+  "name": "@maya-ai/hwfit",
+  "version": "0.0.1",
+  "description": "Maya hardware-aware model recommender — detect the machine, rank local models by how well they fit AND run",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "catalog:refresh": "node scripts/build-catalog.mjs"
+  },
+  "dependencies": {
+    "@maya-ai/core": "workspace:*",
+    "@maya-ai/model-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22",
+    "vitest": "^3.0.0"
+  }
+}
