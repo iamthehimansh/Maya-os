@@ -255,23 +255,42 @@ export class AgentBusBridge {
         const chunk = content.slice(offset);
         const lastNl = chunk.lastIndexOf('\n');
         if (lastNl === -1) return; // no complete line yet — a write may be in progress
-        for (const raw of chunk.slice(0, lastNl).split('\n')) {
-          const line = raw.trim();
-          if (!line) continue;
-          let out: { text: string; to?: string } = { text: line };
-          if (line.startsWith('{')) {
-            try {
-              const parsed = JSON.parse(line) as { text?: string; to?: string };
-              if (typeof parsed.text === 'string') out = { text: parsed.text, ...(parsed.to ? { to: parsed.to } : {}) };
-            } catch {
-              /* not JSON — treat the whole line as text */
-            }
-          }
-          if (out.text) {
-            client.sendMessage({ ...(out.to ? { to: out.to } : {}), body: { text: out.text } });
+        // Coalesce consecutive PLAIN-TEXT lines that arrive together into ONE
+        // message. An agent that echoes a multi-line block (a build/test summary,
+        // a markdown list/table) writes several physical lines at once; posting
+        // each as its own bubble shattered one message into many (with blank
+        // bubbles). A JSON line ({text,to}) is an EXPLICIT single message: it
+        // flushes any pending plain-text block and posts on its own. Well-behaved
+        // one-JSON-line-per-message agents are therefore unchanged.
+        let buf: string[] = [];
+        const flush = (): void => {
+          const text = buf.join('\n').trim();
+          buf = [];
+          if (text) {
+            client.sendMessage({ body: { text } });
             outboxPostedThisTurn = true;
           }
+        };
+        for (const raw of chunk.slice(0, lastNl).split('\n')) {
+          const trimmed = raw.trim();
+          if (trimmed.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(trimmed) as { text?: string; to?: string };
+              if (typeof parsed.text === 'string') {
+                flush(); // an explicit/directed message ends any plain-text block
+                if (parsed.text.trim()) {
+                  client.sendMessage({ ...(parsed.to ? { to: parsed.to } : {}), body: { text: parsed.text } });
+                  outboxPostedThisTurn = true;
+                }
+                continue;
+              }
+            } catch {
+              /* not JSON — fall through and treat as plain text */
+            }
+          }
+          buf.push(raw); // accumulate (raw keeps indentation; internal blanks preserved)
         }
+        flush();
         offset += lastNl + 1; // advance past the newline of the last posted line
       };
       outboxTimer = setInterval(drainOutbox, 1000);
