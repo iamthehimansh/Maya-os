@@ -19,6 +19,13 @@ export { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencod
 export { AgentBusBridge, type BusBridgeOptions, type AttachOptions } from './bus-bridge.js';
 export { EventLog } from './events.js';
 export { ensureMayaTeamSkill } from './skills.js';
+export {
+  claudeSessionExists,
+  mayacSessionExists,
+  planSessionArgs,
+  type PlanSessionOptions,
+  type SessionPlan,
+} from './session-args.js';
 
 export interface AgentRuntimeOptions {
   /** Maya gateway base — every agent's model routes through it. */

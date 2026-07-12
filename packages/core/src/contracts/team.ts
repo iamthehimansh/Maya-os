@@ -47,6 +47,13 @@ export interface AgentSpec {
    * "claude-code", `codex login` for "codex", and for "mayac" its own
    * `--auth subscription` resolution (~/.claude or ~/.codex, per provider). */
   auth?: "claude-subscription" | "codex-subscription" | "mayac-subscription";
+  /** The conversation this agent reopens when it is revived. Assigned by the
+   * orchestrator on first spawn (a real UUID — `claude --session-id` rejects
+   * anything else) and stable for the agent's life, so a stopped or rehydrated
+   * agent resumes its OWN session instead of coming back amnesiac. Never set it
+   * by hand: several agents share one `cwd`, and it is this per-agent id — not
+   * `--continue` — that stops them resuming each OTHER's conversations. */
+  sessionId?: string;
 }
 
 /** A team = one lead + N workers, all persistent + parallel, sharing a channel. */

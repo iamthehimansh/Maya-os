@@ -105,6 +105,19 @@ export class MayaDb {
         created_at TEXT NOT NULL,
         PRIMARY KEY (team_id, handle)
       );
+      -- The conversation id a standing agent resumes into on every later spawn,
+      -- so a revived agent reopens its OWN session instead of coming back as a
+      -- blank slate. It is a MEMO, deliberately outliving the spec row: stopping
+      -- an agent deletes its standing_agents row (so it won't re-hydrate), but
+      -- "stop it, revive it, same conversation" is the whole point — so the id
+      -- survives here and only dies with the team itself.
+      CREATE TABLE IF NOT EXISTS agent_sessions (
+        team_id TEXT NOT NULL REFERENCES teams(id),
+        handle TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (team_id, handle)
+      );
       -- Member TEMPLATES (JSON array) persisted per team so rehydrate() can
       -- restore task-dispatch after a restart — un-persisted templates made
       -- restored teams chat-only (loops hung to settle-timeout on 0 templates).
@@ -202,6 +215,7 @@ export class MayaDb {
       this.db.prepare('DELETE FROM tasks WHERE team_id = ?').run(id);
       this.db.prepare('DELETE FROM team_agents WHERE team_id = ?').run(id);
       this.db.prepare('DELETE FROM standing_agents WHERE team_id = ?').run(id);
+      this.db.prepare('DELETE FROM agent_sessions WHERE team_id = ?').run(id);
       this.db.prepare('DELETE FROM team_templates WHERE team_id = ?').run(id);
       this.db.prepare('DELETE FROM teams WHERE id = ?').run(id);
     });
@@ -272,8 +286,36 @@ export class MayaDb {
     this.db.prepare('DELETE FROM standing_agents WHERE team_id = ? AND handle = ?').run(teamId, handle);
   }
 
+  /** Drop a team's standing agents. Only ever called when the team is closed for
+   * good, so the session memos go with them — unlike removeStandingAgent (one
+   * agent stopped), which keeps the memo so a revive can resume. */
   removeStandingAgents(teamId: string): void {
     this.db.prepare('DELETE FROM standing_agents WHERE team_id = ?').run(teamId);
+    this.removeAgentSessions(teamId);
+  }
+
+  // ── agent sessions (the conversation a revived agent reopens) ─────────────
+
+  /** Remember the conversation id for (team, handle) — first spawn only; later
+   * spawns read it back and resume into it. Idempotent. */
+  rememberAgentSession(teamId: string, handle: string, sessionId: string): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO agent_sessions (team_id, handle, session_id, created_at) VALUES (?,?,?,?)')
+      .run(teamId, handle, sessionId, new Date().toISOString());
+  }
+
+  /** The conversation id this agent has always used, or undefined if it has
+   * never been spawned (→ caller mints one). */
+  agentSession(teamId: string, handle: string): string | undefined {
+    const r = this.db.prepare('SELECT session_id FROM agent_sessions WHERE team_id = ? AND handle = ?').get(teamId, handle) as
+      | { session_id: string }
+      | undefined;
+    return r?.session_id;
+  }
+
+  /** Forget a team's session ids — only when the team is really gone. */
+  removeAgentSessions(teamId: string): void {
+    this.db.prepare('DELETE FROM agent_sessions WHERE team_id = ?').run(teamId);
   }
 
   // ── tasks ─────────────────────────────────────────────────────────────

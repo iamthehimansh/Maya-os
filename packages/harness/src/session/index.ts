@@ -83,7 +83,21 @@ function previewOf(messages: ModelMessage[]): string {
 /** URL-safe-ish random id without pulling in a dep. */
 function makeId(seed: number): string {
   const rnd = Math.floor(Math.random() * 0x7fffffff).toString(36);
-  return `${seed.toString(36)}-${rnd}`;
+  return `${Math.floor(seed).toString(36)}-${rnd}`;
+}
+
+/**
+ * Epoch ms with SUB-MS resolution. `Date.now()` is integer-ms, so two sessions
+ * saved in the same millisecond tie — and `latest()`'s sort then falls back to
+ * readdir() order, making `--continue` pick an ARBITRARY session among them
+ * rather than the newest. performance.now() is monotonic within the process, so
+ * back-to-back saves always order correctly; the origin keeps it a real epoch
+ * timestamp (the picker renders it as a date) and comparable with the integer
+ * timestamps already on disk.
+ */
+const CLOCK_ORIGIN = Date.now() - performance.now();
+function now(): number {
+  return CLOCK_ORIGIN + performance.now();
 }
 
 class SessionStoreImpl implements SessionStore {
@@ -94,11 +108,11 @@ class SessionStoreImpl implements SessionStore {
   }
 
   create(init: SessionInit): SessionRecord {
-    const now = Date.now();
+    const t = now();
     return {
-      id: makeId(now),
-      createdAt: now,
-      updatedAt: now,
+      id: makeId(t),
+      createdAt: t,
+      updatedAt: t,
       provider: init.provider,
       model: init.model,
       cwd: init.cwd,
@@ -108,15 +122,15 @@ class SessionStoreImpl implements SessionStore {
 
   async save(patch: SessionSavePatch): Promise<void> {
     await mkdir(this.dir, { recursive: true });
-    const now = Date.now();
-    let createdAt = now;
+    const t = now();
+    let createdAt = t;
     // Preserve the original createdAt across overwrites.
     const existing = await this.load(patch.id);
     if (existing) createdAt = existing.createdAt;
     const rec: SessionRecord = {
       id: patch.id,
       createdAt,
-      updatedAt: now,
+      updatedAt: t,
       provider: patch.provider,
       model: patch.model,
       cwd: patch.cwd,
@@ -159,7 +173,10 @@ class SessionStoreImpl implements SessionStore {
         preview: previewOf(rec.messages),
       });
     }
-    out.sort((a, b) => b.updatedAt - a.updatedAt);
+    // Newest first. Sessions written by an OLDER build still carry integer-ms
+    // stamps and can genuinely tie, so break ties on createdAt then id: an
+    // arbitrary-but-STABLE order beats readdir() order, which varies by filesystem.
+    out.sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1));
     return out;
   }
 

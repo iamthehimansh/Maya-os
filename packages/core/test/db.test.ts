@@ -86,4 +86,31 @@ describe('MayaDb', () => {
     expect(agent?.busHandle).toBe('worker-1');
     db.close();
   });
+
+  it('an agent session id outlives the agent being stopped, but dies with the team', () => {
+    // The session memo is what makes "stop an agent, revive it, SAME conversation"
+    // work. Stopping deletes the standing-agent spec (so it won't re-hydrate) —
+    // and the spec was the only other place the id lived, so if the memo went too,
+    // the revived agent would come back amnesiac. It must outlive the stop.
+    const db = mk();
+    const team = db.createTeam({ name: 'dev', topology: 'manager-tree' });
+    db.addStandingAgent(team.id, '@backend', { handle: '@backend', sessionId: 'uuid-b' });
+    db.rememberAgentSession(team.id, '@backend', 'uuid-b');
+    db.rememberAgentSession(team.id, '@frontend', 'uuid-f');
+
+    expect(db.agentSession(team.id, '@backend')).toBe('uuid-b');
+    expect(db.agentSession(team.id, '@nobody')).toBeUndefined(); // never spawned → caller mints
+
+    // Stop ONE agent: its spec goes, its conversation does NOT.
+    db.removeStandingAgent(team.id, '@backend');
+    expect(db.standingAgents(team.id)).toHaveLength(0);
+    expect(db.agentSession(team.id, '@backend')).toBe('uuid-b');
+    expect(db.agentSession(team.id, '@frontend')).toBe('uuid-f'); // and no collateral damage
+
+    // Close the team for good: nothing to revive into, so the ids go with it.
+    db.removeStandingAgents(team.id);
+    expect(db.agentSession(team.id, '@backend')).toBeUndefined();
+    expect(db.agentSession(team.id, '@frontend')).toBeUndefined();
+    db.close();
+  });
 });

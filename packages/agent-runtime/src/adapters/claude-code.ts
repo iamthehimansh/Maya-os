@@ -29,6 +29,7 @@ import { homedir } from 'node:os';
 import type { IPty } from 'node-pty';
 import { resolveCwd } from '../cwd.js';
 import { loadPty } from '../pty.js';
+import { claudeSessionExists, planSessionArgs, type SessionPlan } from '../session-args.js';
 import { join } from 'node:path';
 import type {
   AgentAdapter,
@@ -198,11 +199,23 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     return onRealApi && spec.model.startsWith('anthropic/') ? spec.model.slice('anthropic/'.length) : spec.model;
   }
 
+  /**
+   * Session identity for a standing agent: `--session-id <uuid>` on first spawn,
+   * `--resume <uuid>` on revive — so a stopped agent comes back as the SAME
+   * conversation instead of a blank one. See ../session-args.ts for why
+   * `--continue` is the WRONG tool here (agents share a cwd and would resume
+   * each other). Pure; the warning is surfaced by the caller once `live` exists.
+   */
+  private sessionPlan(spec: AgentSpawnSpec): SessionPlan {
+    return planSessionArgs(spec, { exists: claudeSessionExists, cli: 'claude', requireUuid: true });
+  }
+
   /** Args for INTERACTIVE claude in a pty — the real TUI, NOT headless
    * `--print`/stream-json (that would show JSON, not a terminal). */
-  private buildPtyArgs(spec: AgentSpawnSpec): string[] {
+  buildPtyArgs(spec: AgentSpawnSpec): string[] {
     const args = ['--model', this.cliModel(spec)];
     if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--dangerously-skip-permissions');
+    args.push(...this.sessionPlan(spec).args);
     this.pushOptionArgs(spec, args);
     return args;
   }
@@ -231,6 +244,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     else args.push(spec.prompt as string);
     args.push('--model', this.cliModel(spec));
     if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--dangerously-skip-permissions');
+    args.push(...this.sessionPlan(spec).args);
     this.pushOptionArgs(spec, args);
     return args;
   }
@@ -329,6 +343,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const live: LiveAgent = { handle, child, log: new EventLog(), logs: [], interactive, stdoutBuf: '', outTail: '' };
     this.agents.set(id, live);
 
+    // A revive that couldn't resume (transcript gone / non-UUID id) still RUNS —
+    // but the agent has lost its memory, so say so instead of failing silently.
+    const sessionWarning = this.sessionPlan(spec).warning;
+    if (sessionWarning) this.pushLog(live, 'system', sessionWarning);
+
     // Orphan guard (02's pattern): our exit takes the child with us; the
     // listener is removed when the child exits so it can't accumulate.
     const killChild = (): void => {
@@ -423,6 +442,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     };
     const live: LiveAgent = { handle, pty: p, log: new EventLog(), logs: [], interactive: true, stdoutBuf: '', outTail: '' };
     this.agents.set(id, live);
+
+    // Degraded revive (transcript gone / non-UUID id): the agent is alive but
+    // amnesiac — make that visible rather than letting it look like a clean revive.
+    const sessionWarning = this.sessionPlan(spec).warning;
+    if (sessionWarning) this.pushLog(live, 'system', sessionWarning);
 
     const killPty = (): void => {
       try {

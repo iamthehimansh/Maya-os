@@ -426,8 +426,25 @@ export class TeamManager {
     }
 
     const adapter = this.opts.runtime.adapter(spec.type);
+    // WHICH CONVERSATION does this agent open? A revived agent used to come back
+    // as a blank slate — brief gone, teammates gone, its own work gone. So every
+    // standing agent owns a stable session id: the FIRST spawn mints one and the
+    // agent starts fresh under it; EVERY later spawn (crash-respawn, stop→revive,
+    // rehydrate after a serve restart) finds the same id and RESUMES into it.
+    //
+    // It must be a real UUID — `claude --session-id` rejects anything else.
+    //
+    // Two places remember it, and both are load-bearing: the persisted spec
+    // (which rehydrate replays back to us), and the DB memo — which survives
+    // stopAgent deleting the spec row, so a stopped agent can still be revived
+    // into its own conversation. Per-agent ids (never `--continue`) are also what
+    // keeps two agents sharing one cwd from resuming EACH OTHER's session.
+    const knownSessionId = spec.sessionId ?? this.opts.db.agentSession(teamId, handle);
+    const sessionId = knownSessionId ?? randomUUID();
+    const resumeSession = knownSessionId !== undefined;
+    const agentSpec: AgentSpec = { ...spec, sessionId };
     // Reserve the handle up-front so a concurrent spawn of the same name loses.
-    lt.persistent.set(handle, { spec, agentId: '', busHandle: '', adapter, state: 'spawning' });
+    lt.persistent.set(handle, { spec: agentSpec, agentId: '', busHandle: '', adapter, state: 'spawning' });
     try {
       // Walkie-talkie I/O (docs/agent-io.md): the agent READS incoming from its
       // inbox file and WRITES outgoing to its outbox file; the bridge relays both.
@@ -496,6 +513,11 @@ export class TeamManager {
         model: spec.model as AgentSpawnSpec['model'],
         cwd: spec.cwd,
         env: { MAYA_AGENT_INBOX: inboxPath, MAYA_AGENT_OUTBOX: outboxPath, MAYA_AGENT_HANDLE: handle },
+        // First spawn → the adapter passes `--session-id <id>` (start THIS
+        // conversation); revive → `--resume <id>` (reopen it). Adapters with no
+        // session flags (codex/opencode) ignore both.
+        sessionId,
+        ...(resumeSession ? { resumeSession: true } : {}),
         // NO `prompt` → the adapter runs INTERACTIVE: the process stays alive and
         // is driven by bus messages (the bridge feeds @mentions in, posts out).
         permissionMode: 'auto',
@@ -541,7 +563,7 @@ export class TeamManager {
       // so there is nothing to bootstrap here.
       if (selfDriven) void adapter.send(agentHandle.id, '/maya-team').catch(() => {});
       const entry: PersistentAgent = {
-        spec,
+        spec: agentSpec,
         agentId: agentHandle.id,
         busHandle,
         adapter,
@@ -554,7 +576,13 @@ export class TeamManager {
       void this.watchPersistent(lt, handle, entry);
       // Persist the full spec so a serve restart can re-hydrate this agent
       // instead of silently losing it (INSERT OR REPLACE — safe on re-spawn).
-      this.opts.db.addStandingAgent(teamId, handle, spec);
+      // The spec now carries sessionId, so rehydrate hands it straight back to
+      // us and the restored agent resumes rather than starting over.
+      this.opts.db.addStandingAgent(teamId, handle, agentSpec);
+      // Memo the id only once the spawn actually WORKED. A spawn that died before
+      // the CLI ever wrote a session file must not leave a memo behind — the next
+      // attempt would `--resume` a conversation that never existed.
+      this.opts.db.rememberAgentSession(teamId, handle, sessionId);
       // Announce WITHOUT the leading @ so the join notice doesn't @mention (and
       // thus wake) the agent that just joined — it'd greet its own arrival.
       // Real pokes still @mention normally. (himansh's pokes come via the manager

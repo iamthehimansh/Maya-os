@@ -17,6 +17,9 @@ export class ScriptedWorkers implements AgentAdapter {
   private readonly agents = new Map<string, { handle: AgentHandle; log: EventLog }>();
   private readonly failedOnce = new Set<string>();
   spawned = 0;
+  /** Every spec this adapter was spawned with, in order — lets a test assert on
+   * what the orchestrator ACTUALLY passed down (e.g. the session id + resume flag). */
+  readonly specs: AgentSpawnSpec[] = [];
 
   async detect() {
     return { installed: true as const };
@@ -24,6 +27,7 @@ export class ScriptedWorkers implements AgentAdapter {
 
   async spawn(spec: AgentSpawnSpec): Promise<AgentHandle> {
     this.spawned += 1;
+    this.specs.push(spec);
     const id = `ag_s${this.spawned}`;
     const log = new EventLog();
     const handle: AgentHandle = {

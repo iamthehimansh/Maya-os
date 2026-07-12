@@ -157,7 +157,11 @@ export class CodexAdapter implements AgentAdapter {
 
     // Codex has no native mapping (yet) for Maya's scoping/persona options —
     // say what was dropped instead of silently running unrestricted/persona-less.
-    const ignored = ['allowedTools', 'maxTurns', 'systemPrompt', 'appendSystemPrompt'].filter(
+    // `sessionId`/`resumeSession` are set on EVERY standing agent regardless of
+    // adapter: codex exposes no "resume THIS id" flag, so it's dropped here (never
+    // forwarded as an unknown flag, which would fail the spawn). A revived codex
+    // agent comes back with a blank conversation — noted, not fatal.
+    const ignored = ['allowedTools', 'maxTurns', 'systemPrompt', 'appendSystemPrompt', 'sessionId', 'resumeSession'].filter(
       (k) => spec.options?.[k] !== undefined,
     );
     if (ignored.length > 0) {

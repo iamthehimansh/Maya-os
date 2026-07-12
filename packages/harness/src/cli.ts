@@ -9,8 +9,15 @@
  *   --auth <api|subscription>       force auth mode (default: auto-detect)
  *   --cwd <dir>                     working directory (default: process.cwd())
  *   -p, --print "<prompt>"          headless: run one prompt, print, exit
+ *   --session-id <id>               write the conversation under THIS id
+ *   --resume [id]                   reload a past session (no id = picker)
  *   --yolo                          auto-allow all gated actions (write/bash)
  *   -h, --help                      usage
+ *
+ * `--session-id` + `--resume <id>` are what make a standing team agent survivable:
+ * Maya assigns each agent a stable id at first spawn and revives it with that same
+ * id, so it reopens its OWN conversation even when several agents share a cwd
+ * (which is exactly what `--continue` can't do — it resumes whoever wrote last).
  */
 import { PROVIDER_CATALOG, createProvider } from './providers/index.js';
 import { resolveAuth } from './auth/index.js';
@@ -39,70 +46,10 @@ import { runTui } from './tui/index.js';
 import { TuiPermissionGate } from './tui/permission.js';
 import { messagesToEntries } from './tui/transcript.js';
 import { createTaskRunner } from './tasks/index.js';
-import { createSessionStore, createCommandHistory, type SessionRecord } from './session/index.js';
-import type { AuthMode, PermissionGate, PermissionRequest, ProviderId, Tool, ToolRegistry } from './types.js';
-
-interface Args {
-  provider: ProviderId;
-  model?: string;
-  auth?: AuthMode;
-  cwd: string;
-  print?: string;
-  yolo: boolean;
-  help: boolean;
-  /** Reload a specific session id, or open the resume picker when `true`. */
-  resume?: string | true;
-  /** Continue the most recently updated session. */
-  continue: boolean;
-  /** Run a workflow script that orchestrates sub-agents, then exit. */
-  workflow?: string;
-}
-
-function parseArgs(argv: string[]): Args {
-  const a: Args = { provider: 'anthropic', cwd: process.cwd(), yolo: false, help: false, continue: false };
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    const next = () => argv[++i];
-    switch (arg) {
-      case '--provider': { const v = next(); if (v) a.provider = v as ProviderId; break; }
-      case '--model': { const v = next(); if (v) a.model = v; break; }
-      case '--auth': { const v = next(); if (v) a.auth = v as AuthMode; break; }
-      case '--cwd': { const v = next(); if (v) a.cwd = v; break; }
-      case '-p': case '--print': { const v = next(); if (v !== undefined) a.print = v; break; }
-      case '--yolo': a.yolo = true; break;
-      case '--resume': {
-        // Optional id: `--resume <id>` reloads it; bare `--resume` opens the picker.
-        const peek = argv[i + 1];
-        if (peek && !peek.startsWith('-')) { a.resume = peek; i++; } else a.resume = true;
-        break;
-      }
-      case '--continue': case '-c': a.continue = true; break;
-      case '--workflow': { const v = next(); if (v) a.workflow = v; break; }
-      case '-h': case '--help': a.help = true; break;
-      default:
-        if (arg && !arg.startsWith('-') && a.print === undefined) a.print = arg;
-    }
-  }
-  return a;
-}
-
-const USAGE = `mayac — maya code, Maya's coding-agent harness
-
-Usage:
-  mayac [options]                 start the interactive TUI
-  mayac -p "<prompt>" [options]   run one prompt headless
-
-Options:
-  --provider <anthropic|openai>   provider (default: anthropic)
-  --model <id>                    model override
-  --auth <api|subscription>       auth mode (default: auto-detect)
-  --cwd <dir>                     working directory
-  -p, --print "<prompt>"          headless one-shot
-  --workflow <script.js>          run a sub-agent workflow script, then exit
-  --resume [id]                   reload a past session (no id = picker)
-  -c, --continue                  continue the most recent session
-  --yolo                          auto-allow writes/bash (no prompts)
-  -h, --help                      show this help`;
+import { createSessionStore, createCommandHistory } from './session/index.js';
+import { resolveSessionPlan } from './session/resume.js';
+import { parseArgs, USAGE } from './args.js';
+import type { AuthMode, PermissionGate, PermissionRequest, Tool, ToolRegistry } from './types.js';
 
 /** Headless gate: allow reads, deny gated actions unless --yolo. */
 function headlessGate(yolo: boolean): PermissionGate {
@@ -124,11 +71,20 @@ async function main(): Promise<void> {
 
   const headless = args.print !== undefined;
 
-  // Resolve a session to reload for --continue / --resume <id> (picker handled in-TUI).
+  // Which id do we write under, and which transcript do we start from? Covers
+  // --session-id / --resume <id> / --continue, headless AND TUI: a revived
+  // standing agent is usually headless, and it must reload its OWN conversation.
+  // Bare `--resume` (the picker) is still handled in-TUI.
   const store = createSessionStore();
-  let preload: SessionRecord | null = null;
-  if (!headless && args.continue) preload = await store.latest();
-  else if (!headless && typeof args.resume === 'string') preload = await store.load(args.resume);
+  const plan = await resolveSessionPlan({
+    store,
+    sessionId: args.sessionId,
+    resume: args.resume,
+    continue: args.continue,
+    init: { provider: args.provider, model: args.model ?? info.defaultModel, cwd: args.cwd },
+  });
+  if (plan.warning) process.stderr.write(`[session] ${plan.warning}\n`);
+  const preload = plan.preload;
 
   // A reloaded session may carry a provider that isn't in this build's catalog —
   // validate the EFFECTIVE provider, not just `--provider`, before we use it.
@@ -287,7 +243,10 @@ async function main(): Promise<void> {
   if (preload) session.loadMessages(preload.messages);
 
   if (headless) {
-    // Headless: stream one turn to stdout, then exit.
+    // Headless: stream one turn to stdout, then exit. We persist the transcript
+    // only when an id was explicitly assigned (--session-id/--resume/--continue);
+    // a plain `mayac -p` stays stateless, as before.
+    const persist = Boolean(args.sessionId) || args.resume !== undefined || args.continue;
     for await (const ev of session.run(args.print ?? '')) {
       if (ev.type === 'text_delta') process.stdout.write(ev.text);
       else if (ev.type === 'tool_call') process.stderr.write(`\n[tool] ${ev.name} ${JSON.stringify(ev.input)}\n`);
@@ -299,6 +258,14 @@ async function main(): Promise<void> {
         process.stderr.write(`[usage] in=${inputTokens} out=${outputTokens} $${ev.costUsd.toFixed(4)}\n`);
       }
     }
+    if (persist) {
+      await store
+        .save({ id: plan.record.id, provider: providerId, model, cwd: args.cwd, messages: [...session.messages] })
+        .catch((err: unknown) => {
+          // Best-effort: a failed save must never fail the turn.
+          process.stderr.write(`[session] could not save ${plan.record.id}: ${err instanceof Error ? err.message : String(err)}\n`);
+        });
+    }
     await cleanup();
     return;
   }
@@ -306,7 +273,7 @@ async function main(): Promise<void> {
   // Build the runtime services the full-screen TUI consumes.
   const history = createCommandHistory();
   await history.load();
-  const rec = preload ?? store.create({ provider: providerId, model, cwd: args.cwd });
+  const rec = plan.record;
   const initialEntries = preload ? messagesToEntries(preload.messages) : undefined;
 
   await runTui({

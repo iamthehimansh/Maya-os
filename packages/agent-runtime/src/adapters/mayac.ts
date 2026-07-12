@@ -49,6 +49,7 @@ import type {
 import { EventLog } from '../events.js';
 import { resolveCwd } from '../cwd.js';
 import { loadPty } from '../pty.js';
+import { mayacSessionExists, planSessionArgs, type SessionPlan } from '../session-args.js';
 
 export interface MayacAdapterOptions {
   /** Maya gateway base, e.g. "http://127.0.0.1:4100". Anthropic-compat at the
@@ -56,6 +57,11 @@ export interface MayacAdapterOptions {
   gatewayBaseUrl: string;
   /** Override the CLI binary (tests). */
   mayacBin?: string;
+  /**
+   * Does the installed binary understand `--session-id`? Normally probed from
+   * `--help` in detect(); set explicitly only in tests.
+   */
+  supportsSessionId?: boolean;
 }
 
 /** mayac's own provider ids (harness/src/providers/index.ts). */
@@ -130,11 +136,33 @@ export class MayacAdapter implements AgentAdapter {
           resolve({ installed: false, installHint: INSTALL_HINT });
           return;
         }
+        // Capability probe, same --help we're already paying for. We spawn the
+        // GLOBALLY INSTALLED mayac, which lags this repo: @maya-os/code@0.1.2 has
+        // --resume but NO --session-id (verified: `mayac --help | grep session-id`
+        // → 0 hits). Passing an unsupported flag there is NOT a harmless no-op —
+        // its parseArgs drops the unknown dash-flag but its `default:` branch takes
+        // the next BARE token as the prompt, so on an interactive (no -p) spawn —
+        // exactly the standing-agent shape — the raw UUID becomes the agent's FIRST
+        // TURN. That reads as a flaky agent, not a flag bug. So: only pass the flag
+        // if the binary actually advertises it. (@harness found this; confirmed here.)
+        this.sessionIdInHelp = /--session-id/.test(stdout);
         resolve({ installed: true });
       });
     });
     this.detected = result;
     return result;
+  }
+
+  /** Set by detect() from `--help`; undefined until then. */
+  private sessionIdInHelp?: boolean;
+
+  /**
+   * Whether this binary can be given a session id. Explicit test override wins;
+   * otherwise the --help probe. Before detect() has run we assume yes — spawn()
+   * always detects first, so the real path is never un-probed.
+   */
+  private supportsSessionId(): boolean {
+    return this.opts.supportsSessionId ?? this.sessionIdInHelp ?? true;
   }
 
   /** Maya's gateway is only for LOCAL models (`local/…`). Cloud models must talk
@@ -201,6 +229,28 @@ export class MayacAdapter implements AgentAdapter {
     return typeof sp === 'string' && sp.trim() ? sp : undefined;
   }
 
+  /**
+   * Session identity for a standing agent: `--session-id <id>` on first spawn,
+   * `--resume <id>` on revive, so a stopped agent comes back as the SAME
+   * conversation. mayac's store is `~/.maya-harness/sessions/<id>.json`; unlike
+   * claude it has no UUID constraint (Maya passes a UUID anyway). See
+   * ../session-args.ts. Pure — the caller surfaces `warning` once `live` exists.
+   */
+  private sessionPlan(spec: AgentSpawnSpec): SessionPlan {
+    const plan = planSessionArgs(spec, { exists: mayacSessionExists, cli: 'mayac' });
+    if (plan.args.length > 0 && !this.supportsSessionId()) {
+      // An old global binary would turn the id into the agent's first prompt —
+      // strip BOTH flags and say why. Amnesia across a revive, but a sane agent.
+      return {
+        args: [],
+        warning:
+          '[session] the installed mayac has no --session-id (upgrade @maya-os/code) — ' +
+          'running WITHOUT session persistence: this agent will not remember across a revive.',
+      };
+    }
+    return plan;
+  }
+
   /** Exposed for unit tests — argv construction is a contract with the CLI. */
   buildArgs(spec: AgentSpawnSpec): string[] {
     if (spec.prompt === undefined) {
@@ -212,6 +262,7 @@ export class MayacAdapter implements AgentAdapter {
     // Headless mayac DENIES every gated action (write/bash) unless --yolo — an
     // 'auto' agent without it can read but never edit, the silent half-failure.
     if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--yolo');
+    args.push(...this.sessionPlan(spec).args);
     const preamble = this.preamble(spec);
     args.push('-p', preamble ? `${preamble}\n\n---\n\n${spec.prompt}` : spec.prompt);
     return args;
@@ -223,6 +274,7 @@ export class MayacAdapter implements AgentAdapter {
     args.push('--auth', this.useSubscription(spec) ? 'subscription' : 'api');
     if (spec.cwd) args.push('--cwd', spec.cwd);
     if ((spec.permissionMode ?? 'auto') === 'auto') args.push('--yolo');
+    args.push(...this.sessionPlan(spec).args);
     return args;
   }
 
@@ -424,6 +476,12 @@ export class MayacAdapter implements AgentAdapter {
     };
     this.agents.set(id, live);
 
+    // Did we actually reload a prior conversation, or are we starting clean?
+    // Drives BOTH the warning below and whether the persona is re-typed.
+    const plan = this.sessionPlan(spec);
+    const resumed = plan.args[0] === '--resume';
+    if (plan.warning) this.pushLog(live, 'system', plan.warning);
+
     const killPty = (): void => {
       try {
         p.kill();
@@ -485,6 +543,13 @@ export class MayacAdapter implements AgentAdapter {
     // Queued through sendChain, so it lands after the TUI renders and BEFORE any
     // channel message the bridge types in.
     //
+    // NOT on a successful resume: the persona is already the first turn of the
+    // reloaded transcript. Re-typing it would burn a turn re-answering "reply with
+    // ONE short line to confirm" — and its "do not explore or change anything now"
+    // frame would stall an agent that was mid-task when it was stopped. A degraded
+    // revive (transcript gone → fresh session, `resumed` false) DOES re-send it:
+    // that agent has no persona at all and would otherwise come back inert.
+    //
     // The FRAME matters, and both halves of it are load-bearing (observed on a
     // live haiku agent without them): a bare persona reads as a TASK, so the agent
     // went off exploring its cwd and asked "what do you want me to do?"; and when
@@ -493,7 +558,7 @@ export class MayacAdapter implements AgentAdapter {
     // never reached the room. Say "standing contract, not a task" and "absolute
     // paths only" explicitly.
     const preamble = this.preamble(spec);
-    if (preamble) {
+    if (preamble && !resumed) {
       const framed =
         '[STANDING INSTRUCTIONS — your operating contract, NOT a task. Do not explore or change anything now: ' +
         'reply with ONE short line to confirm, then wait for messages. When these instructions give you a file ' +

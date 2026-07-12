@@ -146,7 +146,10 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     // OpenCode has no native mapping (yet) for Maya's scoping/persona options —
     // say what was dropped instead of silently running unrestricted/persona-less.
-    const ignored = ['allowedTools', 'maxTurns', 'systemPrompt', 'appendSystemPrompt'].filter(
+    // `sessionId`/`resumeSession` ride on every standing agent regardless of
+    // adapter; opencode has no "resume THIS id" flag, so they're dropped rather
+    // than forwarded as unknown flags (which would fail the spawn).
+    const ignored = ['allowedTools', 'maxTurns', 'systemPrompt', 'appendSystemPrompt', 'sessionId', 'resumeSession'].filter(
       (k) => spec.options?.[k] !== undefined,
     );
     if (ignored.length > 0) {

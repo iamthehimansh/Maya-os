@@ -43,6 +43,23 @@ export interface AgentSpawnSpec {
   bus?: { wsBase: string; channelId: string; tokenEnv: string; handle?: string };
   /** "ask" = tool-permission prompts on; "auto" = adapter's skip-permissions mode. */
   permissionMode?: 'ask' | 'auto';
+  /**
+   * Stable conversation id for a STANDING agent — what makes a revived agent the
+   * SAME agent rather than a blank one. The orchestrator mints it once (a UUID:
+   * `claude --session-id` accepts nothing else) and persists it, so it survives a
+   * stop, a drain, and a serve restart.
+   *
+   * Deliberately NOT `--continue`: teammates share one `cwd`, and continue resumes
+   * the most recent conversation *in that directory* — agents would come back as
+   * each OTHER. Adapters with no equivalent (codex, opencode) ignore this.
+   */
+  sessionId?: string;
+  /**
+   * absent/false = FIRST spawn → the CLI writes the conversation under `sessionId`.
+   * true = REVIVE → reload that exact conversation. The orchestrator decides (only
+   * it knows whether the id came back from the DB); adapters never guess.
+   */
+  resumeSession?: boolean;
   /** Adapter-specific extras (auth method, CLI flags). Adapters validate. */
   options?: Record<string, unknown>;
 }
