@@ -32,10 +32,25 @@ export const KEY = {
   backspace: '\x7f',
 };
 
+/**
+ * The injection queue, handed to a RunImpl so it can flush steers at the same
+ * boundaries the real loop does. Tests drive this explicitly — `take('tool_result')`
+ * where the real loop appends steers to the user message carrying that step's
+ * tool results — so the App is exercised against the true event stream rather
+ * than a stubbed one.
+ */
+export interface InjectCtx {
+  /** Drain the queue, returning the `injected` events to yield at this boundary. */
+  take(at: 'tool_result' | 'new_turn' | 'turn_start'): LoopEvent[];
+  /** Steers still queued (mirrors `Session.pendingInjections`). */
+  count(): number;
+}
+
 export type RunImpl = (
   text: string,
   signal: AbortSignal | undefined,
   callIndex: number,
+  inject: InjectCtx,
 ) => AsyncGenerator<LoopEvent>;
 
 export interface FakeSession extends Session {
@@ -55,6 +70,28 @@ export function makeSession(run: RunImpl, over: Partial<SessionState> = {}): Fak
   };
   let messages: ModelMessage[] = [];
   let calls = 0;
+  // A real queue, not a stub: the App's steering path is only meaningful if
+  // inject() actually holds a message and a boundary actually flushes it.
+  let pending: string[] = [];
+  const textOf = (input: unknown): string =>
+    typeof input === 'string'
+      ? input
+      : Array.isArray(input)
+        ? input.map((b) => (b && typeof b === 'object' && 'text' in b ? String(b.text) : '')).join('')
+        : '';
+  let lastDrained: string[] = [];
+  const inject: InjectCtx = {
+    take(at) {
+      const drained = pending;
+      pending = [];
+      lastDrained = drained;
+      // Mirrors the loop: the steer's text joins the message at this boundary,
+      // and each one gets its own event, in FIFO order.
+      if (drained.length) messages.push({ role: 'user', content: drained.map((t) => ({ type: 'text', text: t })) });
+      return drained.map((text) => ({ type: 'injected', text, at }) as LoopEvent);
+    },
+    count: () => pending.length,
+  };
   const session: FakeSession = {
     _state: state,
     get state() {
@@ -63,13 +100,30 @@ export function makeSession(run: RunImpl, over: Partial<SessionState> = {}): Fak
     get messages() {
       return messages;
     },
-    run(input, opts) {
-      const text = typeof input === 'string' ? input : '';
-      messages.push({ role: 'user', content: [{ type: 'text', text }] });
-      return run(input as never, opts?.signal, calls++);
+    get pendingInjections() {
+      return pending.length;
     },
-    inject() {
-      return 0;
+    run(input, opts) {
+      const callIndex = calls++;
+      const impl = run;
+      return (async function* () {
+        // Head-of-run flush, exactly like the real loop: queued steers (a cron
+        // wake, or one left over from an Esc'd turn) ride AHEAD of this run's
+        // user message, and are tagged `turn_start`.
+        yield* inject.take('turn_start');
+        const flushed = lastDrained.join('\n');
+        // `run()` with no input = flush-only; it must not push an empty message.
+        if (input !== undefined) messages.push({ role: 'user', content: [{ type: 'text', text: textOf(input) }] });
+        // What the model is actually answering. The input is passed through
+        // VERBATIM (a string, or the raw content blocks) so impls can assert on
+        // image blocks. With no input, it's the steer that was flushed ahead of
+        // this run — the post-abort case, where the queued message IS the prompt.
+        yield* impl((input !== undefined ? input : flushed) as never, opts?.signal, callIndex, inject);
+      })();
+    },
+    inject(input) {
+      pending.push(textOf(input));
+      return pending.length;
     },
     async compact() {
       return null;

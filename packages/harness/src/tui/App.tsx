@@ -159,10 +159,15 @@ export interface TermWriter {
   isTTY?: boolean;
 }
 
-/** A message queued while a turn is running (may carry attachments). */
-interface QueuedMsg {
-  content: RunInput;
-  /** Plain text for the queued-chip + transcript echo. */
+/**
+ * A message submitted mid-turn — a live steer, not a queued turn. It is handed
+ * straight to `session.inject()`, which lands it at the model's next tool-result
+ * boundary. We keep it here only to draw the chip: the session owns the queue,
+ * and the chip clears the moment its `injected` event tells us it reached the
+ * model. FIFO, so each `injected` event retires the head.
+ */
+interface SteerMsg {
+  /** Plain text for the chip + the inline transcript echo. */
   display: string;
   /** Attachment chip labels to echo alongside the text. */
   chips: string[];
@@ -339,8 +344,9 @@ export function App(props: AppProps): React.ReactElement {
   const [acIndex, setAcIndex] = useState(0);
   const [acDismissed, setAcDismissed] = useState(false);
   const [histIdx, setHistIdx] = useState(-1);
-  const [queued, setQueued] = useState<QueuedMsg[]>([]);
-  const queuedRef = useRef<QueuedMsg[]>([]);
+  // In-flight steers, for the chip only — the session owns the actual queue.
+  const [steering, setSteering] = useState<SteerMsg[]>([]);
+  const steeringRef = useRef<SteerMsg[]>([]);
 
   // ── attachments (drag & paste) staged for the next submit ──
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -495,6 +501,40 @@ export function App(props: AppProps): React.ReactElement {
           l.map((e) => (e.kind === 'tool' && e.id === ev.id ? { ...e, output: ev.output, isError: ev.isError ?? false, done: true } : e)),
         );
         break;
+      // A steer reached the model mid-turn. Render it inline at the point it
+      // landed, so the transcript shows exactly where it took effect relative to
+      // the tool calls — the reader can see what the model had already done when
+      // the steer arrived. `text_delta` only extends the last entry when that
+      // entry is a *streaming assistant*, so dropping a user entry here also
+      // splits the assistant's text around it for free.
+      case 'injected': {
+        // Retire the chip this event belongs to. FIFO — but only if the head
+        // actually matches: injections also arrive from cron/`/schedule` wakes,
+        // which never had a chip and must not retire someone else's.
+        const head = steeringRef.current[0];
+        const mine = head && head.display === ev.text;
+        if (mine) {
+          steeringRef.current.shift();
+          setSteering([...steeringRef.current]);
+        }
+        const entry: Entry = {
+          kind: 'user',
+          text: ev.text,
+          ...(mine && head.chips.length ? { attachments: head.chips } : {}),
+        };
+        setEntries((l) => {
+          // `turn_start` injections flush AHEAD of this run's user input, so if we
+          // already echoed that input the steer belongs *before* it — otherwise the
+          // transcript would contradict the message order the model actually saw.
+          // With no such entry (the post-abort auto-run), plain append is right.
+          const last = l[l.length - 1];
+          if (ev.at === 'turn_start' && last && last.kind === 'user') {
+            return [...l.slice(0, -1), entry, last];
+          }
+          return [...l, entry];
+        });
+        break;
+      }
       case 'usage':
         refreshSnap();
         break;
@@ -511,9 +551,11 @@ export function App(props: AppProps): React.ReactElement {
     }
   }, [append, refreshSnap]);
 
-  // ── run one user turn (with queue drain + interrupt) ──
+  // ── run one turn (steers land mid-turn; interrupt leaves them queued) ──
+  // `content` omitted = run whatever the session still has queued, with no new
+  // user message of our own (the post-abort flush below).
   const send = useCallback(
-    async (content: RunInput) => {
+    async (content?: RunInput) => {
       setBusy(true);
       const ac = new AbortController();
       abortRef.current = ac;
@@ -527,13 +569,12 @@ export function App(props: AppProps): React.ReactElement {
         setBusy(false);
         refreshSnap();
         void store.save({ id: sessionId, provider: session.state.provider, model: session.state.model, cwd, messages: [...session.messages] }).catch(() => {});
-        // Drain the next queued message, if any.
-        const next = queuedRef.current.shift();
-        setQueued([...queuedRef.current]);
-        if (next !== undefined) {
-          append({ kind: 'user', text: next.display, ...(next.chips.length ? { attachments: next.chips } : {}) });
-          void send(next.content);
-        }
+        // A steer only survives the turn if the turn was interrupted before it
+        // reached a tool boundary — Esc aborts the work, not the message. Run it
+        // now, so "stop, do X instead" still gets answered without the user
+        // having to retype it. The session still owns the queue: we pass no
+        // content and it flushes what it holds.
+        if (session.pendingInjections > 0) void send();
       }
     },
     [session, applyEvent, append, refreshSnap, store, sessionId, cwd],
@@ -868,13 +909,19 @@ export function App(props: AppProps): React.ReactElement {
     setAttachments([]);
     if (text) cmdHistory.add(text);
     if (busy) {
-      queuedRef.current.push({ content, display: text, chips });
-      setQueued([...queuedRef.current]);
+      // Steer the turn in flight rather than waiting it out: the session lands
+      // this at the model's next tool-result boundary. We don't echo it into the
+      // transcript here — the `injected` event does that when it actually reaches
+      // the model, so the chip's disappearance and the transcript entry both mark
+      // the real landing point rather than the moment we typed it.
+      session.inject(content);
+      steeringRef.current.push({ display: text, chips });
+      setSteering([...steeringRef.current]);
       return;
     }
     append({ kind: 'user', text, ...(chips.length ? { attachments: chips } : {}) });
     void send(content);
-  }, [input, attachments, busy, handleSlash, cmdHistory, append, send]);
+  }, [input, attachments, busy, handleSlash, cmdHistory, append, send, session]);
 
   // ── tool focus helpers ──
   const revealTool = useCallback((id: string) => {
@@ -1181,13 +1228,17 @@ export function App(props: AppProps): React.ReactElement {
               ))}
             </Box>
           ) : null}
-          {queued.length ? (
+          {/* Not "queued until the turn ends" — these are in flight. Each chip
+              clears as its message reaches the model, so the row answers "has my
+              steer landed yet?" on its own. */}
+          {steering.length ? (
             <Box>
-              <Text color={theme.muted}>queued: </Text>
-              {queued.map((q, i) => {
+              <Text color={theme.accent}>⚡ steering: </Text>
+              {steering.map((q, i) => {
                 const label = q.display || (q.chips.length ? q.chips.join(', ') : '(attachment)');
                 return <Text key={i} color={theme.warn}>[{label.length > 24 ? label.slice(0, 23) + '…' : label}] </Text>;
               })}
+              <Text color={theme.muted} dimColor>→ lands at the next tool call</Text>
             </Box>
           ) : null}
           {selectedTool ? (
@@ -1199,11 +1250,11 @@ export function App(props: AppProps): React.ReactElement {
               {before}
               <Text inverse>{at}</Text>
               {after}
-              {input.length === 0 ? <Text color={theme.muted}>{busy ? 'working… (type to queue · Esc to interrupt)' : 'ask, or /help'}</Text> : null}
+              {input.length === 0 ? <Text color={theme.muted}>{busy ? 'working… (type to steer · Esc to interrupt)' : 'ask, or /help'}</Text> : null}
             </Text>
           </Box>
           <Text color={theme.muted}>
-            {confirmExit ? 'press ctrl+c again to exit' : below ? '▼ new output below — PgDn/Esc to jump' : busy ? 'streaming — Esc interrupts · type to queue' : '/help · PgUp/PgDn scroll · Ctrl+P focus tool · Ctrl+Space copy mode · /copy last reply · ctrl+c exit'}
+            {confirmExit ? 'press ctrl+c again to exit' : below ? '▼ new output below — PgDn/Esc to jump' : busy ? 'streaming — type to steer (lands at the next tool call) · Esc interrupts' : '/help · PgUp/PgDn scroll · Ctrl+P focus tool · Ctrl+Space copy mode · /copy last reply · ctrl+c exit'}
           </Text>
           {/* Its own row: the selection story has to be readable at a glance in
               every state, not only when the hint above happens to be idle. */}

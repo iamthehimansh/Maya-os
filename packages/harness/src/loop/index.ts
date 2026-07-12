@@ -102,8 +102,12 @@ class SessionImpl implements Session {
   private readonly cfg: CreateSessionConfig;
   /** Live tool set — read on every turn so post-startup tools (MCP, agents) land. */
   private readonly registry: ToolRegistry;
-  /** Messages queued by `inject()` (cron/schedule wakes), flushed on next run(). */
-  private readonly pendingInjections: string[] = [];
+  /**
+   * Messages queued by `inject()` — a TUI steer typed mid-turn, or a cron wake.
+   * Flushed at the next tool-result boundary while a turn is in flight (see
+   * `takeInjections`), else at the head of the next run().
+   */
+  private readonly injections: ContentBlock[][] = [];
 
   constructor(cfg: CreateSessionConfig) {
     this.cfg = cfg;
@@ -191,9 +195,34 @@ class SessionImpl implements Session {
     };
   }
 
-  inject(text: string): number {
-    this.pendingInjections.push(text);
-    return this.pendingInjections.length;
+  inject(input: RunInput): number {
+    // Drop empty content rather than queue it: it would eventually be pushed as an
+    // empty user message, which the API rejects. A blank steer is a no-op.
+    const blocks = toBlocks(input);
+    if (blocks.length) this.injections.push(blocks);
+    return this.injections.length;
+  }
+
+  get pendingInjections(): number {
+    return this.injections.length;
+  }
+
+  /**
+   * Drain the injection queue into content blocks + the `injected` events that
+   * announce where they landed. Order is preserved, one event per message, so
+   * the TUI can retire one steering chip per event.
+   */
+  private takeInjections(at: 'tool_result' | 'new_turn' | 'turn_start'): {
+    blocks: ContentBlock[];
+    events: LoopEvent[];
+  } {
+    const blocks: ContentBlock[] = [];
+    const events: LoopEvent[] = [];
+    for (const msg of this.injections.splice(0)) {
+      blocks.push(...msg);
+      events.push({ type: 'injected', text: displayText(msg), at });
+    }
+    return { blocks, events };
   }
 
   async compact(): Promise<{ before: number; after: number } | null> {
@@ -227,15 +256,35 @@ class SessionImpl implements Session {
     }
   }
 
-  async *run(input: RunInput, opts?: import('../types.js').RunOptions): AsyncIterable<LoopEvent> {
+  async *run(input?: RunInput, opts?: import('../types.js').RunOptions): AsyncIterable<LoopEvent> {
     const signal = opts?.signal;
-    // Deliver any queued wakes (cron/schedule) ahead of this turn.
-    for (const inj of this.pendingInjections.splice(0)) {
-      this.messages.push({ role: 'user', content: [{ type: 'text', text: inj }] });
+    // Deliver anything queued while we were idle — a cron wake, or a steer that
+    // was typed into a turn that got interrupted — ahead of this turn's text.
+    // These events are tagged `turn_start`: they precede this run's user input in
+    // `messages`, so the TUI renders them ahead of that input's entry too.
+    const head = this.takeInjections('turn_start');
+    // Guard the yield*: delegating to an EMPTY iterable still costs a microtask
+    // tick (async-generator delegation awaits the inner next()), and that tick is
+    // enough for a synchronous abort() to land before the first turn's aborted
+    // check — silently changing when an interrupt takes effect. Only yield if we
+    // actually have something to announce.
+    if (head.blocks.length) {
+      this.messages.push({ role: 'user', content: head.blocks });
+      yield* head.events;
     }
-    const content: ContentBlock[] =
-      typeof input === 'string' ? [{ type: 'text', text: input }] : input.map((b) => b);
-    this.messages.push({ role: 'user', content });
+
+    // `input` is optional: after an Esc the TUI re-drives the turn with no new
+    // text purely to deliver the steer the user typed into the aborted turn
+    // ("stop — do X instead"), which the flush above just pushed. Sending an
+    // empty user message instead would be rejected by the API, so we send none.
+    const blocks = input === undefined ? [] : toBlocks(input);
+    if (blocks.length) this.messages.push({ role: 'user', content: blocks });
+
+    // Nothing to say and nothing queued — don't re-stream the last assistant turn.
+    if (!head.blocks.length && !blocks.length) {
+      yield { type: 'turn_end', stopReason: 'end_turn', usage: this.cumulativeUsage, costUsd: this.cumulativeCost };
+      return;
+    }
 
     const maxTurns = this.cfg.maxTurns ?? DEFAULT_MAX_TURNS;
     let turnUsage: Usage = { inputTokens: 0, outputTokens: 0 };
@@ -289,6 +338,17 @@ class SessionImpl implements Session {
         if (assistantBlocks.length) this.messages.push({ role: 'assistant', content: assistantBlocks });
 
         if (toolCalls.length === 0) {
+          // The model is done calling tools, so there is no tool-result boundary
+          // left to ride in on. A steer typed at the tail of the turn becomes a
+          // fresh user turn and we keep looping — it gets answered rather than
+          // waiting for the next run(). An interrupt takes priority: leave the
+          // queue alone and let the next run() deliver it.
+          if (this.injections.length > 0 && !signal?.aborted) {
+            const { blocks, events } = this.takeInjections('new_turn');
+            this.messages.push({ role: 'user', content: blocks });
+            yield* events;
+            continue;
+          }
           yield { type: 'turn_end', stopReason, usage: this.cumulativeUsage, costUsd: this.cumulativeCost };
           return;
         }
@@ -324,7 +384,21 @@ class SessionImpl implements Session {
           resultBlocks.push({ type: 'tool_result', toolCallId: tc.id, content: output, isError });
           yield { type: 'tool_result', id: tc.id, output, isError };
         }
-        this.messages.push({ role: 'user', content: resultBlocks });
+
+        // ── mid-turn steering ──
+        // This is the boundary a steer lands on. After a tool_use, the next
+        // message MUST be the user message carrying the tool_result blocks — but
+        // that message may carry more blocks, so the steer rides along AFTER the
+        // results, in the SAME message. The tool_use/tool_result pairing stays
+        // intact and the model reads the steer before choosing its next step.
+        // (The OpenAI adapter fans this out to function_call_output items followed
+        // by a user message, which is that API's equivalent shape.)
+        // Skipped on abort — an interrupted turn delivers the steer on the next run().
+        const steer = signal?.aborted
+          ? { blocks: [] as ContentBlock[], events: [] as LoopEvent[] }
+          : this.takeInjections('tool_result');
+        this.messages.push({ role: 'user', content: [...resultBlocks, ...steer.blocks] });
+        yield* steer.events;
 
         if (signal?.aborted) {
           yield { type: 'turn_end', stopReason: 'stop', usage: this.cumulativeUsage, costUsd: this.cumulativeCost };
@@ -402,6 +476,20 @@ class SessionImpl implements Session {
     this.lastContextTokens = after;
     yield { type: 'compacted', before, after };
   }
+}
+
+/** Empty text is not content — an empty user message is rejected by the API. */
+function toBlocks(input: RunInput): ContentBlock[] {
+  if (typeof input === 'string') return input ? [{ type: 'text', text: input }] : [];
+  return input.map((b) => b);
+}
+
+/** Text of a user message, for the `injected` event the TUI renders inline. */
+function displayText(blocks: readonly ContentBlock[]): string {
+  return blocks
+    .filter((b): b is import('../types.js').TextBlock => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
 }
 
 function transcriptText(messages: readonly ModelMessage[]): string {

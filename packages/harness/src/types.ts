@@ -298,6 +298,20 @@ export type LoopEvent =
   | { type: 'usage'; usage: Usage; costUsd: number }
   | { type: 'compacted'; before: number; after: number }
   | { type: 'error'; message: string }
+  /**
+   * A message queued with `Session.inject()` reached the model. Emitted at the
+   * exact point in the stream where it landed, so the TUI can render it inline
+   * in the transcript and the reader sees where the steer took effect. `at` says
+   * WHERE it landed — and the three cases want different rendering:
+   *   `tool_result` — mid-turn steer: appended to the user message carrying that
+   *                   step's tool results. Render inline, after those tools.
+   *   `new_turn`    — the model had stopped calling tools, so it was delivered as
+   *                   its own fresh user turn and the loop kept going. Append.
+   *   `turn_start`  — flushed at the head of `run()` (a cron wake, or a steer left
+   *                   over from an interrupted turn). It rides AHEAD of this run's
+   *                   user input, so render it BEFORE that user entry, not after.
+   */
+  | { type: 'injected'; text: string; at: 'tool_result' | 'new_turn' | 'turn_start' }
   /** Terminal event for a run — the assistant is done responding this turn. */
   | { type: 'turn_end'; stopReason: StopReason; usage: Usage; costUsd: number };
 
@@ -327,18 +341,29 @@ export interface Session {
    * Run one user turn; streams assistant text, tool calls/results, then turn_end.
    * `input` is a plain string OR ordered content blocks (text + image
    * attachments) so the TUI can attach pasted/dragged images to the turn.
+   *
+   * `input` may be omitted to run with no new user text — used after an Esc to
+   * deliver a steer the user typed into the turn they just interrupted ("stop —
+   * do X instead"): the pending injections are flushed and the model answers
+   * them. With nothing queued and no input, the run is a no-op.
    */
-  run(input: RunInput, opts?: RunOptions): AsyncIterable<LoopEvent>;
+  run(input?: RunInput, opts?: RunOptions): AsyncIterable<LoopEvent>;
   /** Full transcript so far (for /clear, compaction, inspection). */
   readonly messages: readonly ModelMessage[];
   /** Live snapshot for the header/meter. */
   readonly state: SessionState;
   /**
-   * Queue a message to be delivered to the model on the NEXT `run()` (e.g. a
-   * cron/schedule tool firing a wake). Injected messages ride ahead of the next
-   * user turn's text. Returns the pending-injection count.
+   * Queue a message for the model. This is live steering: if a turn is in
+   * flight, it lands at the NEXT tool-result boundary — appended to the same
+   * user message that carries the tool_result blocks — so the model sees it
+   * before it takes its next step, without aborting the turn. If the model has
+   * stopped calling tools, it is delivered as a fresh user turn instead; if the
+   * turn was interrupted (Esc), it rides ahead of the next `run()`. It is never
+   * dropped. Also used by cron/`/schedule` wakes. Returns the pending count.
    */
-  inject(text: string): number;
+  inject(input: RunInput): number;
+  /** Messages queued by `inject()` that have not reached the model yet. */
+  readonly pendingInjections: number;
   /** Force a compaction pass now (the `/compact` command). Returns before/after token counts, or null if nothing was compacted. */
   compact(): Promise<{ before: number; after: number } | null>;
 

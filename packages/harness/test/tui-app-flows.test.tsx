@@ -24,7 +24,7 @@ describe('send-while-working queue + Esc interrupt', () => {
     }
   }
 
-  it('queues a message typed mid-turn, Esc interrupts, then the queued message runs', async () => {
+  it('steers a message typed mid-turn, Esc interrupts, then the pending message runs', async () => {
     const { stdin, lastFrame } = renderApp(makeSession(run), { rows: 30 });
     await delay();
 
@@ -33,16 +33,18 @@ describe('send-while-working queue + Esc interrupt', () => {
     await delay(40);
     expect(lastFrame()).toContain('working…');
 
-    // Type another message while busy → it queues (chip shown), not sent yet.
+    // Type another message while busy → it goes to the session as a steer (chip
+    // shown). This turn calls no tools, so it has no boundary to land on yet.
     await typeSeq(stdin, ['second', KEY.enter]);
     await delay(40);
-    expect(lastFrame()).toContain('queued');
+    expect(lastFrame()).toContain('⚡ steering');
     expect(lastFrame()).toContain('second');
     expect(lastFrame()).not.toContain('reply to second');
 
-    // Esc interrupts the running turn; the queue then drains and runs "second".
+    // Esc interrupts the running turn. The pending message is not work — it
+    // survives the abort and runs, exactly as it did before steering existed.
     stdin.write(KEY.esc);
-    await delay(160);
+    await delay(200);
     const f = lastFrame()!;
     expect(f).toContain('interrupted.');
     expect(f).toContain('reply to second');
