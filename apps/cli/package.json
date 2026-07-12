@@ -1,7 +1,7 @@
 {
   "name": "maya-os",
-  "version": "0.1.0",
-  "description": "Local-first AI OS for developers \u2014 model gateway with RAM guardrails, real-PTY Claude Code agent teams, proactive agents, verified loops, web dashboard. One command: maya serve.",
+  "version": "0.1.1",
+  "description": "Local-first AI OS for developers — model gateway with RAM guardrails, real-PTY Claude Code agent teams, proactive agents, verified loops, web dashboard. One command: maya serve.",
   "license": "MIT",
   "author": "Himansh Raj <iamthehimansh@gmail.com>",
   "type": "module",
